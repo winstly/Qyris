@@ -1,0 +1,26 @@
+appId: com.qyris.app
+productName: 轻驭
+directories:
+  buildResources: build
+  output: dist
+# 复用 node_modules 内已下载的 Electron 发行版，避免打包时二次下载
+electronDist: node_modules/electron/dist
+# 产物自包含（主进程依赖已 bundle 进 out/），无需携带 node_modules
+files:
+  - out/**
+  - package.json
+asar: true
+win:
+  target: nsis
+  icon: build/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+mac:
+  target: dmg
+  icon: build/icon.png
+linux:
+  target:
+    - AppImage
+    - deb
+  icon: build/icon.png

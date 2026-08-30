@@ -1,0 +1,301 @@
+/**
+ * 全局应用状态：Tab、面板比例、当前项目、设置、内联对话框（prompt/confirm）。
+ * UI 偏好经 localStorage 持久化；业务配置经后端 config.json 持久化。
+ */
+import { create } from 'zustand'
+import { persist } from 'zustand/middleware'
+import { api, isDesktop } from '@/services/desktop'
+import { SECRET_KEY } from '@/services/ai'
+import { basename } from '@/utils/path'
+import { useFileStore } from './useFileStore'
+import { useBuildStore } from './useBuildStore'
+import { useChatStore } from './useChatStore'
+import type { AiSettings, ChatMessage, RecentProject, SkillMeta } from '@/types'
+
+export interface DialogCheck {
+  id: string
+  label: string
+  checked?: boolean
+}
+
+export interface DialogRequest {
+  kind: 'prompt' | 'confirm' | 'alert'
+  title: string
+  message?: string
+  value?: string
+  checks?: DialogCheck[]
+  resolve: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
+}
+
+export const DEFAULT_SETTINGS: AiSettings = {
+  baseUrl: 'https://api.openai.com/v1',
+  model: 'gpt-4o-mini',
+  provider: 'openai',
+}
+
+export type Theme = 'system' | 'light' | 'dark'
+
+interface AppState {
+  booted: boolean
+  activeTab: 'preview' | 'files' | 'history'
+  /** 工作区占宽比例（拖拽分割线调节，工作区 ≥ 500px / 对话栏 ≥ 300px 由组件层钳制） */
+  splitRatio: number
+  /** 文件 Tab 内文件树占比 */
+  filesSplitRatio: number
+
+  projectPath: string | null
+  projectName: string
+  settingsOpen: boolean
+  settings: AiSettings
+  hasApiKey: boolean
+  dialog: DialogRequest | null
+  /** 主题偏好：system 跟随系统（白天浅/晚上深）、light、dark */
+  theme: Theme
+  /** 历史工程列表 */
+  recentProjects: RecentProject[]
+  /** Skills 目录路径 */
+  skillsDir: string | null
+  /** 已扫描的 skill 摘要列表 */
+  skillMetas: SkillMeta[]
+
+  setTab: (t: 'preview' | 'files' | 'history') => void
+  setSplitRatio: (r: number) => void
+  setFilesSplitRatio: (r: number) => void
+  setSettingsOpen: (open: boolean) => void
+  setTheme: (theme: Theme) => void
+  saveSettings: (s: AiSettings) => Promise<void>
+  refreshHasApiKey: () => Promise<void>
+  boot: () => Promise<void>
+  openProjectDialog: () => Promise<void>
+  openProject: (path: string) => Promise<void>
+  removeRecentProject: (path: string) => void
+  setSkillsDir: (dir: string | null) => void
+  loadSkills: () => Promise<void>
+  showPrompt: (title: string, value?: string) => Promise<string | null>
+  showConfirm: (title: string, message?: string, checks?: DialogCheck[]) => Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>
+  showAlert: (title: string, message?: string) => Promise<void>
+  resolveDialog: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
+}
+
+export const useAppStore = create<AppState>()(
+  persist(
+    (set, get) => ({
+      booted: false,
+      activeTab: 'preview',
+      splitRatio: 0.74,
+      filesSplitRatio: 0.26,
+      projectPath: null,
+      projectName: '',
+      settingsOpen: false,
+      settings: DEFAULT_SETTINGS,
+      hasApiKey: false,
+      dialog: null,
+      theme: 'system',
+      recentProjects: [],
+      skillsDir: null,
+      skillMetas: [],
+
+      setTab: (t) => set({ activeTab: t }),
+      setSplitRatio: (r) => set({ splitRatio: Math.min(0.85, Math.max(0.5, r)) }),
+      setFilesSplitRatio: (r) => set({ filesSplitRatio: Math.min(0.5, Math.max(0.15, r)) }),
+      setSettingsOpen: (open) => set({ settingsOpen: open }),
+      setTheme: (theme) => set({ theme }),
+
+      saveSettings: async (s) => {
+        set({ settings: s })
+        if (!isDesktop) return
+        try {
+          await api.setConfig({
+            lastProjectPath: get().projectPath,
+            aiBaseUrl: s.baseUrl,
+            aiModel: s.model,
+            aiProvider: s.provider,
+            recentProjects: get().recentProjects,
+            skillsDir: get().skillsDir,
+          })
+        } catch { /* 配置盘写失败不阻塞界面 */ }
+      },
+
+      refreshHasApiKey: async () => {
+        if (!isDesktop) return
+        try {
+          set({ hasApiKey: await api.hasSecret(SECRET_KEY) })
+        } catch { /* keychain 不可用时不阻塞 */ }
+      },
+
+      boot: async () => {
+        if (!isDesktop) {
+          set({ booted: true })
+          return
+        }
+        try {
+          const cfg = await api.getConfig()
+          set({
+            settings: {
+              baseUrl: cfg.aiBaseUrl || DEFAULT_SETTINGS.baseUrl,
+              model: cfg.aiModel || DEFAULT_SETTINGS.model,
+              provider: cfg.aiProvider || DEFAULT_SETTINGS.provider,
+            },
+            recentProjects: cfg.recentProjects ?? [],
+            skillsDir: cfg.skillsDir ?? null,
+          })
+          // 扫描 skills 目录（异步，不阻塞启动）
+          if (cfg.skillsDir) {
+            void get().loadSkills()
+          }
+          // 记住上次打开的项目目录：启动时自动恢复
+          if (cfg.lastProjectPath) {
+            try {
+              await get().openProject(cfg.lastProjectPath)
+            } catch { /* 目录已失效，静默跳过 */ }
+          }
+        } finally {
+          await get().refreshHasApiKey()
+          set({ booted: true })
+        }
+      },
+
+      openProjectDialog: async () => {
+        if (!isDesktop) return
+        const picked = await api.pickDirectory()
+        if (typeof picked === 'string') {
+          try {
+            await get().openProject(picked)
+          } catch (e) {
+            console.error('打开项目失败：', e)
+            void get().showAlert('无法打开项目', String(e))
+          }
+        }
+      },
+
+      openProject: async (projectPath) => {
+        // 先校验目录可读（失败则抛错给调用方）
+        await api.listDir(projectPath, projectPath)
+        // 切换项目前必须清理：杀掉全部服务子进程 + 停止 watcher + 清空进程槽
+        await api.stopProject().catch(() => {})
+        await api.stopWatching().catch(() => {})
+        useBuildStore.getState().reset()
+
+        set({ projectPath: projectPath, projectName: basename(projectPath) })
+        await useFileStore.getState().openProject(projectPath)
+        await api.startWatching(projectPath)
+
+        // 加载该项目的会话历史（有则恢复，无则清空）
+        try {
+          const history = await api.loadSession(projectPath)
+          if (history && history.length) {
+            useChatStore.getState().restore(history as ChatMessage[])
+          } else {
+            useChatStore.getState().clear()
+          }
+        } catch { /* 会话加载失败忽略 */ }
+
+        // 更新历史工程列表：插入头部、去重、截断 20 条
+        const now = Date.now()
+        const prev = get().recentProjects.filter((p) => p.path !== projectPath)
+        const updated: RecentProject[] = [
+          { path: projectPath, name: basename(projectPath), lastOpened: now },
+          ...prev,
+        ].slice(0, 20)
+        set({ recentProjects: updated })
+
+        try {
+          const s = get().settings
+          await api.setConfig({
+            lastProjectPath: projectPath,
+            aiBaseUrl: s.baseUrl,
+            aiModel: s.model,
+            aiProvider: s.provider,
+            recentProjects: updated,
+            skillsDir: get().skillsDir,
+          })
+        } catch { /* 忽略配置写失败 */ }
+
+        // 窗口标题显示当前项目名
+        api.setWindowTitle(`${basename(projectPath)} — 轻驭`).catch(() => {})
+      },
+
+      removeRecentProject: (projectPath) => {
+        const updated = get().recentProjects.filter((p) => p.path !== projectPath)
+        set({ recentProjects: updated })
+        // 异步写盘，不阻塞
+        const s = get().settings
+        void api.setConfig({
+          lastProjectPath: get().projectPath,
+          aiBaseUrl: s.baseUrl,
+          aiModel: s.model,
+          aiProvider: s.provider,
+          recentProjects: updated,
+          skillsDir: get().skillsDir,
+        }).catch(() => {})
+      },
+
+      setSkillsDir: (dir) => {
+        set({ skillsDir: dir })
+        // 异步持久化 + 重新扫描
+        const s = get().settings
+        void api.setConfig({
+          lastProjectPath: get().projectPath,
+          aiBaseUrl: s.baseUrl,
+          aiModel: s.model,
+          aiProvider: s.provider,
+          recentProjects: get().recentProjects,
+          skillsDir: dir,
+        }).catch(() => {})
+        if (dir) {
+          void get().loadSkills()
+        } else {
+          set({ skillMetas: [] })
+        }
+      },
+
+      loadSkills: async () => {
+        const dir = get().skillsDir
+        if (!dir || !isDesktop) {
+          set({ skillMetas: [] })
+          return
+        }
+        try {
+          const metas = await api.scanSkills(dir)
+          set({ skillMetas: metas })
+        } catch {
+          set({ skillMetas: [] })
+        }
+      },
+
+      showPrompt: (title, value = '') =>
+        new Promise<string | null>((resolve) => {
+          set({ dialog: { kind: 'prompt', title, value, resolve: (v) => resolve(typeof v === 'string' ? v : null) } })
+        }),
+
+      showConfirm: (title, message, checks) =>
+        new Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>((resolve) => {
+          if (checks?.length) {
+            set({ dialog: { kind: 'confirm', title, message, checks, resolve: (v) => resolve(v as { confirmed: boolean; checks: Record<string, boolean> }) } })
+          } else {
+            set({ dialog: { kind: 'confirm', title, message, resolve: (v) => resolve(v === true) } })
+          }
+        }),
+
+      showAlert: (title, message) =>
+        new Promise<void>((resolve) => {
+          set({ dialog: { kind: 'alert', title, message, resolve: () => resolve() } })
+        }),
+
+      resolveDialog: (v) => {
+        const d = get().dialog
+        set({ dialog: null })
+        d?.resolve(v)
+      },
+    }),
+    {
+      name: 'fw-ui',
+      partialize: (s) => ({
+        activeTab: s.activeTab,
+        splitRatio: s.splitRatio,
+        filesSplitRatio: s.filesSplitRatio,
+        theme: s.theme,
+      }),
+    },
+  ),
+)

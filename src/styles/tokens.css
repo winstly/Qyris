@@ -1,0 +1,182 @@
+/* ============================================================
+ * 设计令牌 —— 「策展人的工作台」v2
+ * 克制暖灰为底，柔蓝灰为点缀，温暖藏在文字和细节里。
+ * ============================================================ */
+
+:root {
+  /* ----- 核心：五档表面 + 两档边缘（干净暖灰，不棕不脏） ----- */
+  --bg: #131315;            /* 窗口底座 */
+  --s1: #1a1a1c;            /* 一级面板：Tab 栏 / 文件树 / 状态栏 */
+  --s2: #1f1f22;            /* 二级面板：编辑器 / 预览区 / 输入区 */
+  --s3: #26262a;            /* 三级浮层：模态 / 菜单 / 悬浮 */
+
+  --edge: #34343a;          /* 结构边框 */
+  --edge-hair: #28282e;     /* 发丝分隔线 */
+
+  /* ----- 文字三档（暖白系） ----- */
+  --fg: #e8e4df;
+  --fg-2: #a8a29e;
+  --muted: #6b6560;
+
+  /* ----- 信号色（柔蓝灰点缀 + 柔化状态色）----- */
+  --accent: #7c8da4;        /* 柔蓝灰：主按钮 / focus / 链接 / 选中 */
+  --accent-on: #131315;
+  --meta: #8a9ab0;          /* 地址 / mono 数据 */
+  --success: #6bba7a;
+  --warn: #c4a265;
+  --danger: #c47070;
+
+  /* ----- 状态灯光晕 ----- */
+  --glow-build: 0 0 5px 1px rgba(124, 141, 164, 0.3);
+  --glow-deploy: 0 0 5px 1px rgba(196, 162, 101, 0.3);
+  --glow-run: 0 0 6px 1px rgba(107, 186, 122, 0.35);
+  --glow-error: 0 0 5px 1px rgba(196, 112, 112, 0.3);
+
+  /* 明暗方向 token */
+  --deepen: black;
+  --lift: white;
+
+  /* ----- 字体 ----- */
+  --font-display: "Instrument Serif", "PingFang SC", "Microsoft YaHei UI", Georgia, serif;
+  --font-body: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  /* ----- 字号 ----- */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 17px;
+  --text-xl: 22px;
+  --text-micro: 11px;
+
+  --leading-body: 1.55;
+  --leading-tight: 1.06;
+
+  /* ----- 间距：4px 网格 ----- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* ----- 圆角（精致） ----- */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-pill: 9999px;
+
+  /* ----- 阴影 / 层级 ----- */
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--edge);
+  --elev-raised: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --focus-ring: 0 0 0 3px rgba(124, 141, 164, 0.2);
+
+  /* ----- 动效 ----- */
+  --motion-fast: 130ms;
+  --motion-base: 220ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  --statusbar-h: 28px;
+  --tabbar-h: 38px;
+
+  /* ----- 签名元素：极淡台灯氛围 ----- */
+  --lamp-glow: radial-gradient(ellipse 60% 40% at 15% 0%, rgba(124, 141, 164, 0.03), transparent 70%);
+
+  /* ============================================================
+   * 兼容层
+   * ============================================================ */
+  --surface: var(--s2);
+  --surface-warm: var(--s3);
+  --border: var(--edge);
+  --border-soft: var(--edge-hair);
+  --accent-hover: color-mix(in oklab, var(--accent), white 14%);
+  --accent-active: color-mix(in oklab, var(--accent), white 22%);
+}
+
+:root {
+  --panel-deep: var(--s1);
+  --panel: var(--s2);
+  --panel-raised: var(--s3);
+  --row-hover: color-mix(in oklab, var(--s2), var(--fg) 4%);
+  --row-active: color-mix(in oklab, var(--accent), transparent 86%);
+
+  --stage-build: var(--accent);
+  --stage-deploy: var(--warn);
+  --stage-run: var(--success);
+  --stage-error: var(--danger);
+
+  --bubble-user: color-mix(in oklab, var(--accent), var(--s2) 80%);
+  --bubble-ai: color-mix(in oklab, var(--s3), var(--fg) 2%);
+
+  --ok-dim: color-mix(in oklab, var(--success), transparent 87%);
+  --warn-dim: color-mix(in oklab, var(--warn), transparent 88%);
+  --danger-dim: color-mix(in oklab, var(--danger), transparent 89%);
+  --accent-dim: color-mix(in oklab, var(--accent), transparent 87%);
+
+  --font-ui: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+}
+
+/* ============================================================
+ * 浅色主题
+ * ============================================================ */
+
+[data-theme='light'] {
+  --bg: #f2f0ed;
+  --s1: #f8f7f5;
+  --s2: #ffffff;
+  --s3: #ffffff;
+
+  --edge: #dcd8d2;
+  --edge-hair: #e8e5e0;
+
+  --fg: #1a1816;
+  --fg-2: #5a5650;
+  --muted: #8a8478;
+  --meta: #4a6080;
+
+  --accent: #5a6e84;
+  --accent-on: #ffffff;
+  --success: #2e7d52;
+  --warn: #9a7a28;
+  --danger: #b04040;
+
+  --glow-build: 0 0 4px 1px rgba(90, 110, 132, 0.2);
+  --glow-deploy: 0 0 4px 1px rgba(154, 122, 40, 0.2);
+  --glow-run: 0 0 4px 1px rgba(46, 125, 82, 0.22);
+  --glow-error: 0 0 4px 1px rgba(176, 64, 64, 0.2);
+
+  --deepen: #8a857e;
+  --lift: white;
+
+  --elev-raised: 0 12px 32px rgba(26, 24, 22, 0.1);
+  --focus-ring: 0 0 0 3px rgba(90, 110, 132, 0.15);
+
+  --lamp-glow: radial-gradient(ellipse 60% 40% at 15% 0%, rgba(90, 110, 132, 0.02), transparent 70%);
+}
+
+[data-theme='light'] {
+  --panel-deep: var(--s1);
+  --panel: var(--s2);
+  --panel-raised: var(--s3);
+
+  --row-hover: color-mix(in oklab, var(--s2), var(--deepen) 6%);
+  --row-active: color-mix(in oklab, var(--accent), transparent 90%);
+
+  --stage-build: var(--accent);
+  --stage-deploy: var(--warn);
+  --stage-run: var(--success);
+  --stage-error: var(--danger);
+
+  --bubble-user: color-mix(in oklab, var(--accent), white 92%);
+  --bubble-ai: color-mix(in oklab, var(--s2), var(--deepen) 4%);
+
+  --ok-dim: color-mix(in oklab, var(--success), transparent 88%);
+  --warn-dim: color-mix(in oklab, var(--warn), transparent 90%);
+  --danger-dim: color-mix(in oklab, var(--danger), transparent 90%);
+  --accent-dim: color-mix(in oklab, var(--accent), transparent 90%);
+
+  --font-ui: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+}
