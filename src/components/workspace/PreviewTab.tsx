@@ -4,7 +4,8 @@ import { useBuildStore, selectSlotState } from '@/store/useBuildStore'
 import { useChatStore } from '@/store/useChatStore'
 import { api } from '@/services/desktop'
 import { BuildPipeline } from './BuildPipeline'
-import { IconPlay, IconStop, IconRefresh, IconTerminal, IconLink, IconFolder, IconTarget, IconDesktop, IconTablet, IconMobile } from '@/components/common/icons'
+import { Select } from '@/components/common/Select'
+import { IconPlay, IconStop, IconRefresh, IconTerminal, IconLink, IconFolder, IconTarget, IconDesktop, IconTablet, IconMobile, IconExternal } from '@/components/common/icons'
 
 const PHASE_LABEL: Record<string, string> = {
   idle: '未运行', building: '编译中', deploying: '部署中', running: '运行中', error: '异常',
@@ -18,12 +19,22 @@ const DEVICES: { mode: DeviceMode; label: string; width: number | null; Icon: ty
   { mode: 'mobile', label: '手机 (375px)', width: 375, Icon: IconMobile },
 ]
 
-/** 预览 Tab：AI 启动 + 服务槽列表 + 状态流水线 + 预览 iframe（支持设备尺寸切换）。 */
+/** 服务列表合并视图的一行：存档命令（AI 编译产出）∪ 存活槽（chat 里 run_project 的） */
+interface ServiceRow {
+  name: string
+  /** 展示用的命令：运行时以实际槽为准，未启动时显示存档命令 */
+  command: string
+  archived: boolean
+  slot: ReturnType<typeof selectSlotState>
+}
+
+/** 预览 Tab：AI 编译（识别启动命令）+ 一键运行 + 服务列表 + 状态流水线 + 预览 iframe。 */
 export function PreviewTab() {
   const projectPath = useAppStore((s) => s.projectPath)
   const openProjectDialog = useAppStore((s) => s.openProjectDialog)
   const hasApiKey = useAppStore((s) => s.hasApiKey)
   const showAlert = useAppStore((s) => s.showAlert)
+  const startupCommands = useAppStore((s) => s.startupCommands)
 
   const slots = useBuildStore((s) => s.slots)
   const slotOrder = useBuildStore((s) => s.slotOrder)
@@ -34,6 +45,9 @@ export function PreviewTab() {
   const stopAll = useBuildStore((s) => s.stopAll)
   const selectUrl = useBuildStore((s) => s.selectUrl)
   const slot = useBuildStore((s) => selectSlotState(s, s.activeSlot))
+
+  const chatStatus = useChatStore((s) => s.status)
+  const chatMessages = useChatStore((s) => s.messages)
 
   const [showLogs, setShowLogs] = useState(false)
   const [iframeNonce, setIframeNonce] = useState(0)
@@ -46,25 +60,71 @@ export function PreviewTab() {
   const activeDevice = DEVICES.find((d) => d.mode === deviceMode) ?? DEVICES[0]
   const constrained = activeDevice.width !== null
 
-  /** AI 启动 */
-  const aiStart = () => {
+  const chatBusy = chatStatus !== 'idle' && chatStatus !== 'error'
+  // 最近一条用户消息是否为 AI 编译（用于把「AI 编译」按钮置为进行中文案）
+  const compiling = (() => {
+    if (!chatBusy) return false
+    for (let i = chatMessages.length - 1; i >= 0; i--) {
+      if (chatMessages[i].role === 'user') return chatMessages[i].meta?.projectStart === true
+    }
+    return false
+  })()
+  const hasCommands = startupCommands.length > 0
+
+  /** 服务列表合并视图：存档命令在前列出（未启动也显示，供核对数量与命令），存活槽补在后面 */
+  const serviceRows: ServiceRow[] = (() => {
+    const names: string[] = []
+    const push = (n: string): void => { if (!names.includes(n)) names.push(n) }
+    startupCommands.forEach((c) => push(c.name))
+    slotOrder.forEach((k) => push(k))
+    return names.map((name) => {
+      const archived = startupCommands.find((c) => c.name === name)
+      const st = slots[name.toLowerCase()]
+      return {
+        name,
+        command: st?.command || archived?.run || '',
+        archived: !!archived,
+        slot: st,
+      }
+    })
+  })()
+
+  /** AI 编译：调模型探测技术栈 + 识别启动命令并存档。已识别过时需用户确认覆盖 */
+  const aiCompile = async () => {
     if (!projectPath) return
     if (!hasApiKey) {
-      void showAlert('尚未配置 API Key', '点击右上角对话栏的齿轮图标，配置 Base URL 与 API Key 后即可使用 AI 启动。')
+      void showAlert('尚未配置 API Key', '点击右上角对话栏的齿轮图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
       return
+    }
+    if (hasCommands) {
+      const confirmed = await useAppStore.getState().showConfirm(
+        'AI 重新编译',
+        '将重新调用 AI 识别启动命令（可能重新安装依赖），已识别的命令会被覆盖。继续？',
+      )
+      if (confirmed !== true) return
     }
     const chat = useChatStore.getState()
     if (chat.status !== 'idle' && chat.status !== 'error') {
       void showAlert('AI 正忙', '上一条消息还在处理中，请稍候，或点击「停止生成」后重试。')
       return
     }
-    void useChatStore.getState().send(
-      `请帮我启动当前项目${slotOrder.length ? '（注意：部分服务已在运行，先 get_build_status 了解现状）' : ''}。` +
-      '请探测技术栈，为每个需要启动的服务取一个简短英文服务名（各不重复），' +
-      '用 run_project 逐个启动（不要拼进一个脚本），然后跟踪「编译 / 部署 / 运行」三个阶段的状态向我汇报；' +
-      '编译失败请根据错误输出修复文件后重新启动。',
+    void chat.send(
+      '这是 AI 编译阶段：请探测当前项目的技术栈，需要时用 run_once 安装依赖 / 验证编译，' +
+      '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
+      '用 report_start_commands 提交启动命令清单。不要直接 run_project 启动服务，运行由我来决定。',
       { projectStart: true },
     )
+  }
+
+  /** 指令运行：直接执行存档的启动命令（零模型调用）；已存活的服务跳过 */
+  const runAll = async () => {
+    if (!projectPath || !hasCommands) return
+    const bs = useBuildStore.getState()
+    for (const c of startupCommands) {
+      const st = bs.slots[c.name.toLowerCase()]
+      if (st?.processAlive) continue
+      await bs.start(c.name, c.run)
+    }
   }
 
   const startPick = () => {
@@ -74,67 +134,89 @@ export function PreviewTab() {
 
   return (
     <div className="preview">
-      {/* 启动工具栏 */}
+      {/* 启动工具栏：AI 编译（调模型）与 运行（零模型）两个独立操作 */}
       <div className="preview__bar">
         <button
-          className="btn btn--primary btn--sm"
-          disabled={!projectPath}
-          onClick={aiStart}
-          title="由 AI 探测技术栈，为每个服务命名并逐一启动"
+          className="btn btn--ghost btn--sm"
+          disabled={!projectPath || chatBusy}
+          onClick={() => void aiCompile()}
+          title={hasCommands ? '重新调用 AI 识别启动命令（会覆盖现有命令）' : '由 AI 探测技术栈、装依赖并识别启动命令'}
         >
-          <IconPlay size={12} /> 启动
+          {compiling ? 'AI 编译中…' : 'AI 编译'}
         </button>
-        <span className="preview__hint">AI 会探测技术栈，为每个服务命名并各自启动（服务名自动对应地址）</span>
+        <button
+          className="btn btn--primary btn--sm"
+          disabled={!projectPath || !hasCommands}
+          onClick={() => void runAll()}
+          title={hasCommands ? '直接运行已识别的启动命令（不调用 AI）' : '请先点击「AI 编译」识别启动命令'}
+        >
+          <IconPlay size={12} /> 运行
+        </button>
+        <span className="preview__hint">
+          {hasCommands
+            ? `已识别 ${startupCommands.length} 个服务，点「运行」直接启动`
+            : '先「AI 编译」识别启动命令，之后「运行」不再调用 AI'}
+        </span>
         <div className="preview__spacer" />
         <button className="btn btn--danger-ghost btn--sm" disabled={!anyAlive} onClick={() => void stopAll()} title="停止全部服务进程">
           <IconStop size={12} /> 全部停止
         </button>
       </div>
 
-      {/* 服务槽列表 */}
-      {slotOrder.length > 0 && (
-        <div className="slots" role="list" aria-label="服务列表">
-          {slotOrder.map((key) => {
-            const st = slots[key]
-            if (!st) return null
-            const alive = st.processAlive
-            const running = st.phase === 'running' && !!st.detectedUrl
-            return (
-              <div
-                key={key}
-                role="listitem"
-                className={`slots__row ${key === activeSlot ? 'slots__row--active' : ''}`}
-                onClick={() => selectSlot(key)}
-              >
-                <span className={`status-dot status-dot--${st.phase}`} />
-                <span className="slots__name mono" title={key}>{key}</span>
-                <span className="slots__cmd mono" title={st.command}>{st.command || '（未知命令）'}</span>
-                {running && (
-                  <a
-                    className="slots__url mono"
-                    href={st.detectedUrl!}
-                    target="_blank"
-                    rel="noreferrer"
-                    title={`在浏览器中打开 ${st.detectedUrl}`}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    {st.detectedUrl}
-                  </a>
-                )}
-                <span className={`slots__phase slots__phase--${st.phase}`}>{PHASE_LABEL[st.phase]}</span>
-                {alive ? (
-                  <button className="btn btn--ghost btn--sm slots__action" onClick={(e) => { e.stopPropagation(); void stop(key) }}>
-                    停止
-                  </button>
-                ) : (
-                  <button className="btn btn--ghost btn--sm slots__action" disabled={!st.command} onClick={(e) => { e.stopPropagation(); void start(key, st.command) }} title="以原命令重启该服务">
-                    启动
-                  </button>
-                )}
-              </div>
-            )
-          })}
-        </div>
+      {/* 服务列表：存档命令 ∪ 存活槽（核对可运行系统数量与命令） */}
+      {serviceRows.length > 0 && (
+        <>
+          <div className="slots__count">共 {serviceRows.length} 个服务</div>
+          <div className="slots" role="list" aria-label="服务列表">
+            {serviceRows.map((row) => {
+              const st = row.slot
+              const alive = st?.processAlive ?? false
+              const running = st?.phase === 'running' && !!st.detectedUrl
+              const key = st?.name ?? row.name.toLowerCase()
+              return (
+                <div
+                  key={row.name}
+                  role="listitem"
+                  className={`slots__row ${key === activeSlot ? 'slots__row--active' : ''}`}
+                  onClick={() => selectSlot(row.name)}
+                >
+                  <span className={`status-dot status-dot--${st?.phase ?? 'idle'}`} />
+                  <span className="slots__name mono" title={row.name}>{row.name}</span>
+                  <span className="slots__cmd mono" title={row.command}>{row.command || '（未知命令）'}</span>
+                  {running && (
+                    <a
+                      className="slots__url mono"
+                      href={st!.detectedUrl!}
+                      target="_blank"
+                      rel="noreferrer"
+                      title={`在浏览器中打开 ${st!.detectedUrl}`}
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      {st!.detectedUrl}
+                    </a>
+                  )}
+                  <span className={`slots__phase slots__phase--${st?.phase ?? 'idle'}`}>
+                    {PHASE_LABEL[st?.phase ?? 'idle']}
+                  </span>
+                  {alive ? (
+                    <button className="btn btn--ghost btn--sm slots__action" onClick={(e) => { e.stopPropagation(); void stop(row.name) }}>
+                      停止
+                    </button>
+                  ) : (
+                    <button
+                      className="btn btn--ghost btn--sm slots__action"
+                      disabled={!row.command}
+                      onClick={(e) => { e.stopPropagation(); void start(row.name, row.command) }}
+                      title="以原命令重启该服务"
+                    >
+                      启动
+                    </button>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </>
       )}
 
       {/* 当前查看槽的阶段流水线 */}
@@ -155,16 +237,15 @@ export function PreviewTab() {
               {slot.detectedUrl}
             </a>
             {slot.detectedUrls.length > 1 && (
-              <select
-                className="preview__url-select mono"
-                value={slot.detectedUrl}
-                onChange={(e) => selectUrl(slot.name, e.target.value)}
-                aria-label="切换服务地址"
-              >
-                {slot.detectedUrls.map((u) => (
-                  <option key={u} value={u}>{u}</option>
-                ))}
-              </select>
+              <div className="preview__url-switch">
+                <Select
+                  size="sm"
+                  value={slot.detectedUrl}
+                  onChange={(u) => selectUrl(slot.name, u)}
+                  options={slot.detectedUrls.map((u) => ({ value: u, label: u }))}
+                  ariaLabel="切换服务地址"
+                />
+              </div>
             )}
           </>
         ) : (
@@ -187,6 +268,15 @@ export function PreviewTab() {
           ))}
         </div>
         <span className="statusbar__sep" />
+        <button
+          className="icon-btn"
+          onClick={() => void api.openExternal(url)}
+          disabled={!url}
+          aria-label="系统浏览器打开"
+          title="在系统默认浏览器中打开当前地址"
+        >
+          <IconExternal size={13} />
+        </button>
         <button className="icon-btn" onClick={startPick} disabled={!showIframe} aria-label="选取元素" title="选取预览页元素，带入 AI 对话">
           <IconTarget size={13} />
         </button>
@@ -239,11 +329,19 @@ export function PreviewTab() {
           <EmptyState
             icon={<IconPlay size={22} />}
             title="待启动"
-            text="点击「启动」，由 AI 探测项目技术栈并为每个服务命名、逐个启动（支持多服务并行跟踪）。"
+            text={hasCommands
+              ? `已识别 ${startupCommands.length} 个服务的启动命令，点击「运行」直接启动（不调用 AI）。`
+              : '点击「AI 编译」，由 AI 探测项目技术栈、安装依赖并识别每个服务的启动命令。'}
             action={
-              <button className="btn btn--primary" onClick={aiStart}>
-                <IconPlay size={14} /> 启动
-              </button>
+              hasCommands ? (
+                <button className="btn btn--primary" onClick={() => void runAll()}>
+                  <IconPlay size={14} /> 运行
+                </button>
+              ) : (
+                <button className="btn btn--primary" disabled={chatBusy} onClick={() => void aiCompile()}>
+                  {compiling ? 'AI 编译中…' : 'AI 编译'}
+                </button>
+              )
             }
           />
         ) : (

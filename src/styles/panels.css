@@ -127,6 +127,11 @@
 .preview__urlbar:focus-within { border-color: var(--accent); }
 
 /* 服务槽列表：仪器行——状态灯 + mono 名 + 灰命令 + 阶段指示 pill */
+.slots__count {
+  padding: 0 var(--space-1);
+  font-size: var(--text-micro);
+  color: var(--muted);
+}
 .slots {
   display: flex;
   flex-direction: column;
@@ -223,16 +228,10 @@
 .preview__addr--empty,
 .preview__addr--empty:hover { color: var(--muted); text-decoration: none; }
 
-/* 多服务地址切换下拉 */
-.preview__url-select {
-  height: 22px;
-  max-width: 170px;
-  font-size: 11px;
-  color: var(--fg-2);
-  background: var(--panel-deep);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  cursor: pointer;
+/* 多服务地址切换（自绘 Select 的紧凑外壳） */
+.preview__url-switch {
+  flex: 0 1 200px;
+  min-width: 130px;
 }
 
 /* 阶段流水线 */
@@ -429,14 +428,25 @@
 .create-project__urls {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+}
+.create-project__url-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .create-project__url-row {
   display: flex;
   gap: 6px;
   align-items: center;
 }
-.create-project__url-row .field__input { flex: 1; }
+.create-project__url-row .field__input { flex: 1; min-width: 160px; }
+.create-project__test-btn { flex-shrink: 0; white-space: nowrap; }
+.create-project__branch { flex: 0 0 150px; }
+.create-project__row-notice {
+  padding: 4px 8px;
+  font-size: var(--text-micro);
+}
 
 /* ============ 文件 Tab ============ */
 
@@ -695,6 +705,145 @@
   background: color-mix(in oklab, var(--accent), transparent 75%);
   color: var(--fg) !important;
   outline: 1px solid color-mix(in oklab, var(--accent), transparent 50%);
+}
+
+/* ---- 搜索面板（Ctrl+F）：修复 checkbox 错位，重绘为工作台风格 ---- */
+/* 面板容器：三级表面 + 发丝分隔，取代默认的 #333338 硬背景。
+   search() 默认 top:false，面板出现在编辑器底部（cm-panels-bottom），两种位置都覆盖 */
+.editor__host .cm-panels {
+  background: var(--s3);
+  color: var(--fg);
+}
+.editor__host .cm-panels-bottom { border-top: 1px solid var(--edge-hair); }
+.editor__host .cm-panels-top { border-bottom: 1px solid var(--edge-hair); }
+.editor__host .cm-panel.cm-search {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 8px;
+  padding: 8px 40px 8px 12px; /* 右侧留出关闭按钮的位置 */
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+}
+/* <br> 在 flex 布局里默认失效，撑成整行使「替换」行固定落到第二行 */
+.editor__host .cm-panel.cm-search br {
+  flex-basis: 100%;
+  height: 0;
+}
+/* 覆盖默认的 em 系 margin，间距统一交给 gap */
+.editor__host .cm-panel.cm-search input,
+.editor__host .cm-panel.cm-search button,
+.editor__host .cm-panel.cm-search label { margin: 0; }
+
+/* 查找 / 替换输入框 */
+.editor__host .cm-panel.cm-search .cm-textfield {
+  width: 200px;
+  padding: 3px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--text-micro);
+  color: var(--fg);
+  background: var(--s2);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-sm);
+  outline: none;
+  transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
+}
+.editor__host .cm-panel.cm-search .cm-textfield::placeholder { color: var(--muted); }
+.editor__host .cm-panel.cm-search .cm-textfield:focus {
+  border-color: var(--accent);
+  box-shadow: var(--focus-ring);
+}
+
+/* 下一处 / 上一处 / 全选 / 替换按钮：幽灵按钮 */
+.editor__host .cm-panel.cm-search .cm-button {
+  padding: 3px 10px;
+  font-family: var(--font-ui);
+  font-size: var(--text-micro);
+  color: var(--fg-2);
+  background: transparent;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.editor__host .cm-panel.cm-search .cm-button:hover {
+  color: var(--fg);
+  background: var(--row-hover);
+}
+
+/* 选项 label：inline-flex 垂直居中（修复 checkbox 与文字基线错位的根源） */
+.editor__host .cm-panel.cm-search label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: var(--text-micro);
+  color: var(--fg-2);
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.editor__host .cm-panel.cm-search label:hover { color: var(--fg); }
+
+/* 自绘勾选框：方圆小格，选中填充强调色 */
+.editor__host .cm-panel.cm-search input[type='checkbox'] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  flex: none;
+  width: 13px;
+  height: 13px;
+  color: var(--accent-on);
+  background: var(--s2);
+  border: 1px solid var(--edge);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+.editor__host .cm-panel.cm-search input[type='checkbox']:hover { border-color: var(--accent); }
+.editor__host .cm-panel.cm-search input[type='checkbox']:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.editor__host .cm-panel.cm-search input[type='checkbox']:checked::after {
+  content: '';
+  position: absolute;
+  left: 3.5px;
+  top: 0.5px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--accent-on);
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+.editor__host .cm-panel.cm-search input[type='checkbox']:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+/* 关闭按钮 ×：垂直居中于右侧，悬停轻提亮 */
+.editor__host .cm-panel.cm-search [name='close'] {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
+}
+.editor__host .cm-panel.cm-search [name='close']:hover {
+  color: var(--fg);
+  background: var(--row-hover);
 }
 
 /* ============ 历史工程 Tab ============ */

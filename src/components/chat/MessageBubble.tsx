@@ -128,7 +128,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
           <div className="msg__meta-cards">
             <div className="msg__meta-card">
               <span className="msg__meta-card-label">启动</span>
-              <span className="msg__meta-card-name">AI 探测并启动项目</span>
+              <span className="msg__meta-card-name">AI 编译（识别启动命令）</span>
             </div>
           </div>
         )}
@@ -165,7 +165,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
           {msg.meta!.projectStart && (
             <div className="msg__meta-card">
               <span className="msg__meta-card-label">启动</span>
-              <span className="msg__meta-card-name">AI 探测并启动项目</span>
+              <span className="msg__meta-card-name">AI 编译（识别启动命令）</span>
             </div>
           )}
           {msg.meta!.skills?.map((s) => (

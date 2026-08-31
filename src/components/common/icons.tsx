@@ -141,6 +141,24 @@ export const IconLink = (p: P) => (
   </svg>
 )
 
+export const IconBranch = (p: P) => (
+  <svg {...base(p)}>
+    <circle cx="6" cy="6" r="2.6" />
+    <circle cx="6" cy="18" r="2.6" />
+    <circle cx="18" cy="8" r="2.6" />
+    <path d="M6 8.6v6.8" />
+    <path d="M18 10.6c0 3-2.5 4.4-6 4.4h-2" />
+  </svg>
+)
+
+export const IconExternal = (p: P) => (
+  <svg {...base(p)}>
+    <path d="M14 4h6v6" />
+    <path d="M20 4 11 13" />
+    <path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5" />
+  </svg>
+)
+
 export const IconEye = (p: P) => (
   <svg {...base(p)}>
     <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />

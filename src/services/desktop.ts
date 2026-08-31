@@ -40,6 +40,7 @@ export const api = {
   listSnapshots: (projectRoot: string) => wrap((d) => d.listSnapshots(projectRoot)),
   restoreFile: (projectRoot: string, path: string) => wrap((d) => d.restoreFile(projectRoot, path)),
   restoreSession: (projectRoot: string, sessionId: string) => wrap((d) => d.restoreSession(projectRoot, sessionId)),
+  clearProjectSnapshots: (projectRoot: string) => wrap((d) => d.clearProjectSnapshots(projectRoot)),
   loadSession: (projectRoot: string) => wrap((d) => d.loadSession(projectRoot)),
   saveSession: (projectRoot: string, messages: unknown[]) => wrap((d) => d.saveSession(projectRoot, messages)),
   createEntry: (projectRoot: string, parentDir: string, name: string, isDir: boolean) =>
@@ -52,13 +53,15 @@ export const api = {
   // 子进程 / watcher
   runProject: (projectRoot: string, name: string, command: string) =>
     wrap((d) => d.runProject(projectRoot, name, command)),
+  runOnce: (projectRoot: string, command: string) =>
+    wrap((d) => d.runOnce(projectRoot, command)),
   stopProject: (name?: string) => wrap((d) => d.stopProject(name)),
   startWatching: (projectRoot: string) => wrap((d) => d.startWatching(projectRoot)),
   stopWatching: () => wrap((d) => d.stopWatching()),
 
   // 配置与密钥（无 getSecret：明文 Key 不出主进程）
   getConfig: () => wrap((d) => d.getConfig()),
-  setConfig: (config: AppConfig) => wrap((d) => d.setConfig(config)),
+  mergeConfig: (patch: Partial<AppConfig>) => wrap((d) => d.mergeConfig(patch)),
   setSecret: (key: string, value: string) => wrap((d) => d.setSecret(key, value)),
   hasSecret: (key: string) => wrap((d) => d.hasSecret(key)),
   deleteSecret: (key: string) => wrap((d) => d.deleteSecret(key)),
@@ -77,15 +80,20 @@ export const api = {
   readSkill: (dir: string, skillId: string) => wrap((d) => d.readSkill(dir, skillId)),
   pickSkillsDir: () => wrap((d) => d.pickSkillsDir()),
 
-  // 创建项目
+  // 创建项目 / Git
   createEmptyProject: (parentDir: string, name: string) => wrap((d) => d.createEmptyProject(parentDir, name)),
-  cloneRepos: (parentDir: string, urls: string[]) => wrap((d) => d.cloneRepos(parentDir, urls)),
+  cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) =>
+    wrap((d) => d.cloneRepos(parentDir, repos)),
+  testRepo: (url: string) => wrap((d) => d.testRepo(url)),
+  gitRepoInfo: (dir: string) => wrap((d) => d.gitRepoInfo(dir)),
+  gitCheckout: (dir: string, branch: string) => wrap((d) => d.gitCheckout(dir, branch)),
   pickParentDir: () => wrap((d) => d.pickParentDir()),
 
   // 窗口
   pickDirectory: () => wrap((d) => d.pickDirectory()),
   setWindowTitle: (title: string) => wrap((d) => d.setWindowTitle(title)),
   startElementPick: (url: string) => wrap((d) => d.startElementPick(url)),
+  openExternal: (url: string) => wrap((d) => d.openExternal(url)),
 }
 
 // ---------- 事件订阅（main → renderer，同步返回取消函数） ----------

@@ -10,7 +10,8 @@ import { basename } from '@/utils/path'
 import { useFileStore } from './useFileStore'
 import { useBuildStore } from './useBuildStore'
 import { useChatStore } from './useChatStore'
-import type { AiSettings, ChatMessage, RecentProject, SkillMeta } from '@/types'
+import { useAgentStore } from './useAgentStore'
+import type { AiSettings, ChatMessage, RecentProject, SkillMeta, StartCommand } from '@/types'
 
 export interface DialogCheck {
   id: string
@@ -24,6 +25,10 @@ export interface DialogRequest {
   message?: string
   value?: string
   checks?: DialogCheck[]
+  /** true = 点确定后不立即关闭：进入 loading 态，等调用方 closeDialog()（异步任务完成后再关） */
+  holdOpen?: boolean
+  /** holdOpen 期间确定按钮的文案（如「删除中…」） */
+  confirmingText?: string
   resolve: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
 }
 
@@ -57,6 +62,10 @@ interface AppState {
   skillsDir: string | null
   /** 已扫描的 skill 摘要列表 */
   skillMetas: SkillMeta[]
+  /** 当前项目已识别的启动命令（AI 编译产出，「运行」直接执行，零模型） */
+  startupCommands: StartCommand[]
+  /** 全部项目的启动命令存档（内存缓存，落盘走 config.json） */
+  startupCommandsMap: Record<string, StartCommand[]>
 
   setTab: (t: 'preview' | 'files' | 'history') => void
   setSplitRatio: (r: number) => void
@@ -71,10 +80,16 @@ interface AppState {
   removeRecentProject: (path: string) => void
   setSkillsDir: (dir: string | null) => void
   loadSkills: () => Promise<void>
+  /** 覆盖当前项目的启动命令存档（AI 编译结果 / run_project 沉淀），同步落盘 */
+  setStartupCommands: (cmds: StartCommand[]) => Promise<void>
+  /** 项目文件删除后清空该路径的启动命令存档（防止同路径重建项目时旧命令复活） */
+  clearStartupCommands: (projectPath: string) => Promise<void>
   showPrompt: (title: string, value?: string) => Promise<string | null>
-  showConfirm: (title: string, message?: string, checks?: DialogCheck[]) => Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>
+  showConfirm: (title: string, message?: string, checks?: DialogCheck[], opts?: { holdOpen?: boolean; confirmingText?: string }) => Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>
   showAlert: (title: string, message?: string) => Promise<void>
   resolveDialog: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
+  /** 直接关闭当前对话框（不触发 resolve）。holdOpen 异步任务完成后由调用方调用 */
+  closeDialog: () => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -94,6 +109,8 @@ export const useAppStore = create<AppState>()(
       recentProjects: [],
       skillsDir: null,
       skillMetas: [],
+      startupCommands: [],
+      startupCommandsMap: {},
 
       setTab: (t) => set({ activeTab: t }),
       setSplitRatio: (r) => set({ splitRatio: Math.min(0.85, Math.max(0.5, r)) }),
@@ -105,14 +122,7 @@ export const useAppStore = create<AppState>()(
         set({ settings: s })
         if (!isDesktop) return
         try {
-          await api.setConfig({
-            lastProjectPath: get().projectPath,
-            aiBaseUrl: s.baseUrl,
-            aiModel: s.model,
-            aiProvider: s.provider,
-            recentProjects: get().recentProjects,
-            skillsDir: get().skillsDir,
-          })
+          await api.mergeConfig({ aiBaseUrl: s.baseUrl, aiModel: s.model, aiProvider: s.provider, aiTiers: s.tiers })
         } catch { /* 配置盘写失败不阻塞界面 */ }
       },
 
@@ -135,9 +145,11 @@ export const useAppStore = create<AppState>()(
               baseUrl: cfg.aiBaseUrl || DEFAULT_SETTINGS.baseUrl,
               model: cfg.aiModel || DEFAULT_SETTINGS.model,
               provider: cfg.aiProvider || DEFAULT_SETTINGS.provider,
+              tiers: cfg.aiTiers,
             },
             recentProjects: cfg.recentProjects ?? [],
             skillsDir: cfg.skillsDir ?? null,
+            startupCommandsMap: cfg.startupCommands ?? {},
           })
           // 扫描 skills 目录（异步，不阻塞启动）
           if (cfg.skillsDir) {
@@ -175,10 +187,13 @@ export const useAppStore = create<AppState>()(
         await api.stopProject().catch(() => {})
         await api.stopWatching().catch(() => {})
         useBuildStore.getState().reset()
+        useAgentStore.getState().clear()
 
         set({ projectPath: projectPath, projectName: basename(projectPath) })
         await useFileStore.getState().openProject(projectPath)
         await api.startWatching(projectPath)
+        // 换档：载入该项目的启动命令存档（无则空）
+        set({ startupCommands: get().startupCommandsMap[projectPath] ?? [] })
 
         // 加载该项目的会话历史（有则恢复，无则清空）
         try {
@@ -200,15 +215,7 @@ export const useAppStore = create<AppState>()(
         set({ recentProjects: updated })
 
         try {
-          const s = get().settings
-          await api.setConfig({
-            lastProjectPath: projectPath,
-            aiBaseUrl: s.baseUrl,
-            aiModel: s.model,
-            aiProvider: s.provider,
-            recentProjects: updated,
-            skillsDir: get().skillsDir,
-          })
+          await api.mergeConfig({ lastProjectPath: projectPath, recentProjects: updated })
         } catch { /* 忽略配置写失败 */ }
 
         // 窗口标题显示当前项目名
@@ -219,34 +226,38 @@ export const useAppStore = create<AppState>()(
         const updated = get().recentProjects.filter((p) => p.path !== projectPath)
         set({ recentProjects: updated })
         // 异步写盘，不阻塞
-        const s = get().settings
-        void api.setConfig({
-          lastProjectPath: get().projectPath,
-          aiBaseUrl: s.baseUrl,
-          aiModel: s.model,
-          aiProvider: s.provider,
-          recentProjects: updated,
-          skillsDir: get().skillsDir,
-        }).catch(() => {})
+        void api.mergeConfig({ recentProjects: updated }).catch(() => {})
       },
 
       setSkillsDir: (dir) => {
         set({ skillsDir: dir })
         // 异步持久化 + 重新扫描
-        const s = get().settings
-        void api.setConfig({
-          lastProjectPath: get().projectPath,
-          aiBaseUrl: s.baseUrl,
-          aiModel: s.model,
-          aiProvider: s.provider,
-          recentProjects: get().recentProjects,
-          skillsDir: dir,
-        }).catch(() => {})
+        void api.mergeConfig({ skillsDir: dir }).catch(() => {})
         if (dir) {
           void get().loadSkills()
         } else {
           set({ skillMetas: [] })
         }
+      },
+
+      setStartupCommands: async (cmds) => {
+        const projectPath = get().projectPath
+        if (!projectPath) return
+        const map = { ...get().startupCommandsMap, [projectPath]: cmds }
+        set({ startupCommands: cmds, startupCommandsMap: map })
+        try {
+          await api.mergeConfig({ startupCommands: map })
+        } catch { /* 落盘失败不阻塞界面（内存态已更新，下次操作会再写） */ }
+      },
+
+      clearStartupCommands: async (projectPath) => {
+        const map = { ...get().startupCommandsMap }
+        delete map[projectPath]
+        const isActive = get().projectPath === projectPath
+        set(isActive ? { startupCommandsMap: map, startupCommands: [] } : { startupCommandsMap: map })
+        try {
+          await api.mergeConfig({ startupCommands: map })
+        } catch { /* 落盘失败不阻塞界面 */ }
       },
 
       loadSkills: async () => {
@@ -268,10 +279,16 @@ export const useAppStore = create<AppState>()(
           set({ dialog: { kind: 'prompt', title, value, resolve: (v) => resolve(typeof v === 'string' ? v : null) } })
         }),
 
-      showConfirm: (title, message, checks) =>
+      showConfirm: (title, message, checks, opts) =>
         new Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>((resolve) => {
           if (checks?.length) {
-            set({ dialog: { kind: 'confirm', title, message, checks, resolve: (v) => resolve(v as { confirmed: boolean; checks: Record<string, boolean> }) } })
+            set({
+              dialog: {
+                kind: 'confirm', title, message, checks,
+                holdOpen: opts?.holdOpen, confirmingText: opts?.confirmingText,
+                resolve: (v) => resolve(v as { confirmed: boolean; checks: Record<string, boolean> }),
+              },
+            })
           } else {
             set({ dialog: { kind: 'confirm', title, message, resolve: (v) => resolve(v === true) } })
           }
@@ -287,6 +304,8 @@ export const useAppStore = create<AppState>()(
         set({ dialog: null })
         d?.resolve(v)
       },
+
+      closeDialog: () => set({ dialog: null }),
     }),
     {
       name: 'fw-ui',

@@ -130,3 +130,63 @@ export async function runProject(projectRoot: string, name: unknown, command: st
   slots.set(key, { name: key, proc })
   return proc.pid ?? -1
 }
+
+// ---------- 一次性命令（AI 编译阶段：装依赖 / 构建验证） ----------
+
+const RUN_ONCE_TIMEOUT = 10 * 60_000
+const RUN_ONCE_TAIL_LINES = 200
+
+/** 执行一条跑完即退的命令：不建服务槽、不产生 build-output 事件，返回退出码与尾部输出（回传 AI） */
+export async function runOnce(projectRoot: string, command: string): Promise<{ code: number | null; output: string }> {
+  try {
+    const st = await fsp.stat(projectRoot)
+    if (!st.isDirectory()) throw new Error(`项目目录不存在：${projectRoot}`)
+  } catch (e) {
+    if (e instanceof Error && e.message.startsWith('项目目录不存在')) throw e
+    throw new Error(`项目目录不存在：${projectRoot}`)
+  }
+  const cmd = command.trim()
+  if (!cmd) throw new Error('命令不能为空')
+
+  return new Promise((resolve, reject) => {
+    const isWin = process.platform === 'win32'
+    let child: ChildProcess
+    try {
+      child = spawn(isWin ? 'cmd.exe' : 'sh', isWin ? ['/C', cmd] : ['-c', cmd], {
+        cwd: projectRoot,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        windowsHide: true,
+        detached: !isWin,
+        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0' },
+      })
+    } catch (e) {
+      reject(new Error(`命令启动失败：${errorMessage(e)}`))
+      return
+    }
+
+    const lines: string[] = []
+    const collect = (stream: Readable | null, streamName: 'stdout' | 'stderr'): void => {
+      if (!stream) return
+      const rl = createInterface({ input: stream })
+      rl.on('line', (line) => {
+        lines.push(`[${streamName}] ${stripAnsi(line)}`)
+        if (lines.length > RUN_ONCE_TAIL_LINES) lines.splice(0, lines.length - RUN_ONCE_TAIL_LINES)
+      })
+    }
+    collect(child.stdout, 'stdout')
+    collect(child.stderr, 'stderr')
+
+    // 超时兜底：install 卡死时强杀整棵进程树，避免循环永久挂起
+    const timer = setTimeout(() => {
+      if (child.pid) killTree(child.pid)
+    }, RUN_ONCE_TIMEOUT)
+    child.on('error', (e) => {
+      clearTimeout(timer)
+      reject(new Error(`命令启动失败：${errorMessage(e)}`))
+    })
+    child.on('exit', (code) => {
+      clearTimeout(timer)
+      resolve({ code: code ?? -1, output: lines.join('\n') })
+    })
+  })
+}

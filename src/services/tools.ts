@@ -7,11 +7,14 @@ import { useAppStore } from '@/store/useAppStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useChatStore } from '@/store/useChatStore'
+import { useAgentStore } from '@/store/useAgentStore'
 import type { SlotState } from '@/store/useBuildStore'
+import type { SubTask } from './subagent'
 import { joinPath } from '@/utils/path'
 
 const READ_TRUNCATE = 30_000
 const LIST_CAP = 500
+const RUN_ONCE_TAIL_CHARS = 4000
 
 const PHASE_LABEL: Record<string, string> = {
   idle: '未运行', building: '编译中', deploying: '部署中', running: '运行中', error: '异常',
@@ -24,7 +27,18 @@ export interface ToolOutcome {
   summary: string
 }
 
-export async function executeTool(name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
+/** AI 启动的服务命令沉淀：upsert 进当前项目存档（「运行」按钮直接复用，零模型） */
+function persistStartCommand(name: string, command: string): void {
+  const app = useAppStore.getState()
+  if (!app.projectPath) return
+  const cur = app.startupCommands
+  const next = cur.some((c) => c.name === name)
+    ? cur.map((c) => (c.name === name ? { ...c, run: command } : c))
+    : [...cur, { name, run: command }]
+  void app.setStartupCommands(next)
+}
+
+export async function executeTool(name: string, args: Record<string, unknown>, cardId = ''): Promise<ToolOutcome> {
   const root = useAppStore.getState().projectPath
   if (!root) {
     return { result: '错误：当前没有打开的项目，请让用户先点击「打开项目」再进行文件操作。', summary: '未打开项目' }
@@ -93,6 +107,38 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
         }
       }
 
+      case 'run_once': {
+        const command = String(args.command ?? '').trim()
+        if (!command) {
+          return { result: '错误：command 不能为空。', summary: '命令为空' }
+        }
+        const out = await api.runOnce(root, command)
+        const ok = out.code === 0
+        const tail = (out.output || '（无输出）').slice(0, RUN_ONCE_TAIL_CHARS)
+        return {
+          result: ok
+            ? `命令执行成功（exit 0）。输出（尾部）：\n${tail}`
+            : `命令执行失败（exit ${out.code ?? -1}）。输出（尾部）：\n${tail}`,
+          summary: ok ? `已执行 ${command}` : `失败（exit ${out.code}）`,
+        }
+      }
+
+      case 'report_start_commands': {
+        const arr = Array.isArray(args.services) ? args.services : []
+        const services = (arr as Record<string, unknown>[])
+          .map((s) => ({ name: String(s?.name ?? '').trim(), run: String(s?.run ?? '').trim() }))
+          .filter((s) => s.name && s.run)
+        if (services.length === 0) {
+          return { result: '错误：services 不能为空，每项需包含 name（服务名）与 run（启动命令）。', summary: '启动清单为空' }
+        }
+        await useAppStore.getState().setStartupCommands(services)
+        const list = services.map((s) => `- ${s.name}：${s.run}`).join('\n')
+        return {
+          result: `已保存 ${services.length} 个服务的启动命令：\n${list}\n用户可在预览面板点击「运行」直接启动（无需再次识别）。`,
+          summary: `已保存 ${services.length} 条启动命令`,
+        }
+      }
+
       case 'run_project': {
         const command = String(args.command ?? '').trim()
         const name = String(args.name ?? '').trim() || 'default'
@@ -101,6 +147,8 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
         }
         // 每个服务名独立成槽：同名重启只替换该槽，不影响其他已运行的服务
         await useBuildStore.getState().start(name, command)
+        // 启动命令沉淀进存档（fire-and-forget）：AI 直接启动的服务也会被「运行」按钮记住
+        persistStartCommand(name, command)
         return {
           result: `已启动服务「${name}」：${command}。输出实时流入预览面板，稍等片刻后用 get_build_status 查看「${name}」的编译/启动状态（首次编译可能需要几秒到几十秒）。`,
           summary: `已启动 ${name}`,
@@ -144,6 +192,56 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
         return { result: '已停止全部服务进程。', summary: '已停止全部进程' }
       }
 
+      case 'dispatch_subtasks': {
+        const arr = Array.isArray(args.tasks) ? args.tasks : []
+        const TIERS: readonly string[] = ['main', 'thinking', 'fast', 'middle', 'heavy']
+        const tasks: SubTask[] = (arr as Record<string, unknown>[])
+          .map((t) => ({
+            title: String(t?.title ?? '').trim(),
+            instruction: String(t?.instruction ?? '').trim(),
+            tier: String(t?.tier ?? 'main').trim(),
+          }))
+          .filter((t) => t.title && t.instruction)
+          .map((t) => ({
+            ...t,
+            // 未知档位字符串回退 main（modelForTier 亦有兜底）
+            tier: (TIERS.includes(t.tier) ? t.tier : 'main') as SubTask['tier'],
+          }))
+        if (tasks.length === 0) {
+          return { result: '错误：tasks 不能为空，每项需包含 title（标题）与 instruction（完整指令）。', summary: '子任务清单为空' }
+        }
+        // 动态 import：subagent 依赖本模块的 executeTool，避免静态循环依赖
+        const sub = await import('./subagent')
+        // 先建线程批次（卡片面板立即出现 pending 列表），再并行执行
+        const threadIds = useAgentStore.getState().createBatch(
+          cardId,
+          tasks.map((t) => ({ title: t.title, tier: t.tier ?? 'main', model: sub.modelForTier(t.tier) })),
+        )
+        const { results, total } = await sub.runSubtasks(tasks, threadIds)
+        // 子 agent 独立记账的 token 总账，汇总进主对话用量展示
+        useChatStore.setState((s) => ({
+          usage: {
+            ...s.usage,
+            agents: {
+              input: (s.usage.agents?.input ?? 0) + total.input,
+              output: (s.usage.agents?.output ?? 0) + total.output,
+            },
+          },
+        }))
+        // 结果经 agent state 传递：主上下文只收摘要（单条截断），全文留在各 agent 线程可查
+        const RESULT_CAP = 1500
+        const body = results
+          .map((r, i) => {
+            const text = r.text.length > RESULT_CAP
+              ? r.text.slice(0, RESULT_CAP) + '\n…（已截断，全文见对应 agent 视图）'
+              : r.text
+            return `## 子任务 ${i + 1}：${r.title} [${r.status === 'done' ? '完成' : r.status === 'cancelled' ? '已取消' : '异常'}]（模型：${r.model}）\n${text}`
+          })
+          .join('\n\n')
+        const result = `共 ${results.length} 个子任务已并行执行（完整过程与结果全文存于各 agent 线程，可在对话面板切换查看）。结果摘要：\n\n${body}`
+        return { result, summary: `已执行 ${results.length} 个子任务` }
+      }
+
       case 'load_skill': {
         const skillId = String(args.skill_id ?? '').trim()
         if (!skillId) {
@@ -162,7 +260,7 @@ export async function executeTool(name: string, args: Record<string, unknown>): 
       }
 
       default:
-        return { result: `错误：未知工具 ${name}。可用工具：list_files / search_files / read_file / write_file / run_project / get_build_status / stop_project / askUserQuestion / load_skill。`, summary: `未知工具 ${name}` }
+        return { result: `错误：未知工具 ${name}。可用工具：list_files / search_files / read_file / write_file / run_once / report_start_commands / run_project / get_build_status / stop_project / dispatch_subtasks / askUserQuestion / load_skill。`, summary: `未知工具 ${name}` }
     }
   } catch (e) {
     return { result: `工具执行失败：${String(e)}`, summary: '执行失败' }

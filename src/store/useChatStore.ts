@@ -15,6 +15,7 @@ import { buildSystemPrompt, TOOL_DEFS } from '@/services/ai'
 import { executeTool } from '@/services/tools'
 import { useAppStore } from './useAppStore'
 import { uid, safeParseObject } from '@/utils/id'
+import { estimateTokens } from '@/utils/tokens'
 import type {
   AiCompletion, ChatMessage, OAIMessage, ToolCall,
 } from '@/types'
@@ -47,8 +48,8 @@ interface ChatState {
   epoch: number
   /** 预览页选中的元素（发送下一条消息时附带进上下文） */
   pendingElement: PickedElement | null
-  /** token 用量：input=最近一次 prompt 大小；output=累计生成 */
-  usage: { input: number; output: number }
+  /** token 用量：input=最近一次 prompt 大小；output=累计生成；agents=子 agent 累计（汇总展示） */
+  usage: { input: number; output: number; agents?: { input: number; output: number } }
   /** 当前对话会话 id：AI 写文件的快照按会话分组，重置对话时换新 */
   sessionId: string
 
@@ -149,6 +150,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (cur.status === 'streaming' && cur.activeRequestId) {
       void api.aiCancel(cur.activeRequestId).catch(() => {})
     }
+    // 子 agent 的在途模型请求一并取消（dispatch_subtasks 执行期间主状态是 tools，上面那条够不到）
+    void import('@/services/subagent')
+      .then((m) => m.cancelActiveAgentRequests())
+      .catch(() => {})
     // 若正卡在 askUserQuestion，解除挂起让循环走到下一轮的取消检查
     const s = get()
     if (s.status === 'awaiting-user' && s.pendingAsk) {
@@ -214,17 +219,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
 }))
 
 // ---------- Agent 循环 ----------
-
-/** 粗略 token 估算：ASCII 4 字符 / 非 ASCII（中日韩等）1 字符 ≈ 1 token */
-function estimateTokens(text: string): number {
-  let ascii = 0
-  let other = 0
-  for (let i = 0; i < text.length; i++) {
-    if (text.charCodeAt(i) < 128) ascii++
-    else other++
-  }
-  return Math.ceil(ascii / 4) + other
-}
 
 /** 可重试的错误：网络类（连接不通/中断/超时/DNS 等）；业务类错误（鉴权、参数）不重试 */
 function isRetryableError(msg: string): boolean {
@@ -341,7 +335,7 @@ async function runAgentLoop() {
           result = `用户回答：${answer}`
           summary = answer
         } else {
-          const out = await executeTool(tc.name, args)
+          const out = await executeTool(tc.name, args, tc.id)
           result = out.result
           summary = out.summary
         }

@@ -1,11 +1,13 @@
 /**
  * 代码编辑器：CodeMirror 6（随 Vite 完整离线打包，无 CDN / Worker 依赖）。
- * 语法高亮 + 行号 + 基本编辑；Ctrl/Cmd+S 由全局快捷键保存。
+ * 语法高亮 + 行号 + 基本编辑 + Ctrl/Cmd+F 搜索（searchKeymap + 全局转发，见 useKeyboardShortcuts）；
+ * Ctrl/Cmd+S 由全局快捷键保存。
  * TODO(备选): 如需换成 Monaco Editor，仅需替换本文件（store 接口不变）。
  */
 import { useEffect, useRef, useState } from 'react'
 import { EditorState, Compartment, type Extension } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
+import { search } from '@codemirror/search'
 import { basicSetup } from 'codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
 import { javascript } from '@codemirror/lang-javascript'
@@ -23,6 +25,15 @@ import { basename, relativePath } from '@/utils/path'
 import { extOf } from '@/utils/path'
 import { ContextMenu, type ContextMenuItem } from '@/components/common/ContextMenu'
 import { IconAlert, IconClose, IconFile, IconFolder } from '@/components/common/icons'
+
+// ---------- 编辑器视图全局访问（Ctrl+F 全局转发用） ----------
+
+let activeEditorView: EditorView | null = null
+
+/** 当前挂载的编辑器视图；无挂载（未打开文件）时为 null */
+export function getEditorView(): EditorView | null {
+  return activeEditorView
+}
 
 export function EditorPane() {
   const rootPath = useFileStore((s) => s.rootPath)
@@ -70,6 +81,7 @@ export function EditorPane() {
       state: EditorState.create({ doc: '' }),
       extensions: [
         basicSetup,
+        search(), // 显式声明搜索面板（basicSetup 已含 searchKeymap，这里保证 search state 恒在）
         oneDark,
         langComp.current.of([]),
         EditorView.updateListener.of((u) => {
@@ -89,9 +101,11 @@ export function EditorPane() {
       ],
     })
     viewRef.current = view
+    activeEditorView = view
     return () => {
       view.destroy()
       viewRef.current = null
+      if (activeEditorView === view) activeEditorView = null
     }
   }, [hostEl])
 

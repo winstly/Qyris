@@ -263,6 +263,9 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 
 .modal {
   width: min(420px, calc(100vw - 48px));
+  max-height: min(720px, calc(100vh - 88px));
+  display: flex;
+  flex-direction: column;
   background: var(--panel-raised);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
@@ -270,7 +273,15 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
   padding: var(--space-4);
   animation: modal-in var(--motion-base) var(--ease-standard);
 }
-.modal--wide { width: min(480px, calc(100vw - 48px)); }
+.modal--wide { width: min(520px, calc(100vw - 48px)); }
+
+/* 弹窗内容滚动区：标题/按钮钉死，中间超长滚动（设置面板等高内容场景） */
+.modal__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
 
 @keyframes modal-in {
   from { opacity: 0; transform: translateY(10px) scale(0.98); }
@@ -280,6 +291,7 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 
 .modal__head {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   justify-content: space-between;
   font-size: var(--text-base);
@@ -325,6 +337,7 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 
 .modal__actions {
   display: flex;
+  flex-shrink: 0;
   justify-content: flex-end;
   gap: var(--space-2);
   margin-top: var(--space-4);
@@ -363,6 +376,7 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 /* 设置面板 tab 导航 */
 .settings-tabs {
   display: flex;
+  flex-shrink: 0;
   gap: 4px;
   margin-bottom: var(--space-4);
   border-bottom: 1px solid var(--border-soft);
@@ -383,25 +397,21 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 }
 
 /* 设置面板下拉（服务商 / 主题）：去原生箭头，自绘 chevron */
-.field__select {
-  width: 100%;
-  padding: 8px 32px 8px 10px;
-  background-color: var(--panel);
-  background-image: url("data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2024%2024'%20fill='none'%20stroke='%238b949e'%20stroke-width='2'%20stroke-linecap='round'%20stroke-linejoin='round'%3E%3Cpath%20d='m6%209%206%206%206-6'/%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 10px center;
-  background-size: 15px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  color: var(--fg);
-  cursor: pointer;
-  appearance: none;
-  -webkit-appearance: none;
-  transition: border-color var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+
+/* 任务档位模型设置：2×2 紧凑网格 */
+.settings-tiers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 12px;
+  margin-top: 4px;
 }
-.field__select:hover { border-color: var(--border); }
-.field__select:focus { border-color: var(--accent); }
+.settings-tiers__row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.settings-tiers__label { font-size: var(--text-xs); color: var(--fg-2); user-select: none; }
 
 /* 自绘下拉（替代原生 select） */
 .select { position: relative; width: 100%; }
@@ -453,6 +463,37 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 .select__option:hover { background: var(--accent-dim); color: var(--fg); }
 .select__option--active { color: var(--accent); background: transparent; }
 .select__option-check { flex-shrink: 0; color: var(--accent); }
+
+/* 紧凑规格（预览地址栏等窄空间） */
+.select--sm .select__trigger { padding: 3px 8px; font-size: var(--text-micro); gap: 6px; }
+.select--sm .select__menu { max-height: 200px; }
+.select--sm .select__option { padding: 4px 8px; font-size: var(--text-micro); }
+
+/* 可搜索下拉：菜单顶部搜索框 + 空态 */
+.select__search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--edge-hair);
+}
+.select__search-icon { flex-shrink: 0; color: var(--muted); }
+.select__search-input {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 4px;
+  background: transparent;
+  border: none;
+  outline: none;
+  font-size: var(--text-sm);
+  color: var(--fg);
+}
+.select__search-input::placeholder { color: var(--muted); }
+.select__empty { padding: 8px 10px; font-size: var(--text-sm); color: var(--muted); text-align: center; }
+.select__value--placeholder { color: var(--muted); }
+.select__trigger:disabled { cursor: not-allowed; opacity: 0.55; }
+.select__trigger:disabled:hover { border-color: var(--edge); background: color-mix(in oklab, var(--s2), var(--deepen) 10%); }
 
 .notice {
   display: flex;

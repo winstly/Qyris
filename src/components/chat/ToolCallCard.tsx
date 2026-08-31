@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import type { ToolCall } from '@/types'
 import { IconCheck, IconAlert, IconFolder, IconFile, IconPencil, IconTerminal } from '@/components/common/icons'
+import { AgentToolCard } from './AgentPanel'
 
 const TOOL_META: Record<string, { label: string; icon: ReactNode }> = {
   list_files: { label: '列出目录', icon: <IconFolder size={13} /> },
@@ -11,6 +12,8 @@ const TOOL_META: Record<string, { label: string; icon: ReactNode }> = {
 /** 工具调用过程卡片：正在读取 xxx → 已读取 xxx（点击展开详情）。 */
 export function ToolCallCard({ call }: { call: ToolCall }) {
   const [open, setOpen] = useState(false)
+  // 子任务编排走专用卡片（批次面板 + 实时转录）
+  if (call.name === 'dispatch_subtasks') return <AgentToolCard call={call} />
   const meta = TOOL_META[call.name] ?? { label: call.name, icon: <IconTerminal size={13} /> }
   const target = String(call.args.path ?? call.args.dir ?? '')
 

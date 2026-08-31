@@ -32,16 +32,37 @@ export interface FsChangedEvent {
 
 // ---------- AI / 对话 ----------
 
+/** 任务档位模型配置：空缺的档位回退主模型 */
+export interface ModelTiers {
+  /** 深度推理：疑难调试 / 架构分析 */
+  thinking?: string
+  /** 轻量快速（Haiku 级）：批量查找 / 轻量总结 */
+  fast?: string
+  /** 中等（Sonnet 级）：常规代码修改 */
+  middle?: string
+  /** 最重（Opus 级）：复杂重构 / 跨模块改动 */
+  heavy?: string
+}
+
 export interface AiSettings {
   baseUrl: string
+  /** 主模型：规划 + 复杂任务 + 兜底 */
   model: string
   provider: 'openai' | 'anthropic'
+  /** 可选档位模型 */
+  tiers?: ModelTiers
 }
 
 export interface RecentProject {
   path: string
   name: string
   lastOpened: number
+}
+
+/** 单个服务的启动命令（AI 编译阶段的识别结果，按项目路径存档） */
+export interface StartCommand {
+  name: string
+  run: string
 }
 
 /** Skill 文件的 frontmatter 摘要（不含 body 内容） */
@@ -61,9 +82,13 @@ export interface AppConfig {
   aiBaseUrl: string | null
   aiModel: string | null
   aiProvider: 'openai' | 'anthropic' | null
+  /** 任务档位模型（thinking/fast/middle/heavy，空缺回退主模型） */
+  aiTiers?: ModelTiers
   recentProjects?: RecentProject[]
   /** Skills 目录绝对路径（可选） */
   skillsDir?: string | null
+  /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「运行」直接执行） */
+  startupCommands?: Record<string, StartCommand[]>
 }
 
 export interface AiToolCall {

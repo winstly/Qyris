@@ -1,8 +1,12 @@
+import { useMemo } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useChatStore, type ChatStatus } from '@/store/useChatStore'
 import { useFileStore } from '@/store/useFileStore'
+import { useAgentStore } from '@/store/useAgentStore'
 import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
+import { AgentView } from './AgentPanel'
+import { Select } from '@/components/common/Select'
 import { IconGear, IconTrash, IconUndo } from '@/components/common/icons'
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
@@ -20,6 +24,22 @@ export function ChatPanel() {
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const sessionId = useChatStore((s) => s.sessionId)
   const hasSessionChanges = useFileStore((s) => Object.values(s.snapshots).some((v) => v.sessionId === sessionId))
+  const agentOrder = useAgentStore((s) => s.order)
+  const agentThreads = useAgentStore((s) => s.threads)
+  const activeThreadId = useAgentStore((s) => s.activeThreadId)
+  const selectThread = useAgentStore((s) => s.selectThread)
+
+  // 切换器只列「活」的 agent（待执行/运行中）：完成/取消的从列表清理，
+  // 避免无效条目越积越多；结果回查走派发卡片的面板展开。
+  const liveAgentIds = useMemo(
+    () =>
+      agentOrder.filter((id) => {
+        const st = agentThreads[id]?.status
+        return st === 'running' || st === 'pending'
+      }),
+    [agentOrder, agentThreads],
+  )
+  const showAgentBar = liveAgentIds.length > 0 || !!activeThreadId
 
   const revertSession = async () => {
     const ok = await useAppStore.getState().showConfirm(
@@ -36,7 +56,10 @@ export function ChatPanel() {
 
   const clearChat = async () => {
     const ok = await useAppStore.getState().showConfirm('清空对话', '确定清空当前全部对话吗？此操作不可撤销。')
-    if (ok) useChatStore.getState().clear()
+    if (ok) {
+      useChatStore.getState().clear()
+      useAgentStore.getState().clear()
+    }
   }
 
   return (
@@ -58,7 +81,30 @@ export function ChatPanel() {
         </div>
       </header>
 
-      <MessageList />
+      {/* agent 切换器：只列活着的 agent（完成/取消自动清理出列表）；正在查看的线程始终保留选项 */}
+      {showAgentBar && (
+        <div className="chat__agentbar">
+          <Select
+            size="sm"
+            value={activeThreadId ?? 'main'}
+            onChange={(v) => selectThread(v === 'main' ? null : v)}
+            options={[
+              { value: 'main', label: '主对话' },
+              ...liveAgentIds.map((id) => {
+                const t = agentThreads[id]
+                const flag = t?.status === 'running' ? ' ●' : ' ○'
+                return { value: id, label: `${t?.title ?? id}${flag}` }
+              }),
+              ...(activeThreadId && !liveAgentIds.includes(activeThreadId) && agentThreads[activeThreadId]
+                ? [{ value: activeThreadId, label: `${agentThreads[activeThreadId].title}（已结束）` }]
+                : []),
+            ]}
+            ariaLabel="切换查看 agent"
+          />
+        </div>
+      )}
+
+      {activeThreadId && agentThreads[activeThreadId] ? <AgentView /> : <MessageList />}
       <ChatInput />
     </aside>
   )

@@ -1,5 +1,7 @@
 import { useAppStore } from '@/store/useAppStore'
 import { useChatStore } from '@/store/useChatStore'
+import { useFileStore } from '@/store/useFileStore'
+import { useBuildStore } from '@/store/useBuildStore'
 import { api } from '@/services/desktop'
 import { IconClock, IconFolder, IconTrash } from '@/components/common/icons'
 import { basename } from '@/utils/path'
@@ -69,6 +71,7 @@ export function HistoryTab() {
                       { id: 'session', label: '同时删除对话历史（不可恢复）' },
                       { id: 'files', label: '同时删除项目文件（不可恢复）' },
                     ],
+                    { holdOpen: true, confirmingText: '删除中…' },
                   ).then(async (result) => {
                     const r = result as { confirmed?: boolean; checks?: Record<string, boolean> } | boolean | null
                     if (r && typeof r === 'object' && 'confirmed' in r && r.confirmed) {
@@ -80,16 +83,42 @@ export function HistoryTab() {
                           try { await api.saveSession(proj.path, []) } catch { /* 忽略 */ }
                         }
                       }
-                      // 删除项目文件
+                      // 删除项目文件（holdOpen：此期间确认框显示「删除中…」，完成后才关闭）
+                      let filesFailed = false
+                      let filesError = ''
                       if (r.checks?.files) {
                         try {
+                          if (isActive) {
+                            // 正在打开的项目：先停 watcher 与子进程，释放 Windows 目录句柄，
+                            // 否则 fs.rm 删根目录会 EBUSY/EPERM（句柄占用的经典问题）
+                            await api.stopWatching().catch(() => {})
+                            await api.stopProject().catch(() => {})
+                          }
                           await api.deleteProjectFiles(proj.path)
-                          console.log('[history] 已删除项目文件：', proj.path)
+                          // 清空该路径的挂档数据：同路径重建项目时不允许旧数据复活
+                          // （启动命令：旧命令重跑必炸；快照：回退会把旧内容覆盖到新项目上）
+                          await useAppStore.getState().clearStartupCommands(proj.path)
+                          await api.clearProjectSnapshots(proj.path).catch(() => {})
+                          if (isActive) {
+                            // 工作区复位：文件树/编辑器/服务槽回到「未打开项目」状态
+                            useFileStore.getState().reset()
+                            useBuildStore.getState().reset()
+                            useAppStore.setState({ projectPath: null, projectName: '' })
+                            void api.setWindowTitle('轻驭').catch(() => {})
+                          }
                         } catch (e) {
-                          console.error('[history] 删除项目文件失败：', e)
+                          // 删除失败必须告知并保留历史条目（可重试），静默吞掉 = 假装删掉了
+                          filesFailed = true
+                          filesError = String(e)
                         }
                       }
-                      removeRecentProject(proj.path)
+                      // 先关确认框再弹错误提示（两者共用同一个 dialog 槽，顺序反了 alert 会被杀掉）
+                      useAppStore.getState().closeDialog()
+                      if (filesFailed) {
+                        void useAppStore.getState().showAlert('删除项目文件失败', filesError)
+                      } else {
+                        removeRecentProject(proj.path)
+                      }
                     } else if (r === true) {
                       removeRecentProject(proj.path)
                     }

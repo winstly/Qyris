@@ -2,12 +2,9 @@ import { useRef, useState, useCallback, useEffect } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useChatStore } from '@/store/useChatStore'
 import { isDesktop } from '@/services/desktop'
+import { fmtTok } from '@/utils/tokens'
 import { IconSend, IconStop, IconClose, IconTarget } from '@/components/common/icons'
 import type { SkillMeta } from '@/types'
-
-function fmtTok(n: number): string {
-  return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n)
-}
 
 /** 多行输入：Enter 发送 / Shift+Enter 换行，自动增高；生成中可点「停止」。
  *  输入 "/" 触发 Skills 选择菜单；选中后作为上下文，用户继续写描述再发送。 */
@@ -255,6 +252,9 @@ export function ChatInput() {
         {status === 'awaiting-user' && <span className="chat__hint-ask">AI 正在等待你的选择 ↑</span>}
         {(usage.input > 0 || usage.output > 0) && (
           <span className="chat__tokens">输入 {fmtTok(usage.input)} · 输出 {fmtTok(usage.output)}</span>
+        )}
+        {usage.agents && (usage.agents.input > 0 || usage.agents.output > 0) && (
+          <span className="chat__tokens" title="本次会话所有子 agent 的 token 总消耗">子agent ↑{fmtTok(usage.agents.input)} ↓{fmtTok(usage.agents.output)}</span>
         )}
       </div>
     </div>

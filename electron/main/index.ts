@@ -1,5 +1,5 @@
 /** Electron 主进程入口：生命周期、窗口状态持久化、IPC 注册、退出清理 */
-import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { setMainWindow } from '../lib/emitter'
@@ -80,6 +80,7 @@ function registerIpc(): void {
   handle('list_snapshots', (p) => snapshot.listSnapshots(p.projectRoot))
   handle('restore_file', (p) => snapshot.restoreFile(p.projectRoot, p.path))
   handle('restore_session', (p) => snapshot.restoreSession(p.projectRoot, p.sessionId))
+  handle('clear_project_snapshots', (p) => snapshot.clearProjectSnapshots(p.projectRoot))
 
   // 会话历史持久化
   handle('load_session', (p) => sessions.loadSession(p.projectRoot))
@@ -87,13 +88,14 @@ function registerIpc(): void {
 
   // 子进程 / watcher
   handle('run_project', (p) => proc.runProject(p.projectRoot, p.name, p.command))
+  handle('run_once', (p) => proc.runOnce(p.projectRoot, p.command))
   handle('stop_project', (p) => proc.stopProject(p?.name))
   handle('start_watching', (p) => watcher.startWatching(p.projectRoot))
   handle('stop_watching', () => watcher.stopWatching())
 
   // 配置与密钥（刻意无 get_secret：明文 Key 不出主进程）
   handle('get_config', () => config.getConfig())
-  handle('set_config', (p) => config.setConfig(p.config))
+  handle('merge_config', (p) => config.mergeConfig(p.patch))
   handle('set_secret', (p) => secrets.setSecret(p.key, p.value))
   handle('has_secret', (p) => secrets.hasSecret(p.key))
   handle('delete_secret', (p) => secrets.deleteSecret(p.key))
@@ -110,9 +112,12 @@ function registerIpc(): void {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
-  // 创建项目
+  // 创建项目 / Git
   handle('create_empty_project', (p) => projectCreate.createEmptyProject(p.parentDir, p.name))
-  handle('clone_repos', (p) => projectCreate.cloneRepos(p.parentDir, p.urls))
+  handle('clone_repos', (p) => projectCreate.cloneRepos(p.parentDir, p.repos))
+  handle('test_repo', (p) => projectCreate.testRepo(p.url))
+  handle('git_repo_info', (p) => projectCreate.gitRepoInfo(p.dir))
+  handle('git_checkout', (p) => projectCreate.gitCheckout(p.dir, p.branch))
   handle('pick_parent_dir', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -139,6 +144,19 @@ function registerIpc(): void {
   handle('set_window_title', (p) => {
     mainWindow?.setTitle(String(p.title))
   })
+  handle('open_external', (p) => {
+    const url = String(p.url ?? '')
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error(`非法 URL：${url}`)
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new Error(`仅允许 http/https 链接：${url}`)
+    }
+    return shell.openExternal(url)
+  })
   handle('start_element_pick', (p) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       void inspect.startElementPick(mainWindow.webContents, String(p.url ?? ''))
@@ -148,6 +166,11 @@ function registerIpc(): void {
 
 function createWindow(): void {
   const state = loadWindowState()
+  // 窗口/任务栏图标：dev 用仓库内的 build/icon.png；打包后从 extraResources 取
+  // （不设置时 Windows 显示宿主二进制的图标——dev 下就是默认 Electron 图标）
+  const iconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(app.getAppPath(), 'build', 'icon.png')
   const win = new BrowserWindow({
     x: state.x,
     y: state.y,
@@ -156,6 +179,7 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 600,
     title: '轻驭',
+    icon: iconPath,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -170,6 +194,19 @@ function createWindow(): void {
   setMainWindow(win)
 
   win.once('ready-to-show', () => win.show())
+  // 外链统一走系统默认浏览器（target="_blank" 的 <a> 也经此处）：拒绝弹 Electron 新窗口
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        void shell.openExternal(url)
+        return { action: 'deny' }
+      }
+    } catch {
+      /* 非 URL 放行默认行为 */
+    }
+    return { action: 'allow' }
+  })
   // 无应用菜单后失去 Ctrl+Shift+I：F12 兜底切换开发者工具
   win.webContents.on('before-input-event', (_event, input) => {
     if (input.type === 'keyDown' && input.key === 'F12') {

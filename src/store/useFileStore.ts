@@ -29,6 +29,8 @@ interface FileState {
   snapshots: Record<string, { ts: number; sessionId: string }>
 
   openProject: (root: string) => Promise<void>
+  /** 清空全部状态回到未打开项目（删除当前项目文件后调用） */
+  reset: () => void
   loadSnapshots: () => Promise<void>
   addSnapshot: (path: string, sessionId: string) => void
   restoreSnapshot: (path: string) => Promise<void>
@@ -84,6 +86,23 @@ export const useFileStore = create<FileState>()((set, get) => ({
     })
     await get().loadChildren(root)
     void get().loadSnapshots()
+  },
+
+  reset: () => {
+    set({
+      rootPath: null,
+      childrenMap: {},
+      loadingDirs: {},
+      expanded: {},
+      openTabs: [],
+      activePath: null,
+      contents: {},
+      dirty: {},
+      binaryFiles: {},
+      truncatedFiles: {},
+      cursor: { line: 1, col: 1 },
+      snapshots: {},
+    })
   },
 
   loadSnapshots: async () => {

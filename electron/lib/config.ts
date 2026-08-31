@@ -10,13 +10,23 @@ export interface RecentProject {
   lastOpened: number
 }
 
+/** 单个服务的启动命令（AI 编译阶段的识别结果，按项目路径存档） */
+export interface StartCommand {
+  name: string
+  run: string
+}
+
 export interface AppConfig {
   lastProjectPath: string | null
   aiBaseUrl: string | null
   aiModel: string | null
   aiProvider: 'openai' | 'anthropic' | null
+  /** 任务档位模型（thinking/fast/middle/heavy，空缺回退主模型） */
+  aiTiers?: { thinking?: string; fast?: string; middle?: string; heavy?: string }
   recentProjects?: RecentProject[]
   skillsDir?: string | null
+  /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「运行」直接执行） */
+  startupCommands?: Record<string, StartCommand[]>
 }
 
 /** 读取失败一律回默认值（get_config 永不 reject，与 config.rs 一致） */
@@ -29,12 +39,27 @@ export async function getConfig(): Promise<AppConfig> {
       aiBaseUrl: parsed.aiBaseUrl ?? null,
       aiModel: parsed.aiModel ?? null,
       aiProvider: parsed.aiProvider ?? null,
+      aiTiers:
+        parsed.aiTiers && typeof parsed.aiTiers === 'object' && !Array.isArray(parsed.aiTiers)
+          ? parsed.aiTiers
+          : undefined,
       recentProjects: Array.isArray(parsed.recentProjects) ? parsed.recentProjects : [],
       skillsDir: parsed.skillsDir ?? null,
+      startupCommands:
+        parsed.startupCommands && typeof parsed.startupCommands === 'object' && !Array.isArray(parsed.startupCommands)
+          ? parsed.startupCommands
+          : undefined,
     }
   } catch {
     return { lastProjectPath: null, aiBaseUrl: null, aiModel: null, aiProvider: null, recentProjects: [], skillsDir: null }
   }
+}
+
+/** 部分合并写入：读当前配置 → 浅合并 → 整体落盘。
+ *  新增配置字段时调用方只需传变更项，避免全量覆盖漏字段静默丢数据。 */
+export async function mergeConfig(patch: Partial<AppConfig>): Promise<void> {
+  const current = await getConfig()
+  await setConfig({ ...current, ...patch })
 }
 
 /** 整体覆盖写入，立即落盘（pretty JSON） */

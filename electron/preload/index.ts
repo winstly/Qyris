@@ -30,6 +30,7 @@ const desktopAPI = {
   restoreFile: (projectRoot: string, path: string) => ipcRenderer.invoke('restore_file', { projectRoot, path }),
   restoreSession: (projectRoot: string, sessionId: string) =>
     ipcRenderer.invoke('restore_session', { projectRoot, sessionId }) as Promise<number>,
+  clearProjectSnapshots: (projectRoot: string) => ipcRenderer.invoke('clear_project_snapshots', { projectRoot }),
   loadSession: (projectRoot: string) =>
     ipcRenderer.invoke('load_session', { projectRoot }) as Promise<unknown[] | null>,
   saveSession: (projectRoot: string, messages: unknown[]) =>
@@ -42,13 +43,15 @@ const desktopAPI = {
   // 子进程 / watcher
   runProject: (projectRoot: string, name: string, command: string) =>
     ipcRenderer.invoke('run_project', { projectRoot, name, command }),
+  runOnce: (projectRoot: string, command: string) =>
+    ipcRenderer.invoke('run_once', { projectRoot, command }),
   stopProject: (name?: string) => ipcRenderer.invoke('stop_project', { name: name ?? null }),
   startWatching: (projectRoot: string) => ipcRenderer.invoke('start_watching', { projectRoot }),
   stopWatching: () => ipcRenderer.invoke('stop_watching'),
 
   // 配置与密钥
   getConfig: () => ipcRenderer.invoke('get_config'),
-  setConfig: (config: unknown) => ipcRenderer.invoke('set_config', { config }),
+  mergeConfig: (patch: unknown) => ipcRenderer.invoke('merge_config', { patch }),
   setSecret: (key: string, value: string) => ipcRenderer.invoke('set_secret', { key, value }),
   hasSecret: (key: string) => ipcRenderer.invoke('has_secret', { key }),
   deleteSecret: (key: string) => ipcRenderer.invoke('delete_secret', { key }),
@@ -58,9 +61,14 @@ const desktopAPI = {
   readSkill: (dir: string, skillId: string) => ipcRenderer.invoke('read_skill', { dir, skillId }) as Promise<string | null>,
   pickSkillsDir: () => ipcRenderer.invoke('pick_skills_dir') as Promise<string | null>,
 
-  // 创建项目
+  // 创建项目 / Git
   createEmptyProject: (parentDir: string, name: string) => ipcRenderer.invoke('create_empty_project', { parentDir, name }) as Promise<string>,
-  cloneRepos: (parentDir: string, urls: string[]) => ipcRenderer.invoke('clone_repos', { parentDir, urls }) as Promise<string[]>,
+  cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => ipcRenderer.invoke('clone_repos', { parentDir, repos }) as Promise<string[]>,
+  testRepo: (url: string) =>
+    ipcRenderer.invoke('test_repo', { url }) as Promise<{ valid: boolean; branches: string[]; error: string | null }>,
+  gitRepoInfo: (dir: string) =>
+    ipcRenderer.invoke('git_repo_info', { dir }) as Promise<{ isRepo: boolean; currentBranch: string | null; branches: string[] }>,
+  gitCheckout: (dir: string, branch: string) => ipcRenderer.invoke('git_checkout', { dir, branch }),
   pickParentDir: () => ipcRenderer.invoke('pick_parent_dir') as Promise<string | null>,
 
   // AI
@@ -73,6 +81,7 @@ const desktopAPI = {
   pickDirectory: () => ipcRenderer.invoke('pick_directory'),
   setWindowTitle: (title: string) => ipcRenderer.invoke('set_window_title', { title }),
   startElementPick: (url: string) => ipcRenderer.invoke('start_element_pick', { url }),
+  openExternal: (url: string) => ipcRenderer.invoke('open_external', { url }),
 
   // 事件（main → renderer），返回取消订阅函数
   onBuildOutput: (cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string }) => void): Unsubscribe =>

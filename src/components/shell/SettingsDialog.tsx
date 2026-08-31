@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useAppStore, type Theme } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
 import { SECRET_KEY } from '@/services/ai'
+import type { ModelTiers } from '@/types'
 import { IconClose, IconCheck, IconAlert, IconFolder } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
 
@@ -27,6 +28,7 @@ export function SettingsDialog() {
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
   const [model, setModel] = useState(settings.model)
   const [provider, setProvider] = useState<'openai' | 'anthropic'>(settings.provider)
+  const [tiers, setTiers] = useState<ModelTiers>(settings.tiers ?? {})
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
@@ -37,6 +39,7 @@ export function SettingsDialog() {
       setBaseUrl(settings.baseUrl)
       setModel(settings.model)
       setProvider(settings.provider)
+      setTiers(settings.tiers ?? {})
       setApiKeyInput('')
       setTestResult(null)
     }
@@ -48,7 +51,17 @@ export function SettingsDialog() {
     if (apiKeyInput.trim()) {
       await api.setSecret(SECRET_KEY, apiKeyInput.trim())
     }
-    await saveSettings({ baseUrl: baseUrl.trim(), model: model.trim(), provider })
+    // 空档位剔除（回退主模型）
+    const cleanTiers: ModelTiers = {}
+    for (const [k, v] of Object.entries(tiers)) {
+      if (v && v.trim()) cleanTiers[k as keyof ModelTiers] = v.trim()
+    }
+    await saveSettings({
+      baseUrl: baseUrl.trim(),
+      model: model.trim(),
+      provider,
+      tiers: Object.keys(cleanTiers).length ? cleanTiers : undefined,
+    })
     await refreshHasApiKey()
     setOpen(false)
   }
@@ -104,6 +117,7 @@ export function SettingsDialog() {
 
         {tab === 'model' ? (
           <>
+            <div className="modal__body">
             <label className="field">
               <span className="field__label">服务商</span>
               <Select
@@ -146,14 +160,38 @@ export function SettingsDialog() {
             </label>
 
             <label className="field">
-              <span className="field__label">模型名称</span>
+              <span className="field__label">主模型</span>
               <input
                 className="field__input mono"
                 value={model}
                 onChange={(e) => setModel(e.target.value)}
                 placeholder="gpt-4o-mini"
               />
+              <span className="field__hint">规划 + 复杂任务 + 未配置档位的兜底模型</span>
             </label>
+
+            <div className="field">
+              <span className="field__label">任务档位模型（可选，留空用主模型）</span>
+              <div className="settings-tiers">
+                {([
+                  { key: 'thinking', label: 'Thinking · 深度推理', hint: '疑难调试 / 架构分析' },
+                  { key: 'fast', label: 'Haiku 级 · 轻量快速', hint: '查找 / 统计 / 总结' },
+                  { key: 'middle', label: 'Sonnet 级 · 中等', hint: '常规代码修改' },
+                  { key: 'heavy', label: 'Opus 级 · 最重', hint: '复杂重构 / 跨模块改动' },
+                ] as const).map(({ key, label, hint }) => (
+                  <label key={key} className="settings-tiers__row" title={hint}>
+                    <span className="settings-tiers__label">{label}</span>
+                    <input
+                      className="field__input mono"
+                      value={tiers[key] ?? ''}
+                      onChange={(e) => setTiers((prev) => ({ ...prev, [key]: e.target.value }))}
+                      placeholder="留空用主模型"
+                    />
+                  </label>
+                ))}
+              </div>
+              <span className="field__hint">AI 规划后按子任务难度选档执行；未配置的档位自动回退主模型</span>
+            </div>
 
             <label className="field">
               <span className="field__label">Skills 目录</span>
@@ -202,6 +240,7 @@ export function SettingsDialog() {
                 <span>{testResult.text}</span>
               </div>
             )}
+            </div>
 
             <div className="modal__actions modal__actions--split">
               <div className="modal__actions-left">
@@ -222,19 +261,21 @@ export function SettingsDialog() {
           </>
         ) : (
           <>
-            <label className="field">
-              <span className="field__label">主题</span>
-              <Select
-                value={theme}
-                onChange={(v) => setTheme(v as Theme)}
-                options={[
-                  { value: 'system', label: '跟随系统（白天浅色 / 晚上深色）' },
-                  { value: 'light', label: '浅色' },
-                  { value: 'dark', label: '深色' },
-                ]}
-              />
-              <span className="field__hint">选择后立即生效；「跟随系统」随操作系统外观自动切换</span>
-            </label>
+            <div className="modal__body">
+              <label className="field">
+                <span className="field__label">主题</span>
+                <Select
+                  value={theme}
+                  onChange={(v) => setTheme(v as Theme)}
+                  options={[
+                    { value: 'system', label: '跟随系统（白天浅色 / 晚上深色）' },
+                    { value: 'light', label: '浅色' },
+                    { value: 'dark', label: '深色' },
+                  ]}
+                />
+                <span className="field__hint">选择后立即生效；「跟随系统」随操作系统外观自动切换</span>
+              </label>
+            </div>
 
             <div className="modal__actions">
               <button className="btn btn--primary" onClick={() => setOpen(false)}>完成</button>

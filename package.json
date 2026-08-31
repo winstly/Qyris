@@ -5,6 +5,7 @@
   "description": "轻驭 (Qyris) — Electron 桌面开发工作台（预览 / 文件 / AI 对话）",
   "main": "out/main/index.js",
   "scripts": {
+    "postinstall": "node scripts/ensure-electron.js",
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
@@ -12,6 +13,7 @@
   },
   "devDependencies": {
     "@codemirror/lang-css": "^6.3.0",
+    "@codemirror/search": "^6.0.0",
     "@codemirror/lang-html": "^6.4.9",
     "@codemirror/lang-java": "^6.0.2",
     "@codemirror/lang-javascript": "^6.2.2",

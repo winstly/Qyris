@@ -205,16 +205,24 @@ export async function deleteEntry(projectRoot: string, filePath: string): Promis
 
 /** 删除整个项目目录（递归删除，危险操作） */
 export async function deleteProjectFiles(projectRoot: string): Promise<void> {
-  // 安全校验：确认路径存在且是目录
+  // 幂等删除：目录已不存在视为成功（手动删过 / 重复删除的场景，不能阻塞历史条目移除）
   try {
     const st = await fsp.stat(projectRoot)
     if (!st.isDirectory()) throw new Error('目标不是目录')
   } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return
     throw new Error(`项目目录不存在或无法访问：${errorMessage(e)}`)
   }
   try {
-    await fsp.rm(projectRoot, { recursive: true, force: true })
+    // maxRetries/retryDelay：杀软 / 索引服务 / 资源管理器的瞬态占用（EBUSY/EPERM/ENOTEMPTY）
+    await fsp.rm(projectRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
   } catch (e) {
+    // rm 中途目录消失（并发删除）同样视为成功
+    try {
+      await fsp.access(projectRoot)
+    } catch {
+      return
+    }
     throw new Error(`删除项目文件失败：${errorMessage(e)}`)
   }
 }

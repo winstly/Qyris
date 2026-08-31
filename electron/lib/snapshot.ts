@@ -118,3 +118,12 @@ async function restoreOne(projectRoot: string, sessionId: string, absPath: strin
   await fsp.writeFile(absPath, meta.content, 'utf8')
   await fsp.rm(file).catch(() => {})
 }
+
+/** 项目文件被删除后清理其全部快照：同路径重建项目时旧快照不允许复活（回退会覆盖新项目内容） */
+export async function clearProjectSnapshots(projectRoot: string): Promise<void> {
+  try {
+    await fsp.rm(projectDir(projectRoot), { recursive: true, force: true })
+  } catch {
+    /* 清理失败不影响删除流程（force 下基本只剩权限类错误） */
+  }
+}

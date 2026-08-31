@@ -18,6 +18,7 @@ declare global {
     listSnapshots: (projectRoot: string) => Promise<Record<string, { ts: number; sessionId: string }>>
     restoreFile: (projectRoot: string, path: string) => Promise<void>
     restoreSession: (projectRoot: string, sessionId: string) => Promise<number>
+    clearProjectSnapshots: (projectRoot: string) => Promise<void>
     loadSession: (projectRoot: string) => Promise<unknown[] | null>
     saveSession: (projectRoot: string, messages: unknown[]) => Promise<void>
     createEntry: (projectRoot: string, parentDir: string, name: string, isDir: boolean) => Promise<TreeNode>
@@ -27,13 +28,14 @@ declare global {
 
     // 子进程 / watcher
     runProject: (projectRoot: string, name: string, command: string) => Promise<number>
+    runOnce: (projectRoot: string, command: string) => Promise<{ code: number | null; output: string }>
     stopProject: (name?: string) => Promise<void>
     startWatching: (projectRoot: string) => Promise<void>
     stopWatching: () => Promise<void>
 
     // 配置与密钥（无 getSecret）
     getConfig: () => Promise<AppConfig>
-    setConfig: (config: unknown) => Promise<void>
+    mergeConfig: (patch: unknown) => Promise<void>
     setSecret: (key: string, value: string) => Promise<void>
     hasSecret: (key: string) => Promise<boolean>
     deleteSecret: (key: string) => Promise<void>
@@ -43,9 +45,12 @@ declare global {
     readSkill: (dir: string, skillId: string) => Promise<string | null>
     pickSkillsDir: () => Promise<string | null>
 
-    // 创建项目
+    // 创建项目 / Git
     createEmptyProject: (parentDir: string, name: string) => Promise<string>
-    cloneRepos: (parentDir: string, urls: string[]) => Promise<string[]>
+    cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => Promise<string[]>
+    testRepo: (url: string) => Promise<{ valid: boolean; branches: string[]; error: string | null }>
+    gitRepoInfo: (dir: string) => Promise<{ isRepo: boolean; currentBranch: string | null; branches: string[] }>
+    gitCheckout: (dir: string, branch: string) => Promise<void>
     pickParentDir: () => Promise<string | null>
 
     // AI
@@ -57,6 +62,7 @@ declare global {
     pickDirectory: () => Promise<string | null>
     setWindowTitle: (title: string) => Promise<void>
     startElementPick: (url: string) => Promise<void>
+    openExternal: (url: string) => Promise<void>
 
     // 事件订阅（返回取消函数）
     onBuildOutput: DesktopEventSub<{ name: string; stream: 'stdout' | 'stderr'; line: string }>

@@ -10,6 +10,9 @@ files:
   - out/**
   - package.json
 asar: true
+# 窗口图标随包分发（BrowserWindow icon 运行时读取）
+extraResources:
+  - { from: build/icon.png, to: icon.png }
 win:
   target: nsis
   icon: build/icon.ico
