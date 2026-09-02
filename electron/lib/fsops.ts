@@ -1,4 +1,4 @@
-/** 文件系统命令 —— fs.rs 六个 command 的逐语义移植 */
+/** 文件系统命令 */
 import { promises as fsp, type Stats, type Dirent } from 'node:fs'
 import path from 'node:path'
 import { ensureInside, validateName } from './pathsafety'
@@ -64,7 +64,7 @@ export async function listDir(projectRoot: string, dir: string): Promise<TreeNod
     nodes.push({
       name: de.name,
       path: path.join(target, de.name),
-      // 不解析 symlink：与 Rust file_type() 行为一致（Unix 目录 symlink 显示为 file）
+      // 不解析 symlink，目录 symlink 显示为 file
       kind: de.isDirectory() ? 'folder' : 'file',
     })
   }
@@ -119,7 +119,7 @@ export async function readTextFile(projectRoot: string, filePath: string): Promi
   const target = await ensureInside(projectRoot, filePath)
   let meta: Stats
   try {
-    meta = await fsp.stat(target) // 跟随 symlink，与 Rust fs::metadata 一致
+    meta = await fsp.stat(target) // 跟随 symlink
   } catch (e) {
     throw new Error(`文件不存在或不可访问：${errorMessage(e)}`)
   }
@@ -134,10 +134,10 @@ export async function readTextFile(projectRoot: string, filePath: string): Promi
   }
   const slice = buf.subarray(0, MAX_READ_BYTES)
   if (slice.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
-    // 判二进制时 truncated 强制 false（与 Rust 一致）
+    // 二进制文件不计入截断
     return { content: '', isBinary: true, truncated: false }
   }
-  // Buffer.toString('utf8') 为 lossy 解析（非法序列 → U+FFFD），与 from_utf8_lossy 一致
+  // Buffer.toString('utf8') 为 lossy 解析（非法序列 → U+FFFD）
   return { content: slice.toString('utf8'), isBinary: false, truncated }
 }
 
@@ -162,7 +162,7 @@ export async function createEntry(
 ): Promise<TreeNode> {
   validateName(name)
   const parent = await ensureInside(projectRoot, parentDir)
-  const target = path.join(parent, name) // join 未 trim 的原始 name（与 Rust 一致）
+  const target = path.join(parent, name) // join 未 trim 的原始 name
   if (await exists(target)) throw new Error(`同名文件或文件夹已存在：${name}`)
   try {
     if (isDir) await fsp.mkdir(target)
@@ -195,12 +195,56 @@ export async function deleteEntry(projectRoot: string, filePath: string): Promis
   const target = await ensureInside(projectRoot, filePath)
   if (target === root) throw new Error('不能删除项目根目录')
   try {
-    const st = await fsp.stat(target) // 跟随 symlink，与 Rust target.is_dir() 一致
+    const st = await fsp.stat(target) // 跟随 symlink
     if (st.isDirectory()) await fsp.rm(target, { recursive: true })
     else await fsp.unlink(target)
   } catch (e) {
     throw new Error(`删除失败：${errorMessage(e)}`)
   }
+}
+
+/** 在目标目录中找到不冲突的路径，重名自动加 (N) 后缀 */
+async function uniqueDest(destParent: string, name: string): Promise<string> {
+  let dest = path.join(destParent, name)
+  if (!(await exists(dest))) return dest
+  const ext = path.extname(name)
+  const base = name.slice(0, name.length - ext.length)
+  for (let i = 1; ; i++) {
+    dest = path.join(destParent, `${base}(${i})${ext}`)
+    if (!(await exists(dest))) return dest
+  }
+}
+
+/** 递归复制文件/目录到目标目录，重名自动加 (N) 后缀 */
+export async function copyEntry(
+  projectRoot: string, srcPath: string, destDir: string,
+): Promise<TreeNode> {
+  const src = await ensureInside(projectRoot, srcPath)
+  const destParent = await ensureInside(projectRoot, destDir)
+  const dest = await uniqueDest(destParent, path.basename(src))
+  try {
+    await fsp.cp(src, dest, { recursive: true })
+  } catch (e) {
+    throw new Error(`复制失败：${errorMessage(e)}`)
+  }
+  const st = await fsp.stat(dest)
+  return { name: path.basename(dest), path: dest, kind: st.isDirectory() ? 'folder' : 'file' }
+}
+
+/** 移动文件/目录到目标目录，重名自动加 (N) 后缀 */
+export async function moveEntry(
+  projectRoot: string, srcPath: string, destDir: string,
+): Promise<TreeNode> {
+  const src = await ensureInside(projectRoot, srcPath)
+  const destParent = await ensureInside(projectRoot, destDir)
+  const dest = await uniqueDest(destParent, path.basename(src))
+  try {
+    await fsp.rename(src, dest)
+  } catch (e) {
+    throw new Error(`移动失败：${errorMessage(e)}`)
+  }
+  const st = await fsp.stat(dest)
+  return { name: path.basename(dest), path: dest, kind: st.isDirectory() ? 'folder' : 'file' }
 }
 
 /** 删除整个项目目录（递归删除，危险操作） */

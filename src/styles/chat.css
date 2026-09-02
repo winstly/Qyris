@@ -400,7 +400,25 @@
   font-family: var(--font-mono);
   font-size: var(--text-xs);
   line-height: 1.65;
+  color: var(--fg);
 }
+
+/* 覆盖 highlight.js 主题，使用设计系统颜色 */
+.hljs-keyword { color: #c678dd; }
+.hljs-string, .hljs-addition { color: #98c379; }
+.hljs-number, .hljs-literal { color: #d19a66; }
+.hljs-comment, .hljs-deletion { color: var(--muted); font-style: italic; }
+.hljs-built_in, .hljs-bullet { color: #e5c07b; }
+.hljs-attr, .hljs-attribute { color: #d19a66; }
+.hljs-selector-tag, .hljs-selector-class { color: #e06c75; }
+.hljs-type, .hljs-title { color: #e5c07b; }
+.hljs-symbol, .hljs-regexp { color: #56b6c2; }
+.hljs-variable, .hljs-template-variable { color: #e06c75; }
+.hljs-doctag { color: #c678dd; }
+.hljs-meta, .hljs-meta .hljs-keyword { color: #61afef; }
+.hljs-section { color: #61afef; font-weight: bold; }
+.hljs-name { color: #e06c75; }
+.hljs-link { color: #61afef; text-decoration: underline; }
 
 /* ============ 工具调用卡片 ============ */
 
@@ -580,9 +598,12 @@
   background: color-mix(in oklab, var(--surface), var(--deepen) 10%);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
+  transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
 }
-.chat__inputbox:focus-within { border-color: var(--accent); }
+.chat__inputbox:focus-within {
+  border-color: var(--accent);
+  background: var(--s2);
+}
 .chat__inputbox--disabled { opacity: 0.6; }
 
 .chat__textarea {
@@ -639,6 +660,18 @@
   overflow-y: auto;
   animation: slash-in var(--motion-fast) var(--ease-standard);
 }
+
+/* 编辑态 slash 菜单：浮层在 textarea 下方（不占对话流空间，同 ChatInput 的浮层体验） */
+.slash-menu--edit {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 30;
+  margin-top: 4px;
+  margin-bottom: 0;
+}
+.msg__edit { position: relative; }
 
 @keyframes slash-in {
   from { opacity: 0; transform: translateY(4px); }
@@ -876,4 +909,70 @@
 @keyframes agent-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.35; }
+}
+
+/* 编辑态：添加 Skill 下拉 */
+.msg__skill-add { position: relative; margin-bottom: 6px; }
+.msg__skill-add-btn {
+  padding: 2px 10px;
+  border: 1px dashed var(--edge);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--muted);
+  font-size: var(--text-xs);
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard), color var(--motion-fast) var(--ease-standard);
+}
+.msg__skill-add-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.msg__skill-add-btn:disabled { opacity: 0.4; cursor: default; }
+
+.msg__skill-picker {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  z-index: 30;
+  margin-top: 4px;
+  min-width: 200px;
+  max-height: 200px;
+  overflow: auto;
+  padding: 4px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--elev-raised);
+}
+.msg__skill-picker-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.msg__skill-picker-item:hover { background: var(--accent-dim); }
+.msg__skill-picker-name { font-size: var(--text-sm); color: var(--fg); }
+.msg__skill-picker-desc { font-size: var(--text-xs); color: var(--muted); }
+
+/* slash 菜单：已选 skill 勾选徽标（accent 柔蓝灰；对号加粗描边保证可见） */
+.slash-menu__item-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--accent-on);
+  flex-shrink: 0;
+}
+.slash-menu__item-check svg { color: var(--accent-on); stroke-width: 3; }
+.slash-menu__item-check-placeholder {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
 }

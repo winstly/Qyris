@@ -1,6 +1,6 @@
 /**
- * 凭据存储 —— secret.rs 语义 + Electron safeStorage 实现。
- * 账户名 `api_key`（与前端 SECRET_KEY 一致）；secrets.json 存 base64 密文，落盘即非明文。
+ * 凭据存储：Electron safeStorage 实现。
+ * secrets.json 存 base64 密文，落盘即非明文。
  * 注意：get 不暴露给渲染层（明文 Key 不出主进程），仅 ai.ts 内部直读。
  */
 import { safeStorage } from 'electron'
@@ -46,7 +46,7 @@ export async function hasSecret(key: string): Promise<boolean> {
   return typeof v === 'string' && v.length > 0
 }
 
-/** 删除不存在的 key 视为成功（与 Rust EntryNotFound 容忍一致） */
+/** 删除不存在的 key 视为成功 */
 export async function deleteSecret(key: string): Promise<void> {
   try {
     const all = await readAll()

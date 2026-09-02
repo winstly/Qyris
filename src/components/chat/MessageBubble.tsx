@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import type { ChatMessage } from '@/types'
-import { IconClose } from '@/components/common/icons'
+import { useState, useEffect } from 'react'
+import type { ChatMessage, SkillMeta } from '@/types'
+import { IconClose, IconCheck } from '@/components/common/icons'
 import { Markdown } from './Markdown'
 import { ToolCallCard } from './ToolCallCard'
 import { AskUserCard } from './AskUserCard'
@@ -52,17 +52,28 @@ function ReasoningBlock({ content, pending }: { content: string; pending?: boole
   )
 }
 
+/** 从消息 content 提取用户文字：仅当内容以 Skill 系统指令开头时剥掉首段（指令与用户文字以空行分隔）。
+ *  不含指令前缀的消息整段都是用户文字，原样返回。 */
+function extractUserText(content: string): string {
+  if (content.startsWith('请先用 load_skill')) {
+    return content.split('\n\n').slice(1).join('\n\n').trim()
+  }
+  return content.trim()
+}
+
 /** 用户消息：hover 出「编辑」，编辑态可改后重发；编辑非末条时有回退提醒 */
 function UserMessage({ msg }: { msg: ChatMessage }) {
   // 有 meta 时渲染卡片 + 只显示用户文字；无 meta 兼容旧消息
   const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart)
-  // 从原始 content 提取用户文字（系统指令在第一个 \n\n 之前）
-  const userText = hasMeta
-    ? (msg.meta?.projectStart ? null : msg.content.split('\n\n').slice(1).join('\n\n').trim() || null)
-    : null
+  const userText = hasMeta ? (msg.meta?.projectStart ? null : extractUserText(msg.content) || null) : null
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(msg.content)
   const [editSkills, setEditSkills] = useState(msg.meta?.skills ?? [])
+  const skillMetas = useAppStore((s) => s.skillMetas)
+  // Slash 命令菜单（编辑态支持 / 选 skill，与 ChatInput 一致）
+  const [slashOpen, setSlashOpen] = useState(false)
+  const [slashFilter, setSlashFilter] = useState('')
+  const [slashIndex, setSlashIndex] = useState(0)
   // 该消息之后是否还有内容（决定是否要给「回退」提醒）
   const hasLater = useChatStore((s) => {
     const i = s.messages.findIndex((m) => m.id === msg.id)
@@ -70,24 +81,46 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
   })
   const busy = useChatStore((s) => s.status !== 'idle' && s.status !== 'error')
 
-  // 编辑时只提取用户文字，隐藏系统指令
-  const editableText = (() => {
-    if (msg.meta?.projectStart) return ''
-    if (msg.meta?.skills?.length) {
-      return msg.content.split('\n\n').slice(1).join('\n\n').trim() || ''
-    }
-    // 兼容旧格式
-    if (msg.content.startsWith('请先用 load_skill')) {
-      const parts = msg.content.split('\n\n')
-      return parts.length > 1 ? parts.slice(1).join('\n\n').trim() : ''
-    }
-    return msg.content
-  })()
+  // 编辑时只提取用户文字，隐藏系统指令（纯系统消息没有可编辑文字）
+  const editableText = msg.meta?.projectStart ? '' : extractUserText(msg.content)
+  const originalSkills = msg.meta?.skills ?? []
+
+  const filteredSkills = slashOpen
+    ? skillMetas.filter((s) => {
+        if (!slashFilter) return true
+        const q = slashFilter.toLowerCase()
+        return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
+          || s.description.toLowerCase().includes(q) || s.triggers.some((t) => t.toLowerCase().includes(q))
+      })
+    : []
+
+  const closeSlash = () => { setSlashOpen(false); setSlashFilter(''); setSlashIndex(0) }
+
+  // 方向键导航时自动滚动到可见区域（与 ChatInput 一致）
+  useEffect(() => {
+    if (!slashOpen) return
+    const el = document.querySelector('.slash-menu--edit .slash-menu__item--active')
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [slashIndex, slashOpen])
+
+  /** 编辑态选/取消 skill（toggle）：已选的再选=移除；只剥掉 / 前缀保留原文 */
+  const selectSkill = (skill: SkillMeta) => {
+    closeSlash()
+    setDraft((prev) => prev.startsWith('/') ? prev.slice(1) : prev)
+    setEditSkills((prev) =>
+      prev.some((s) => s.id === skill.id)
+        ? prev.filter((s) => s.id !== skill.id)
+        : [...prev, { id: skill.id, name: skill.name }],
+    )
+  }
 
   const submit = async () => {
     const t = draft.trim()
     if (!t) return
-    if (t === msg.content) {
+    // 文字没变且 skill 列表也没变 → 无需重发
+    const skillsChanged = editSkills.length !== originalSkills.length ||
+      editSkills.some((s, i) => s.id !== originalSkills[i]?.id)
+    if (t === editableText && !skillsChanged) {
       setEditing(false)
       return
     }
@@ -98,7 +131,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
       )
       if (!ok) return
     }
-    void useChatStore.getState().editAndResend(msg.id, t, editSkills.length > 0 ? { skills: editSkills } : undefined)
+    void useChatStore.getState().editAndResend(msg.id, t, { skills: editSkills })
     setEditing(false)
   }
 
@@ -136,10 +169,29 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
           <textarea
             className="msg__edit-textarea"
             value={draft}
-            onChange={(e) => setDraft(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value
+              setDraft(val)
+              if (val.startsWith('/') && !slashOpen && skillMetas.length > 0) {
+                setSlashOpen(true)
+                setSlashFilter('')
+              } else if (slashOpen) {
+                if (!val.startsWith('/')) { closeSlash() }
+                else {
+                  const afterSlash = val.slice(1)
+                  setSlashFilter(afterSlash.length <= 20 && !afterSlash.includes('，') ? afterSlash : '')
+                }
+              }
+            }}
             onKeyDown={(e) => {
+              if (slashOpen) {
+                if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIndex((i) => Math.min(i + 1, filteredSkills.length - 1)); return }
+                if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex((i) => Math.max(i - 1, 0)); return }
+                if (e.key === 'Escape') { e.preventDefault(); closeSlash(); return }
+              }
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault()
+                if (slashOpen && filteredSkills[slashIndex]) { selectSkill(filteredSkills[slashIndex]); return }
                 void submit()
               }
             }}
@@ -147,10 +199,42 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
             aria-label="编辑消息"
             autoFocus
           />
+          {/* Slash 菜单：在 textarea 下方正常流，容器自动滚动 */}
+          {slashOpen && filteredSkills.length > 0 && (
+            <div className="slash-menu slash-menu--edit" role="listbox" aria-label="选择 Skill">
+              {filteredSkills.map((skill, i) => (
+                <div
+                  key={skill.id}
+                  className={`slash-menu__item ${i === slashIndex ? 'slash-menu__item--active' : ''}`}
+                  role="option"
+                  aria-selected={i === slashIndex}
+                  onMouseEnter={() => setSlashIndex(i)}
+                  onClick={() => selectSkill(skill)}
+                >
+                  <div className="slash-menu__item-name">
+                    {editSkills.some((s) => s.id === skill.id) ? (
+                      <span className="slash-menu__item-check"><IconCheck size={10} /></span>
+                    ) : (
+                      <span className="slash-menu__item-check-placeholder" />
+                    )}
+                    <span>{skill.name}</span>
+                  </div>
+                  {skill.description && <span className="slash-menu__item-desc">{skill.description}</span>}
+                </div>
+              ))}
+              <div className="slash-menu__hint"><span>↑↓ 导航 · Enter 选择 · Esc 关闭</span></div>
+            </div>
+          )}
+          {slashOpen && filteredSkills.length === 0 && (
+            <div className="slash-menu slash-menu--edit">
+              <div className="slash-menu__empty">无匹配的 Skill</div>
+              <div className="slash-menu__hint"><span>Esc 关闭</span></div>
+            </div>
+          )}
           <div className="msg__edit-actions">
-            <span className="msg__edit-hint">Enter 发送 · Shift+Enter 换行</span>
+            <span className="msg__edit-hint">Enter 发送 · Shift+Enter 换行{skillMetas.length > 0 ? ' · / 选 Skill' : ''}</span>
             <button className="btn btn--ghost btn--sm" onClick={() => { setDraft(editableText); setEditSkills(msg.meta?.skills ?? []); setEditing(false) }}>取消</button>
-            <button className="btn btn--primary btn--sm" onClick={() => void submit()} disabled={!draft.trim()}>重新发送</button>
+            <button className="btn btn--primary btn--sm" onClick={() => void submit()} disabled={!draft.trim() && editSkills.length === 0}>重新发送</button>
           </div>
         </div>
       </div>

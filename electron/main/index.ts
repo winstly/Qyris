@@ -14,6 +14,8 @@ import * as inspect from '../lib/inspect'
 import * as sessions from '../lib/sessions'
 import * as skills from '../lib/skills'
 import * as projectCreate from '../lib/project-create'
+import * as git from '../lib/git'
+import * as consolebridge from '../lib/consolebridge'
 
 interface WindowState {
   x?: number
@@ -73,6 +75,8 @@ function registerIpc(): void {
   handle('create_entry', (p) => fsops.createEntry(p.projectRoot, p.parentDir, p.name, p.isDir))
   handle('rename_entry', (p) => fsops.renameEntry(p.projectRoot, p.path, p.newName))
   handle('delete_entry', (p) => fsops.deleteEntry(p.projectRoot, p.path))
+  handle('copy_entry', (p) => fsops.copyEntry(p.projectRoot, p.srcPath, p.destDir))
+  handle('move_entry', (p) => fsops.moveEntry(p.projectRoot, p.srcPath, p.destDir))
   handle('delete_project_files', (p) => fsops.deleteProjectFiles(p.projectRoot))
 
   // 文件快照：AI 写文件前的回退点（按对话会话分组）
@@ -88,8 +92,15 @@ function registerIpc(): void {
 
   // 子进程 / watcher
   handle('run_project', (p) => proc.runProject(p.projectRoot, p.name, p.command))
-  handle('run_once', (p) => proc.runOnce(p.projectRoot, p.command))
+  handle('run_once', (p) => proc.runOnce(p.projectRoot, p.command, p.token))
+  handle('run_once_cancel', (p) => proc.cancelRunOnce(p?.token))
   handle('stop_project', (p) => proc.stopProject(p?.name))
+  handle('check_url', (p) => proc.checkUrlHealthy(String(p?.url ?? '')))
+  // 预览控制台
+  handle('preview_console_attach', (p) => consolebridge.setConsoleFilter(p?.url ? String(p.url) : null))
+  handle('preview_console_history', () => consolebridge.consoleHistory())
+  // 端口占用查询（错误卡片的「端口被谁占着」展示）
+  handle('port_owner', (p) => proc.portOwner(Number(p?.port)))
   handle('start_watching', (p) => watcher.startWatching(p.projectRoot))
   handle('stop_watching', () => watcher.stopWatching())
 
@@ -118,6 +129,17 @@ function registerIpc(): void {
   handle('test_repo', (p) => projectCreate.testRepo(p.url))
   handle('git_repo_info', (p) => projectCreate.gitRepoInfo(p.dir))
   handle('git_checkout', (p) => projectCreate.gitCheckout(p.dir, p.branch))
+  // Git 工作区（commit 工作区面板）
+  handle('git_status', (p) => git.gitStatus(p.dir))
+  handle('git_is_repo_root', (p) => git.gitIsRepoRoot(p.dir))
+  handle('git_diff', (p) => git.gitDiff(p.dir, p.path, p.staged === true))
+  handle('git_add', (p) => git.gitAdd(p.dir, p.paths))
+  handle('git_unstage', (p) => git.gitUnstage(p.dir, p.paths ?? []))
+  handle('git_commit', (p) => git.gitCommit(p.dir, String(p.message ?? '')))
+  handle('git_pull', (p) => git.gitPull(p.dir))
+  handle('git_fetch', (p) => git.gitFetch(p.dir))
+  handle('git_push', (p) => git.gitPush(p.dir))
+  handle('git_discard', (p) => git.gitDiscard(p.dir, p.paths ?? []))
   handle('pick_parent_dir', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -181,6 +203,8 @@ function createWindow(): void {
     title: '轻驭',
     icon: iconPath,
     show: false,
+    // 与 index.html 内联底色一致：首帧绘制前窗口就是主题深色，避免 OS 级黑块/白闪
+    backgroundColor: '#131315',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       sandbox: true,
@@ -194,6 +218,8 @@ function createWindow(): void {
   setMainWindow(win)
 
   win.once('ready-to-show', () => win.show())
+  // 预览控制台：捕获被预览页面的 console 输出（按 origin 过滤，见 consolebridge.ts）
+  consolebridge.attachConsoleCapture(win)
   // 外链统一走系统默认浏览器（target="_blank" 的 <a> 也经此处）：拒绝弹 Electron 新窗口
   win.webContents.setWindowOpenHandler(({ url }) => {
     try {
@@ -227,6 +253,12 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  // 先清理上次异常退出（强杀/崩溃）遗留的服务进程树，再开窗口——避免新服务撞上泄漏端口
+  try {
+    const killed = proc.cleanupOrphanServices()
+    if (killed > 0) console.log(`[cleanup] 已清理 ${killed} 个上次遗留的服务进程`)
+  } catch { /* 清理失败不阻塞启动 */ }
+
   // 应用菜单：Windows/Linux 直接去掉（File/Edit/View/Window 对本应用无意义）；
   // macOS 保留精简 role 菜单——其文本编辑快捷键（Cmd+C/V 等）依赖应用菜单存在
   if (process.platform === 'darwin') {

@@ -1,5 +1,5 @@
 /**
- * 路径安全内核 —— src-tauri fs.rs ensure_inside / validate_name（fs.rs:151-217）的逐语义移植。
+ * 路径安全内核。
  * 关键点：前缀比较按路径组件逐段进行（不是字符串 startsWith，`C:\project2` 不得误配 `C:\proj`）。
  */
 import { promises as fsp } from 'node:fs'
@@ -21,7 +21,7 @@ function splitComponents(p: string): string[] {
   return p.split(/[\\/]+/).filter((s) => s.length > 0)
 }
 
-/** 组件级前缀比较（大小写敏感，与 Rust 组件比较语义对齐） */
+/** 组件级前缀比较（大小写敏感） */
 function startsWithComponents(root: string, target: string): boolean {
   const r = splitComponents(root)
   const t = splitComponents(target)
@@ -34,7 +34,7 @@ function startsWithComponents(root: string, target: string): boolean {
 
 /**
  * 词法归一化：丢弃 `.`；`..` 弹出上一段（在根上 pop 为 no-op，不逃逸）。
- * 不触盘、不改大小写 —— 与 Rust normalize_lexical 一致。
+ * 不触盘、不改大小写。
  */
 function normalizeLexical(absolute: string): string {
   const isWin = process.platform === 'win32'
@@ -102,7 +102,7 @@ export async function ensureInside(projectRoot: string, target: string): Promise
   throw new Error(`路径越出项目根目录：${absolute}`)
 }
 
-/** 新建条目名称校验：校验用 trim 副本，落盘仍用原始 name（与 Rust 一致） */
+/** 新建条目名称校验：校验用 trim 副本，落盘仍用原始 name */
 export function validateName(name: string): void {
   const trimmed = name.trim()
   if (!trimmed) throw new Error('名称不能为空')

@@ -239,12 +239,18 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 }
 .status-dot--building { background: var(--stage-build); --glow: var(--glow-build); animation: dot-breathe 1.4s ease-in-out infinite; }
 .status-dot--deploying { background: var(--stage-deploy); --glow: var(--glow-deploy); animation: dot-breathe 1.4s ease-in-out infinite; }
-.status-dot--running { background: var(--stage-run); box-shadow: var(--glow-run); }
-.status-dot--error { background: var(--stage-error); box-shadow: var(--glow-error); }
+.status-dot--running { background: var(--stage-run); --glow: var(--glow-run); animation: dot-breathe 1.4s ease-in-out infinite; }
+.status-dot--error { background: var(--stage-error); box-shadow: var(--glow-error); animation: dot-alert 0.32s ease-in-out 3; }
 
 @keyframes dot-breathe {
   0%, 100% { box-shadow: 0 0 0 0 transparent; }
   50% { box-shadow: var(--glow, var(--glow-build)); }
+}
+
+/* 异常警示：一次性放大脉冲 ×3 后回归静态光晕，提示但不骚扰 */
+@keyframes dot-alert {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.5); }
 }
 
 /* ============ 模态框 ============ */
@@ -435,11 +441,9 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 .select__chevron { flex-shrink: 0; color: var(--muted); transition: transform var(--motion-fast) var(--ease-standard); }
 .select__chevron--open { transform: rotate(90deg); }
 .select__menu {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  right: 0;
-  z-index: 30;
+  /* portal 到 body + fixed 定位（坐标内联注入）：不受 .modal__body 等滚动容器 overflow 裁剪 */
+  position: fixed;
+  z-index: 200; /* 与 ctxmenu 同级：高于 modal(100)，弹窗内也能浮在内容之上 */
   max-height: 240px;
   overflow: auto;
   padding: 4px;
@@ -544,6 +548,22 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 .ctxmenu__item:disabled:hover { background: transparent; color: inherit; }
 .ctxmenu__item--danger { color: var(--danger); }
 .ctxmenu__item--danger:hover { background: var(--danger-dim); }
+
+/* 子菜单 */
+.ctxmenu__sub { position: relative; }
+.ctxmenu__item--sub { justify-content: space-between; text-align: left; }
+.ctxmenu__arrow { font-size: 10px; opacity: 0.5; margin-left: auto; }
+.ctxmenu--child {
+  position: absolute;
+  left: 100%;
+  top: -4px;
+  min-width: 160px;
+  animation: none;
+}
+.ctxmenu--flip {
+  left: auto;
+  right: 100%;
+}
 
 /* ============ 分割面板（文件 Tab 内部） ============ */
 

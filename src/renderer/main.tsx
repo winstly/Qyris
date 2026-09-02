@@ -23,3 +23,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>,
 )
+
+// 启动过场收尾：React 挂载后淡出并移除 splash（splash 是 index.html 内联的纯 HTML/CSS，
+// bundle 解析期间就已可见——首屏不再是黑屏/空底色）
+requestAnimationFrame(() => {
+  const splash = document.getElementById('boot-splash')
+  if (!splash) return
+  splash.classList.add('boot-splash--hide')
+  window.setTimeout(() => splash.remove(), 350)
+})

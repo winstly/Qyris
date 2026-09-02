@@ -38,13 +38,23 @@ const desktopAPI = {
   createEntry: (projectRoot: string, parentDir: string, name: string, isDir: boolean) => ipcRenderer.invoke('create_entry', { projectRoot, parentDir, name, isDir }),
   renameEntry: (projectRoot: string, filePath: string, newName: string) => ipcRenderer.invoke('rename_entry', { projectRoot, path: filePath, newName }),
   deleteEntry: (projectRoot: string, filePath: string) => ipcRenderer.invoke('delete_entry', { projectRoot, path: filePath }),
+  copyEntry: (projectRoot: string, srcPath: string, destDir: string) => ipcRenderer.invoke('copy_entry', { projectRoot, srcPath, destDir }),
+  moveEntry: (projectRoot: string, srcPath: string, destDir: string) => ipcRenderer.invoke('move_entry', { projectRoot, srcPath, destDir }),
   deleteProjectFiles: (projectRoot: string) => ipcRenderer.invoke('delete_project_files', { projectRoot }),
 
   // 子进程 / watcher
   runProject: (projectRoot: string, name: string, command: string) =>
     ipcRenderer.invoke('run_project', { projectRoot, name, command }),
-  runOnce: (projectRoot: string, command: string) =>
-    ipcRenderer.invoke('run_once', { projectRoot, command }),
+  runOnce: (projectRoot: string, command: string, token?: string) =>
+    ipcRenderer.invoke('run_once', { projectRoot, command, token: token ?? null }) as Promise<{ code: number | null; output: string }>,
+  runOnceCancel: (token?: string) =>
+    ipcRenderer.invoke('run_once_cancel', { token: token ?? null }) as Promise<number>,
+  checkUrl: (url: string) => ipcRenderer.invoke('check_url', { url }) as Promise<boolean>,
+  portOwner: (port: number) =>
+    ipcRenderer.invoke('port_owner', { port }) as Promise<{ pid: number; name: string } | null>,
+  previewConsoleAttach: (url: string | null) => ipcRenderer.invoke('preview_console_attach', { url: url ?? null }),
+  previewConsoleHistory: () =>
+    ipcRenderer.invoke('preview_console_history') as Promise<{ level: string; message: string; sourceId: string; ts: number }[]>,
   stopProject: (name?: string) => ipcRenderer.invoke('stop_project', { name: name ?? null }),
   startWatching: (projectRoot: string) => ipcRenderer.invoke('start_watching', { projectRoot }),
   stopWatching: () => ipcRenderer.invoke('stop_watching'),
@@ -69,6 +79,17 @@ const desktopAPI = {
   gitRepoInfo: (dir: string) =>
     ipcRenderer.invoke('git_repo_info', { dir }) as Promise<{ isRepo: boolean; currentBranch: string | null; branches: string[] }>,
   gitCheckout: (dir: string, branch: string) => ipcRenderer.invoke('git_checkout', { dir, branch }),
+  gitStatus: (dir: string) => ipcRenderer.invoke('git_status', { dir }),
+  gitIsRepoRoot: (dir: string) => ipcRenderer.invoke('git_is_repo_root', { dir }) as Promise<boolean>,
+  gitDiff: (dir: string, path?: string, staged?: boolean) =>
+    ipcRenderer.invoke('git_diff', { dir, path: path ?? null, staged: staged === true }) as Promise<string>,
+  gitAdd: (dir: string, paths?: string[]) => ipcRenderer.invoke('git_add', { dir, paths: paths ?? null }),
+  gitUnstage: (dir: string, paths: string[]) => ipcRenderer.invoke('git_unstage', { dir, paths }),
+  gitCommit: (dir: string, message: string) => ipcRenderer.invoke('git_commit', { dir, message }) as Promise<string>,
+  gitPull: (dir: string) => ipcRenderer.invoke('git_pull', { dir }) as Promise<string>,
+  gitFetch: (dir: string) => ipcRenderer.invoke('git_fetch', { dir }) as Promise<string>,
+  gitPush: (dir: string) => ipcRenderer.invoke('git_push', { dir }) as Promise<string>,
+  gitDiscard: (dir: string, paths: string[]) => ipcRenderer.invoke('git_discard', { dir, paths }),
   pickParentDir: () => ipcRenderer.invoke('pick_parent_dir') as Promise<string | null>,
 
   // AI
@@ -92,6 +113,8 @@ const desktopAPI = {
   onAiReasoning: (cb: (payload: { requestId: string; delta: string }) => void): Unsubscribe =>
     subscribe('ai-reasoning', cb),
   onFsChanged: (cb: (payload: { paths: string[] }) => void): Unsubscribe => subscribe('fs-changed', cb),
+  onPreviewConsole: (cb: (payload: { level: string; message: string; sourceId: string; ts: number }) => void): Unsubscribe =>
+    subscribe('preview-console', cb),
 }
 
 contextBridge.exposeInMainWorld('desktopAPI', desktopAPI)

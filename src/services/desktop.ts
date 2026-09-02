@@ -2,7 +2,7 @@
  * Electron preload 暴露面（window.desktopAPI）的类型化封装层。
  * 前端所有文件操作都经由这里走主进程，绝不在渲染层直接碰文件系统。
  */
-import type { AppConfig } from '@/types'
+import type { AppConfig, GitStatus, PreviewConsoleEntry } from '@/types'
 
 /** 是否运行在 Electron 桌面壳内（浏览器直接跑 vite 时为 false，界面会给出提示） */
 export const isDesktop = typeof window !== 'undefined' && !!window.desktopAPI
@@ -48,13 +48,22 @@ export const api = {
   renameEntry: (projectRoot: string, path: string, newName: string) =>
     wrap((d) => d.renameEntry(projectRoot, path, newName)),
   deleteEntry: (projectRoot: string, path: string) => wrap((d) => d.deleteEntry(projectRoot, path)),
+  copyEntry: (projectRoot: string, srcPath: string, destDir: string) =>
+    wrap((d) => d.copyEntry(projectRoot, srcPath, destDir)),
+  moveEntry: (projectRoot: string, srcPath: string, destDir: string) =>
+    wrap((d) => d.moveEntry(projectRoot, srcPath, destDir)),
   deleteProjectFiles: (projectRoot: string) => wrap((d) => d.deleteProjectFiles(projectRoot)),
 
   // 子进程 / watcher
   runProject: (projectRoot: string, name: string, command: string) =>
     wrap((d) => d.runProject(projectRoot, name, command)),
-  runOnce: (projectRoot: string, command: string) =>
-    wrap((d) => d.runOnce(projectRoot, command)),
+  runOnce: (projectRoot: string, command: string, token?: string) =>
+    wrap((d) => d.runOnce(projectRoot, command, token)),
+  runOnceCancel: (token?: string) => wrap((d) => d.runOnceCancel(token)),
+  checkUrl: (url: string) => wrap((d) => d.checkUrl(url)),
+  portOwner: (port: number) => wrap((d) => d.portOwner(port)) as Promise<{ pid: number; name: string } | null>,
+  previewConsoleAttach: (url: string | null) => wrap((d) => d.previewConsoleAttach(url)),
+  previewConsoleHistory: () => wrap((d) => d.previewConsoleHistory()) as Promise<PreviewConsoleEntry[]>,
   stopProject: (name?: string) => wrap((d) => d.stopProject(name)),
   startWatching: (projectRoot: string) => wrap((d) => d.startWatching(projectRoot)),
   stopWatching: () => wrap((d) => d.stopWatching()),
@@ -87,6 +96,17 @@ export const api = {
   testRepo: (url: string) => wrap((d) => d.testRepo(url)),
   gitRepoInfo: (dir: string) => wrap((d) => d.gitRepoInfo(dir)),
   gitCheckout: (dir: string, branch: string) => wrap((d) => d.gitCheckout(dir, branch)),
+  // Git 工作区
+  gitStatus: (dir: string) => wrap((d) => d.gitStatus(dir)) as Promise<GitStatus>,
+  gitIsRepoRoot: (dir: string) => wrap((d) => d.gitIsRepoRoot(dir)),
+  gitDiff: (dir: string, path?: string, staged?: boolean) => wrap((d) => d.gitDiff(dir, path, staged)),
+  gitAdd: (dir: string, paths?: string[]) => wrap((d) => d.gitAdd(dir, paths)),
+  gitUnstage: (dir: string, paths: string[]) => wrap((d) => d.gitUnstage(dir, paths)),
+  gitCommit: (dir: string, message: string) => wrap((d) => d.gitCommit(dir, message)),
+  gitPull: (dir: string) => wrap((d) => d.gitPull(dir)),
+  gitFetch: (dir: string) => wrap((d) => d.gitFetch(dir)),
+  gitPush: (dir: string) => wrap((d) => d.gitPush(dir)),
+  gitDiscard: (dir: string, paths: string[]) => wrap((d) => d.gitDiscard(dir, paths)),
   pickParentDir: () => wrap((d) => d.pickParentDir()),
 
   // 窗口
@@ -121,4 +141,9 @@ export function onAiReasoning(cb: (payload: { requestId: string; delta: string }
 export function onFsChanged(cb: (payload: { paths: string[] }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onFsChanged(cb)
+}
+
+export function onPreviewConsole(cb: (payload: PreviewConsoleEntry) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onPreviewConsole(cb)
 }

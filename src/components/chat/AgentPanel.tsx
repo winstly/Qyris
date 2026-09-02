@@ -47,8 +47,7 @@ export function AgentTranscript({ thread, embedded = false }: { thread: AgentThr
 
 /** dispatch_subtasks 卡片内的批次面板 */
 export function AgentPanel({ cardId }: { cardId: string }) {
-  // selector 只取稳定引用；派生数组用 useMemo 计算——
-  // zustand v5 selector 返回新数组 = getSnapshot 快照不稳定 = React 无限重渲染（崩溃事故教训）
+  // selector 只取稳定引用；派生数组用 useMemo 计算
   const order = useAgentStore((s) => s.order)
   const threadsMap = useAgentStore((s) => s.threads)
   const threads = useMemo(

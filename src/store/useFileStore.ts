@@ -5,9 +5,12 @@
  */
 import { create } from 'zustand'
 import { api } from '@/services/desktop'
+import { basename } from '@/utils/path'
 import type { TreeNode } from '@/types'
 
 const MAX_REFRESH_DIRS = 40
+/** expandAll 的目录数上限：深/宽树防失控（node_modules 等已被主进程过滤，正常项目远达不到） */
+const MAX_EXPAND_DIRS = 300
 
 interface FileState {
   rootPath: string | null
@@ -27,6 +30,8 @@ interface FileState {
   lastSavedAt: number | null
   /** 文件快照：绝对路径 → { ts, sessionId }（AI 写文件前的回退点，按会话分组） */
   snapshots: Record<string, { ts: number; sessionId: string }>
+  /** 剪贴板：文件树剪切/复制操作 */
+  clipboard: { srcPath: string; mode: 'cut' | 'copy' } | null
 
   openProject: (root: string) => Promise<void>
   /** 清空全部状态回到未打开项目（删除当前项目文件后调用） */
@@ -37,20 +42,27 @@ interface FileState {
   restoreSession: (sessionId: string) => Promise<number>
   loadChildren: (dir: string) => Promise<void>
   toggleDir: (dir: string) => Promise<void>
+  /** 递归展开目录及全部后代目录（懒加载逐层拉取，带目录数上限防护） */
+  expandAll: (dir: string) => Promise<void>
+  /** 收起目录及全部后代（删除 expanded 里以其为前缀的键，避免后代幽灵展开） */
+  collapseAll: (dir: string) => void
   refreshExpanded: () => Promise<void>
   openFile: (path: string) => Promise<void>
-  closeTab: (path: string) => void
+  closeTab: (path: string) => Promise<void>
   /** 批量关闭原语：页签右键菜单（关闭其他/左侧/右侧/全部）共用 */
-  closeTabs: (paths: string[]) => void
-  closeOthers: (path: string) => void
+  closeTabs: (paths: string[]) => Promise<void>
+  closeOthers: (path: string) => Promise<void>
   closeToLeft: (path: string) => void
   closeToRight: (path: string) => void
-  closeAll: () => void
+  closeAll: () => Promise<void>
   setContent: (path: string, content: string) => void
   saveFile: (path?: string) => Promise<boolean>
   /** AI 写文件 / watcher 事件 共用的外部变更入口 */
   notifyExternalChange: (paths: string[]) => Promise<void>
   parentOf: (path: string) => string | null
+  cut: (path: string) => void
+  copy: (path: string) => void
+  paste: (destDir: string) => Promise<void>
 }
 
 export const useFileStore = create<FileState>()((set, get) => ({
@@ -68,6 +80,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
   savingPath: null,
   lastSavedAt: null,
   snapshots: {},
+  clipboard: null,
 
   openProject: async (root) => {
     set({
@@ -79,6 +92,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
       activePath: null,
       contents: {},
       dirty: {},
+      clipboard: null,
       binaryFiles: {},
       truncatedFiles: {},
       cursor: { line: 1, col: 1 },
@@ -102,6 +116,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
       truncatedFiles: {},
       cursor: { line: 1, col: 1 },
       snapshots: {},
+      clipboard: null,
     })
   },
 
@@ -169,6 +184,45 @@ export const useFileStore = create<FileState>()((set, get) => ({
     }
   },
 
+  expandAll: async (dir) => {
+    const { rootPath } = get()
+    if (!rootPath) return
+    const load = async (d: string): Promise<TreeNode[]> => {
+      try {
+        return await api.listDir(rootPath, d)
+      } catch {
+        return []
+      }
+    }
+    // 逐层 BFS：每层先落一次 expanded/childrenMap，用户能看到渐进展开而不是长时间白等
+    const expanded: Record<string, true> = { ...get().expanded, [dir]: true }
+    const queue: TreeNode[] = []
+    const first = await load(dir)
+    set((s) => ({ childrenMap: { ...s.childrenMap, [dir]: first }, expanded: { ...expanded } }))
+    for (const n of first) if (n.kind === 'folder') queue.push(n)
+    let visited = 1
+    while (queue.length && visited < MAX_EXPAND_DIRS) {
+      const cur = queue.shift()!
+      visited++
+      expanded[cur.path] = true
+      const kids = await load(cur.path)
+      set((s) => ({ childrenMap: { ...s.childrenMap, [cur.path]: kids }, expanded: { ...expanded } }))
+      for (const n of kids) if (n.kind === 'folder') queue.push(n)
+    }
+  },
+
+  collapseAll: (dir) => {
+    set((s) => {
+      const next: Record<string, true> = {}
+      for (const key of Object.keys(s.expanded)) {
+        // 精确匹配 + 路径分隔符边界的前缀匹配：'/a/b' 不能误杀 '/a/bc'
+        if (key === dir || key.startsWith(`${dir}/`) || key.startsWith(`${dir}\\`)) continue
+        next[key] = true
+      }
+      return { expanded: next }
+    })
+  },
+
   refreshExpanded: async () => {
     const dirs = Object.keys(get().expanded).slice(0, MAX_REFRESH_DIRS)
     await Promise.all(dirs.map((d) => get().loadChildren(d)))
@@ -200,7 +254,20 @@ export const useFileStore = create<FileState>()((set, get) => ({
     }
   },
 
-  closeTabs: (paths) => {
+  closeTabs: async (paths) => {
+    // 检查是否有未保存的文件
+    const dirtyPaths = paths.filter((p) => get().dirty[p])
+    if (dirtyPaths.length > 0) {
+      // 动态导入避免循环依赖
+      const { useAppStore } = await import('./useAppStore')
+      const names = dirtyPaths.map((p) => basename(p)).join('、')
+      const confirmed = await useAppStore.getState().showConfirm(
+        '未保存的更改',
+        `${names} 有未保存的更改，确定关闭？`,
+      )
+      if (!confirmed) return
+    }
+
     const closing = new Set(paths)
     set((s) => {
       const openTabs = s.openTabs.filter((t) => !closing.has(t))
@@ -224,12 +291,12 @@ export const useFileStore = create<FileState>()((set, get) => ({
 
   closeToLeft: (path) => {
     const i = get().openTabs.indexOf(path)
-    if (i > 0) get().closeTabs(get().openTabs.slice(0, i))
+    if (i > 0) void get().closeTabs(get().openTabs.slice(0, i))
   },
 
   closeToRight: (path) => {
     const i = get().openTabs.indexOf(path)
-    if (i >= 0 && i < get().openTabs.length - 1) get().closeTabs(get().openTabs.slice(i + 1))
+    if (i >= 0 && i < get().openTabs.length - 1) void get().closeTabs(get().openTabs.slice(i + 1))
   },
 
   closeAll: () => get().closeTabs(get().openTabs),
@@ -242,15 +309,22 @@ export const useFileStore = create<FileState>()((set, get) => ({
 
   saveFile: async (path) => {
     const target = path ?? get().activePath
-    const { rootPath, contents } = get()
+    const { rootPath, contents, activePath } = get()
     if (!target || !rootPath || contents[target] === undefined) return false
+    const content = contents[target]
     set({ savingPath: target })
     try {
-      await api.writeTextFile(rootPath, target, contents[target])
+      await api.writeTextFile(rootPath, target, content)
       set((s) => {
         const dirty = { ...s.dirty }
         delete dirty[target]
-        return { dirty, lastSavedAt: Date.now() }
+        // 保存后清掉非当前文件的缓存条目：切回该文件时 openFile 会重新读盘，
+        // 外部进程（git checkout/pull、其他编辑器）改了该文件也不会因缓存在而绕过磁盘。
+        // 当前文件不能清：contentForEditor 会变 undefined 导致编辑器变空白；
+        // 当前文件的兜底由 notifyExternalChange（watcher）在切文件时触发。
+        const nextContents = { ...s.contents }
+        if (target !== activePath) delete nextContents[target]
+        return { dirty, contents: nextContents, lastSavedAt: Date.now() }
       })
       return true
     } catch (e) {
@@ -281,5 +355,30 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const norm = path.replace(/[\\/]+$/, '')
     const i = Math.max(norm.lastIndexOf('/'), norm.lastIndexOf('\\'))
     return i === -1 ? null : norm.slice(0, i)
+  },
+
+  cut: (path) => set({ clipboard: { srcPath: path, mode: 'cut' } }),
+  copy: (path) => set({ clipboard: { srcPath: path, mode: 'copy' } }),
+
+  paste: async (destDir) => {
+    const { rootPath, clipboard } = get()
+    if (!rootPath || !clipboard) return
+    try {
+      if (clipboard.mode === 'cut') {
+        await api.moveEntry(rootPath, clipboard.srcPath, destDir)
+        const fs = get()
+        if (fs.openTabs.includes(clipboard.srcPath)) fs.closeTab(clipboard.srcPath)
+        set({ clipboard: null })
+      } else {
+        await api.copyEntry(rootPath, clipboard.srcPath, destDir)
+      }
+      const srcDir = get().parentOf(clipboard.srcPath) ?? rootPath
+      await get().loadChildren(srcDir)
+      if (srcDir !== destDir) await get().loadChildren(destDir)
+      await get().refreshExpanded()
+    } catch (e) {
+      const { useAppStore } = await import('./useAppStore')
+      void useAppStore.getState().showAlert('粘贴失败', String(e))
+    }
   },
 }))

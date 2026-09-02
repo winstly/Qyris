@@ -210,6 +210,39 @@
 .slots__phase--error { color: var(--danger); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--danger), transparent 75%); }
 
 .slots__action { flex: 0 0 auto; padding: 3px 8px; }
+.slots__action--on { color: var(--accent); border-color: var(--accent); }
+
+/* 节点日志台：服务列表下方的单一日志面板（滚动只有这一层） */
+.consolepane {
+  border: 1px solid var(--edge-hair);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--s1), var(--deepen) 12%);
+  overflow: hidden;
+  animation: rise-in var(--motion-base) var(--ease-standard);
+}
+.consolepane__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--edge-hair);
+  font-size: var(--text-micro);
+}
+.consolepane__name {
+  font-weight: 600;
+  color: var(--fg-2);
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.consolepane__meta { color: var(--muted); }
+.consolepane__body .logdrawer {
+  max-height: 220px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
 
 .preview__spacer { flex: 1; }
 
@@ -342,6 +375,20 @@
   word-break: break-word;
 }
 
+/* 工具链缺失的操作区（授权 AI 自动安装） */
+.error-box__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 8px var(--space-4) var(--space-3);
+  border-top: 1px solid color-mix(in oklab, var(--danger), transparent 75%);
+}
+
+.error-box__hint {
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+}
+
 /* 进程日志抽屉 */
 .logdrawer {
   flex: 0 0 auto;
@@ -453,16 +500,257 @@
 .files-tab { flex: 1; min-height: 0; display: flex; }
 .files-tab .split { flex: 1; }
 
-/* 文件树 */
+/* 左栏容器：文件树（伸缩） + Git 工作区（固定高度上限） */
+.files-first {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.files-first__tree {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+/* 右栏容器：编辑器 + diff 覆盖层（铺满） */
+.files-second {
+  position: relative;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+}
+
+/* Git diff 全面板：覆盖编辑器区域（z-index 5 与分割线同级，低于 modal/ctxmenu） */
+.files-diff {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  background: var(--s1);
+  animation: rise-in var(--motion-base) var(--ease-standard);
+}
+.files-diff__head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--s2);
+  border-bottom: 1px solid var(--edge);
+  font-size: var(--text-xs);
+}
+.files-diff__tag {
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: var(--text-micro);
+  font-weight: 600;
+}
+.files-diff__path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+}
+.files-diff__mode {
+  flex: 0 0 auto;
+  display: flex;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.files-diff__mode-btn {
+  padding: 2px 10px;
+  border: none;
+  background: transparent;
+  font-size: var(--text-micro);
+  color: var(--fg-2);
+  cursor: pointer;
+}
+.files-diff__mode-btn--active { background: var(--accent-dim); color: var(--accent); }
+.files-diff__body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-2) 0 var(--space-6);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.files-diff__line { padding: 0 var(--space-4); white-space: pre; color: var(--fg-2); }
+.files-diff__line--add { background: color-mix(in oklab, var(--ok, #2ea043), transparent 88%); color: var(--ok, #2ea043); }
+.files-diff__line--del { background: color-mix(in oklab, var(--danger), transparent 88%); color: var(--danger); }
+.files-diff__line--hunk { color: var(--muted); background: color-mix(in oklab, var(--s2), var(--deepen) 14%); padding: 2px var(--space-4); }
+.files-diff__line--meta { color: var(--muted); }
+.files-diff__empty {
+  padding: var(--space-6);
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--text-xs);
+}
+
+/* 文件树容器：搜索框固定 + 树滚动 */
+.filetree-wrap {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--s1);
+  user-select: none;
+}
+/* 文件树滚动区域 */
 .filetree {
   flex: 1;
   overflow: auto;
   padding: var(--space-2) 0 var(--space-8);
-  background: var(--s1);
-  user-select: none;
 }
 
-.filetree--empty {
+/* ============ Git commit 工作区 ============ */
+
+.gitpanel {
+  flex-shrink: 0;
+  min-height: 140px; /* 高度由内联 style（gitPanelRatio）驱动，grip 拖拽可调 */
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--edge);
+  background: var(--s1);
+}
+
+/* 折叠态：收缩为只剩标题条（贴底部），空间还给文件树；grip 无意义隐藏 */
+.gitpanel--collapsed { min-height: 0; }
+.gitpanel--collapsed .gitpanel__grip { display: none; }
+
+.gitpanel__grip {
+  flex: 0 0 5px;
+  cursor: ns-resize;
+  background: transparent;
+  border-top: 1px solid transparent;
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.gitpanel__grip:hover,
+.gitpanel__grip:active { background: color-mix(in oklab, var(--accent), transparent 78%); }
+
+.gitpanel__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 7px 10px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  text-align: left;
+}
+.gitpanel__head:hover { background: var(--accent-dim); }
+.gitpanel__chevron { flex-shrink: 0; color: var(--muted); transition: transform var(--motion-fast) var(--ease-standard); }
+.gitpanel__chevron--open { transform: rotate(90deg); }
+.gitpanel__title { font-weight: 600; color: var(--fg-2); }
+.gitpanel__branch {
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: var(--text-micro);
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gitpanel__ab { font-size: var(--text-micro); color: var(--warn, var(--fg-2)); }
+.gitpanel__count { margin-left: auto; font-size: var(--text-micro); color: var(--muted); }
+.gitpanel__count--dirty { color: var(--fg-2); }
+
+.gitpanel__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0 var(--space-2) var(--space-2);
+  gap: var(--space-2);
+  overflow: hidden; /* 滚动收敛到文件列表自身，body 不再出现第二层滚动 */
+}
+
+.gitpanel__sync { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+.gitpanel__spacer { flex: 1; }
+
+.gitpanel__files {
+  flex: 1 1 auto; /* 吃掉面板剩余高度：面板拖多高，列表就多高 */
+  min-height: 60px;
+  overflow: auto;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--s2), var(--deepen) 6%);
+}
+.gitpanel__empty {
+  padding: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--muted);
+  text-align: center;
+}
+
+.gitpanel__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  font-size: var(--text-xs);
+  border-bottom: 1px solid color-mix(in oklab, var(--edge), transparent 55%);
+}
+.gitpanel__row:last-child { border-bottom: none; }
+.gitpanel__row--active { background: var(--accent-dim); }
+
+.gitpanel__badge {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: var(--text-micro);
+  background: color-mix(in oklab, var(--s2), var(--deepen) 10%);
+  color: var(--fg-2);
+}
+.gitpanel__badge--untracked { color: var(--muted); }
+.gitpanel__badge--deleted { color: var(--danger); }
+.gitpanel__badge--conflicted { color: var(--danger); font-weight: 600; }
+.gitpanel__badge--added { color: var(--accent); }
+.gitpanel__badge--staged { color: var(--accent); }
+
+.gitpanel__path {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--fg-2);
+}
+.gitpanel__path:hover { color: var(--accent); }
+.gitpanel__renamed { color: var(--muted); }
+
+.gitpanel__discard:hover { color: var(--danger); }
+.gitpanel__unstage-icon { transform: rotate(270deg); }
+
+.gitpanel__commit { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; }
+.gitpanel__msg {
+  width: 100%;
+  resize: none; /* 高度调节已由面板 grip 承担，提交信息框保持稳定两行 */
+  min-height: 44px;
+  padding: 6px 8px;
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--s2), var(--deepen) 10%);
+  color: var(--fg);
+  font-size: var(--text-xs);
+  font-family: inherit;
+}
+.gitpanel__msg:focus { outline: none; border-color: var(--accent); }
+.gitpanel__commit-actions { display: flex; align-items: center; gap: 6px; }
+.gitpanel__staged-hint { font-size: var(--text-micro); color: var(--muted); }
+
+
+.filetree-wrap--empty {
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -514,18 +802,21 @@
   flex-shrink: 0;
 }
 
-/* 文件名搜索 */
+/* 文件名搜索（固定在顶部） */
 .filetree__search {
-  position: sticky;
-  top: 0;
-  z-index: 1;
+  flex-shrink: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: var(--space-2);
+  gap: 8px;
+  padding: var(--space-2) var(--space-3);
   background: color-mix(in oklab, var(--panel-deep), var(--deepen) 12%);
   border-bottom: 1px solid var(--border);
   color: var(--muted);
+  transition: background var(--motion-fast) var(--ease-standard);
+}
+.filetree__search:focus-within {
+  background: var(--s2);
+  color: var(--fg-2);
 }
 .filetree__search-input {
   flex: 1;
@@ -534,7 +825,7 @@
   outline: none;
   background: transparent;
   color: var(--fg);
-  font-size: var(--text-xs);
+  font-size: var(--text-sm);
 }
 .filetree__search-input::placeholder { color: var(--muted); }
 .filetree__search-clear {
@@ -660,105 +951,79 @@
 }
 
 .editor__host { flex: 1; min-height: 0; }
-.editor__host .cm-editor { height: 100%; }
-.editor__host .cm-scroller { font-family: var(--font-mono) !important; }
-/* 光标：加粗到 2px、用强调色、常亮不闪，看着更稳 */
-.editor__host .cm-cursor {
-  border-left: 2px solid var(--accent) !important;
-  animation: none !important;
+/* Monaco Editor 容器填满 host */
+.editor__host .monaco-editor { width: 100% !important; height: 100% !important; }
+/* Monaco 搜索控件（FindWidget）适配主题 */
+.editor__host .find-widget {
+  border-radius: var(--radius-sm) !important;
+  border: 1px solid var(--edge) !important;
+  box-shadow: none !important;
 }
-.editor__host .cm-gutters {
-  background: color-mix(in oklab, var(--panel), var(--deepen) 12%) !important;
-  border-right: 1px solid var(--border-soft) !important;
-}
-.editor__host .cm-activeLine { background: color-mix(in oklab, var(--accent), transparent 94%) !important; }
-.editor__host .cm-activeLineGutter { background: transparent !important; }
 
-/* ---- CodeMirror 暖色覆盖（覆盖 one-dark 的冷蓝调）---- */
-.editor__host .cm-editor.cm-focused {
-  outline: none;
+/* ---- 编辑器主体（预览叠在编辑器上方） ---- */
+.editor__body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  min-height: 0;
 }
-.editor__host .cm-editor .cm-selectionBackground,
-.editor__host .cm-editor.cm-focused .cm-selectionBackground {
-  background: color-mix(in oklab, var(--accent), transparent 80%) !important;
+
+/* ---- Markdown 预览（绝对定位覆盖编辑器） ---- */
+.editor__preview {
+  position: absolute;
+  inset: 0;
+  overflow: auto;
+  padding: 16px 24px 32px;
+  background: var(--s2);
+  z-index: 1;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  color: var(--fg);
 }
-.editor__host .cm-editor .cm-content {
-  caret-color: var(--accent);
+.editor__preview h1, .editor__preview h2, .editor__preview h3 { color: var(--fg); }
+.editor__preview a { color: var(--accent); }
+.editor__preview code:not(.hljs) {
+  padding: 1px 5px;
+  font-size: 0.9em;
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
 }
-.editor__host .cm-editor .cm-gutterElement {
-  color: var(--muted);
+.editor__preview pre {
+  margin: 0.6em 0;
+  padding: 12px 14px;
+  overflow-x: auto;
+  background: var(--s3);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  font-family: var(--font-mono);
 }
-.editor__host .cm-editor .cm-activeLineGutter {
+.editor__preview pre code { padding: 0; background: transparent; }
+.editor__preview blockquote {
+  margin: 0.5em 0;
+  padding: 2px 12px;
+  border-left: 3px solid var(--accent);
   color: var(--fg-2);
 }
-.editor__host .cm-editor .cm-tooltip {
-  background: var(--s3);
+.editor__preview table { border-collapse: collapse; margin: 0.5em 0; }
+.editor__preview th, .editor__preview td {
+  padding: 4px 10px;
   border: 1px solid var(--edge);
-  color: var(--fg);
-}
-.editor__host .cm-editor .cm-tooltip-autocomplete ul li[aria-selected] {
-  background: var(--accent-dim);
-  color: var(--fg);
-}
-/* 匹配括号高亮：暖色 */
-.editor__host .cm-editor .cm-matchingBracket {
-  background: color-mix(in oklab, var(--accent), transparent 75%);
-  color: var(--fg) !important;
-  outline: 1px solid color-mix(in oklab, var(--accent), transparent 50%);
-}
-
-/* ---- 搜索面板（Ctrl+F）：修复 checkbox 错位，重绘为工作台风格 ---- */
-/* 面板容器：三级表面 + 发丝分隔，取代默认的 #333338 硬背景。
-   search() 默认 top:false，面板出现在编辑器底部（cm-panels-bottom），两种位置都覆盖 */
-.editor__host .cm-panels {
-  background: var(--s3);
-  color: var(--fg);
-}
-.editor__host .cm-panels-bottom { border-top: 1px solid var(--edge-hair); }
-.editor__host .cm-panels-top { border-bottom: 1px solid var(--edge-hair); }
-.editor__host .cm-panel.cm-search {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 8px;
-  padding: 8px 40px 8px 12px; /* 右侧留出关闭按钮的位置 */
-  font-family: var(--font-ui);
   font-size: var(--text-xs);
 }
-/* <br> 在 flex 布局里默认失效，撑成整行使「替换」行固定落到第二行 */
-.editor__host .cm-panel.cm-search br {
-  flex-basis: 100%;
-  height: 0;
-}
-/* 覆盖默认的 em 系 margin，间距统一交给 gap */
-.editor__host .cm-panel.cm-search input,
-.editor__host .cm-panel.cm-search button,
-.editor__host .cm-panel.cm-search label { margin: 0; }
+.editor__preview th { background: color-mix(in oklab, var(--s3), var(--fg) 4%); }
+.editor__preview hr { border: none; border-top: 1px solid var(--edge-hair); margin: 0.8em 0; }
+.editor__preview img { max-width: 100%; }
 
-/* 查找 / 替换输入框 */
-.editor__host .cm-panel.cm-search .cm-textfield {
-  width: 200px;
-  padding: 3px 8px;
-  font-family: var(--font-mono);
-  font-size: var(--text-micro);
-  color: var(--fg);
-  background: var(--s2);
-  border: 1px solid var(--edge);
-  border-radius: var(--radius-sm);
-  outline: none;
-  transition: border-color var(--motion-fast) var(--ease-standard), box-shadow var(--motion-fast) var(--ease-standard);
-}
-.editor__host .cm-panel.cm-search .cm-textfield::placeholder { color: var(--muted); }
-.editor__host .cm-panel.cm-search .cm-textfield:focus {
-  border-color: var(--accent);
-  box-shadow: var(--focus-ring);
-}
-
-/* 下一处 / 上一处 / 全选 / 替换按钮：幽灵按钮 */
-.editor__host .cm-panel.cm-search .cm-button {
-  padding: 3px 10px;
+/* ---- 预览切换按钮 ---- */
+.editor__preview-btn {
+  margin-left: auto;
+  margin-right: 4px;
+  align-self: center;
+  padding: 2px 10px;
+  font-size: 11px;
   font-family: var(--font-ui);
-  font-size: var(--text-micro);
   color: var(--fg-2);
   background: transparent;
   border: 1px solid var(--edge);
@@ -766,85 +1031,8 @@
   cursor: pointer;
   transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
 }
-.editor__host .cm-panel.cm-search .cm-button:hover {
-  color: var(--fg);
-  background: var(--row-hover);
-}
-
-/* 选项 label：inline-flex 垂直居中（修复 checkbox 与文字基线错位的根源） */
-.editor__host .cm-panel.cm-search label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: var(--text-micro);
-  color: var(--fg-2);
-  white-space: nowrap;
-  cursor: pointer;
-  user-select: none;
-}
-.editor__host .cm-panel.cm-search label:hover { color: var(--fg); }
-
-/* 自绘勾选框：方圆小格，选中填充强调色 */
-.editor__host .cm-panel.cm-search input[type='checkbox'] {
-  appearance: none;
-  -webkit-appearance: none;
-  position: relative;
-  flex: none;
-  width: 13px;
-  height: 13px;
-  color: var(--accent-on);
-  background: var(--s2);
-  border: 1px solid var(--edge);
-  border-radius: 4px;
-  cursor: pointer;
-  transition: background var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
-}
-.editor__host .cm-panel.cm-search input[type='checkbox']:hover { border-color: var(--accent); }
-.editor__host .cm-panel.cm-search input[type='checkbox']:checked {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-.editor__host .cm-panel.cm-search input[type='checkbox']:checked::after {
-  content: '';
-  position: absolute;
-  left: 3.5px;
-  top: 0.5px;
-  width: 4px;
-  height: 8px;
-  border: solid var(--accent-on);
-  border-width: 0 1.5px 1.5px 0;
-  transform: rotate(45deg);
-}
-.editor__host .cm-panel.cm-search input[type='checkbox']:focus-visible {
-  outline: none;
-  box-shadow: var(--focus-ring);
-}
-
-/* 关闭按钮 ×：垂直居中于右侧，悬停轻提亮 */
-.editor__host .cm-panel.cm-search [name='close'] {
-  position: absolute;
-  top: 50%;
-  right: 8px;
-  transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  font-size: 14px;
-  line-height: 1;
-  color: var(--muted);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-sm);
-  cursor: pointer;
-  transition: color var(--motion-fast) var(--ease-standard), background var(--motion-fast) var(--ease-standard);
-}
-.editor__host .cm-panel.cm-search [name='close']:hover {
-  color: var(--fg);
-  background: var(--row-hover);
-}
+.editor__preview-btn:hover { color: var(--fg); background: var(--row-hover); }
+.editor__preview-btn--active { color: var(--accent); border-color: var(--accent); }
 
 /* ============ 历史工程 Tab ============ */
 
@@ -987,4 +1175,194 @@
   border-radius: 0;
   width: 100%;
   height: 100%;
+}
+
+/* ============ 状态机动效：切换瞬间的感知 ============ */
+/* 一次性动效由节点 key 重挂（state 变化）触发重放；呼吸/光环为持续动效 */
+
+/* 活跃阶段：节点光环呼吸（叠加在 pip-pulse 之上，视觉焦点） */
+.pipeline__node--active { animation: node-breathe 1.6s ease-in-out infinite; }
+@keyframes node-breathe {
+  0%, 100% { box-shadow: 0 0 0 0 transparent; }
+  50% { box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent), transparent 82%); }
+}
+
+/* 阶段落定（done）：一次性弹跳，宣告「这步完成了」 */
+.pipeline__node--done { animation: stage-pop 0.4s var(--ease-standard); }
+@keyframes stage-pop {
+  0% { transform: scale(0.94); }
+  55% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+/* 异常：一次性抖动 + 红色闪烁，之后保持静态红显 */
+.pipeline__node--error { animation: stage-shake 0.45s var(--ease-standard); }
+@keyframes stage-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+
+/* 连线点亮瞬间：短暂增亮增粗再回落，产生「能量流过」的感觉 */
+.pipeline__line--filled { animation: line-fill 0.45s var(--ease-standard); }
+@keyframes line-fill {
+  0% { filter: brightness(1.9); transform: scaleY(2.2); }
+  100% { filter: brightness(1); transform: scaleY(1); }
+}
+
+/* 服务行阶段徽标：状态变化淡入（配合 key 重挂） */
+.slots__phase { animation: badge-in 0.32s var(--ease-standard); }
+@keyframes badge-in {
+  from { opacity: 0.2; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* 日志台出现动效沿用 rise-in；状态类动效统一尊重减弱动态偏好 */
+@media (prefers-reduced-motion: reduce) {
+  .pipeline__node--active,
+  .pipeline__node--done,
+  .pipeline__node--error,
+  .pipeline__line--filled,
+  .pipeline__node--active .pipeline__pip,
+  .slots__phase,
+  .consolepane {
+    animation: none !important;
+  }
+}
+
+/* ============ 页面控制台（预览页 console 输出） ============ */
+.console-stream {
+  max-height: 220px;
+  overflow: auto;
+  font-size: 11px;
+  line-height: 1.7;
+}
+.console-stream__empty {
+  padding: var(--space-4);
+  text-align: center;
+  color: var(--muted);
+}
+.console-stream__line {
+  display: flex;
+  gap: 8px;
+  padding: 1px var(--space-3);
+  color: var(--fg-2);
+  word-break: break-all;
+}
+.console-stream__level {
+  flex: 0 0 38px;
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+}
+.console-stream__text { white-space: pre-wrap; }
+.console-stream__line--error { color: var(--danger); }
+.console-stream__line--error .console-stream__level { color: var(--danger); }
+.console-stream__line--warning { color: var(--stage-deploy); }
+.console-stream__line--warning .console-stream__level { color: var(--stage-deploy); }
+
+/* 错误卡片：端口占用者提示 */
+.error-box__port {
+  padding: 6px var(--space-4) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--danger);
+  border-top: 1px solid color-mix(in oklab, var(--danger), transparent 75%);
+}
+
+/* ============ Git 面板：多仓库选择 + 操作状态条 ============ */
+.gitpanel__repo-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gitpanel__repo-label {
+  flex: 0 0 auto;
+  font-size: var(--text-micro);
+  color: var(--muted);
+}
+.gitpanel__repo-row .select { flex: 1; min-width: 0; }
+
+
+/* ============ git 操作过场弹窗 ============ */
+.gitop { width: min(440px, calc(100vw - 48px)); }
+
+/* 运行中：居中列 + 品牌色转圈 */
+.gitop__running {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: var(--space-6) var(--space-4) var(--space-5);
+}
+.gitop__spinner {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 2.5px solid color-mix(in oklab, var(--accent), transparent 78%);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}
+.gitop__running-text { font-size: var(--text-sm); color: var(--fg); }
+.gitop__hint { font-size: var(--text-xs); color: var(--muted); }
+
+/* 结果态：徽标圆 + 标题居中，输出框全宽左对齐好读 */
+.gitop__result {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--space-5) var(--space-4) var(--space-4);
+  text-align: center;
+}
+.gitop__badge {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 10px;
+  animation: stage-pop 0.35s var(--ease-standard);
+}
+.gitop__result--ok .gitop__badge {
+  background: color-mix(in oklab, var(--stage-run, #2ea043), transparent 82%);
+  color: var(--stage-run, #2ea043);
+}
+.gitop__result--fail .gitop__badge {
+  background: var(--danger-dim);
+  color: var(--danger);
+}
+.gitop__title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+}
+.gitop__detail {
+  width: 100%;
+  margin: var(--space-3) 0 0;
+  text-align: left;
+  max-height: 200px;
+  overflow: auto;
+  padding: var(--space-2) var(--space-3);
+  background: color-mix(in oklab, var(--s2), var(--deepen) 10%);
+  border: 1px solid var(--edge-hair);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg-2);
+}
+.gitop__result--fail .gitop__detail {
+  border-color: color-mix(in oklab, var(--danger), transparent 62%);
+  background: var(--danger-dim);
+  color: var(--danger);
+}
+.gitop .modal__actions {
+  margin-top: var(--space-4);
+  justify-content: center;
+}
+@media (prefers-reduced-motion: reduce) {
+  .gitop__spinner, .gitop__badge { animation: none !important; }
 }

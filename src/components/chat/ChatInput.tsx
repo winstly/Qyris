@@ -3,7 +3,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { useChatStore } from '@/store/useChatStore'
 import { isDesktop } from '@/services/desktop'
 import { fmtTok } from '@/utils/tokens'
-import { IconSend, IconStop, IconClose, IconTarget } from '@/components/common/icons'
+import { IconSend, IconStop, IconClose, IconTarget, IconCheck } from '@/components/common/icons'
 import type { SkillMeta } from '@/types'
 
 /** 多行输入：Enter 发送 / Shift+Enter 换行，自动增高；生成中可点「停止」。
@@ -24,6 +24,10 @@ export function ChatInput() {
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
+  // 输入 / 之前的文本暂存（用户输入 / 前的内容）
+  const savedTextRef = useRef('')
+  // 追踪上一次文本值，用于检测何时插入了 /
+  const prevTextRef = useRef('')
 
   // 已选中的 Skills（多选，选中后不发送，等用户写描述再一起发）
   const [selectedSkills, setSelectedSkills] = useState<SkillMeta[]>([])
@@ -35,7 +39,7 @@ export function ChatInput() {
       ? '请先在设置中配置 API Key'
       : undefined
 
-  // 过滤匹配的 skills（用完整列表 skillMetas，不受 slashFilter 影响总数）
+  // 过滤匹配的 skills
   const filteredSkills = slashOpen
     ? skillMetas.filter((s) => {
         if (!slashFilter) return true
@@ -70,13 +74,27 @@ export function ChatInput() {
     setSlashIndex(0)
   }, [])
 
-  /** 选中一个 skill：追加到已选列表（去重），不加载内容，等用户写描述再一起发 */
+  /** 选中一个 skill：删除 / 和关键字，恢复暂存文本，光标移到末尾 */
   const selectSkill = useCallback((skill: SkillMeta) => {
+    const restored = savedTextRef.current
     closeSlash()
-    setText('')
-    requestAnimationFrame(resize)
-    setSelectedSkills((prev) => prev.some((s) => s.id === skill.id) ? prev : [...prev, skill])
-    taRef.current?.focus()
+    savedTextRef.current = ''
+    setText(restored)
+    prevTextRef.current = restored  // 同步更新，否则下次检测 prev 还是 /xxx
+    setSelectedSkills((prev) =>
+      prev.some((s) => s.id === skill.id)
+        ? prev.filter((s) => s.id !== skill.id)
+        : [...prev, skill],
+    )
+    // 光标移到末尾（延迟一帧等 React 渲染完）
+    requestAnimationFrame(() => {
+      const ta = taRef.current
+      if (ta) {
+        ta.focus()
+        ta.setSelectionRange(restored.length, restored.length)
+      }
+      resize()
+    })
   }, [closeSlash])
 
   const doSend = () => {
@@ -102,6 +120,7 @@ export function ChatInput() {
       aiMsg = userText
     }
     setText('')
+    prevTextRef.current = ''
     setSelectedSkills([])
     requestAnimationFrame(resize)
     void send(aiMsg, meta)
@@ -109,17 +128,29 @@ export function ChatInput() {
 
   const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value
+    const prev = prevTextRef.current
+    prevTextRef.current = val
     setText(val)
     resize()
-    // 检测 "/" 触发：输入框为空时输入 "/"，且 skills 已配置
-    if (val === '/' && skillMetas.length > 0) {
+    // 检测 "/" 触发：现在以 / 开头但之前不以 / 开头 → 用户在开头插入了 /
+    if (val.startsWith('/') && !prev.startsWith('/') && !slashOpen && skillMetas.length > 0) {
+      // 暂存之前的文本（"帮我" 变成 "/帮我" → 暂存 "帮我"）
+      savedTextRef.current = prev
       setSlashOpen(true)
       setSlashFilter('')
     } else if (slashOpen) {
       if (!val.startsWith('/')) {
+        savedTextRef.current = ''
         closeSlash()
       } else {
-        setSlashFilter(val.slice(1))
+        // 搜索关键字 = / 之后、暂存文本之前的部分
+        // /react帮我 → savedText="帮我" → keyword="react"
+        const afterSlash = val.slice(1)
+        const saved = savedTextRef.current
+        const keyword = saved && afterSlash.endsWith(saved)
+          ? afterSlash.slice(0, -saved.length)
+          : afterSlash
+        setSlashFilter(keyword)
       }
     }
   }
@@ -138,6 +169,7 @@ export function ChatInput() {
       }
       if (e.key === 'Escape') {
         e.preventDefault()
+        savedTextRef.current = ''
         closeSlash()
         return
       }
@@ -164,6 +196,11 @@ export function ChatInput() {
               onClick={() => void selectSkill(skill)}
             >
               <div className="slash-menu__item-name">
+                {selectedSkills.some((s) => s.id === skill.id) ? (
+                  <span className="slash-menu__item-check"><IconCheck size={10} /></span>
+                ) : (
+                  <span className="slash-menu__item-check-placeholder" />
+                )}
                 <span>{skill.name}</span>
               </div>
               {skill.description && <span className="slash-menu__item-desc">{skill.description}</span>}

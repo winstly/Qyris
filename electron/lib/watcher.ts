@@ -1,13 +1,8 @@
-/** 文件监听 —— watcher.rs 的语义移植（chokidar 替代 notify） */
+/** 文件监听 */
 import { watch, type FSWatcher } from 'chokidar'
 import { emitToRenderer } from './emitter'
 
-/**
- * 监听过滤：跳过依赖与构建产物目录。
- * 差异说明：Rust notify 在 Windows 用 ReadDirectoryChangesW 原生递归监听（零遍历成本），
- * chokidar 则靠逐文件遍历建监听——不排除 node_modules 时主进程事件循环会被打饱和，
- * 所有 IPC 全线变慢。此处为必要差异而非行为偏离。
- */
+/** 监听过滤：跳过依赖与构建产物目录 */
 const WATCH_IGNORED = new Set([
   'node_modules', '.git', 'out', 'dist', 'build', 'target', '.next', '.nuxt',
   '.cache', 'coverage', '__pycache__', '.venv', 'venv', '.idea', '.vscode',
@@ -38,7 +33,7 @@ function onEvent(p: string): void {
   timer = setTimeout(flush, 100)
 }
 
-/** 全局单 watcher：start 先停旧（与 watcher.rs 单槽语义一致） */
+/** 全局单 watcher：start 先停旧 */
 export async function startWatching(projectRoot: string): Promise<void> {
   await stopWatchingInternal()
   // 归一化后剥掉项目根前缀再判忽略，避免项目根自身恰名为 build/dist 等时整棵监听被误杀
@@ -54,7 +49,7 @@ export async function startWatching(projectRoot: string): Promise<void> {
   watcher.on('unlink', onEvent)
   watcher.on('addDir', onEvent)
   watcher.on('unlinkDir', onEvent)
-  // notify 版对单个监听错误采取忽略策略，这里保持一致
+  // 单个监听错误静默忽略
   watcher.on('error', () => {})
 }
 

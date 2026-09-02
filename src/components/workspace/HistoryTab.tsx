@@ -5,18 +5,7 @@ import { useBuildStore } from '@/store/useBuildStore'
 import { api } from '@/services/desktop'
 import { IconClock, IconFolder, IconTrash } from '@/components/common/icons'
 import { basename } from '@/utils/path'
-
-function timeAgo(ts: number): string {
-  const diff = Date.now() - ts
-  const min = Math.floor(diff / 60000)
-  if (min < 1) return '刚刚'
-  if (min < 60) return `${min} 分钟前`
-  const hr = Math.floor(min / 60)
-  if (hr < 24) return `${hr} 小时前`
-  const day = Math.floor(hr / 24)
-  if (day < 30) return `${day} 天前`
-  return new Date(ts).toLocaleDateString('zh-CN')
-}
+import { timeAgo } from '@/utils/time'
 
 /** 历史工程 Tab：展示最近打开过的项目列表 */
 export function HistoryTab() {

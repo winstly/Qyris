@@ -99,6 +99,17 @@ npm install
 npm run dev
 ```
 
+### 常见问题
+
+#### Electron 二进制缺失（"Error: Electron uninstall"）
+
+如果 `npm install` 后运行 `npm run dev` 报错 Electron 二进制缺失，可能是网络问题导致 Electron 下载失败。解决方法：
+
+1. **检查网络连接**：确保能访问外网
+2. **使用镜像**：项目已配置 npmmirror 镜像，通常自动生效
+3. **手动安装**：运行 `node node_modules/electron/install.js` 手动下载
+4. **设置环境变量**：如果镜像不可用，可设置 `ELECTRON_MIRROR` 环境变量指向可用的镜像源
+
 ### 配置 AI
 
 首次打开后，点击右上角对话栏的齿轮图标：

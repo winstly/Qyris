@@ -4,6 +4,9 @@ import remarkGfm from 'remark-gfm'
 import hljs from 'highlight.js/lib/common'
 import { IconCopy, IconCheck } from '@/components/common/icons'
 
+/** 语法高亮的最大代码长度（超过则跳过高亮，直接转义显示） */
+const MAX_HIGHLIGHT_LENGTH = 20_000
+
 /** AI 回复的 Markdown 渲染：GFM + 代码块语法高亮 + 一键复制。 */
 export function Markdown({ source }: { source: string }) {
   return (
@@ -36,7 +39,7 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
 
   let html = ''
   try {
-    if (code.length > 20_000) {
+    if (code.length > MAX_HIGHLIGHT_LENGTH) {
       html = escapeHtml(code)
     } else if (lang && hljs.getLanguage(lang)) {
       html = hljs.highlight(code, { language: lang, ignoreIllegals: true }).value

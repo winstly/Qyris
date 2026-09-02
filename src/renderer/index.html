@@ -4,13 +4,61 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>轻驭</title>
-    <!-- 深色底色内联，避免启动瞬间白屏闪烁 -->
+    <!-- 深色底色内联，避免启动瞬间白屏闪烁；启动过场（splash）为纯 HTML/CSS，
+         bundle 解析期间即可见，React 挂载后由 main.tsx 淡出移除 -->
     <style>
       html, body { background: #131315; margin: 0; }
+      #boot-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 20px;
+        background: #131315;
+        color: #e8e6e3;
+        font-family: Georgia, 'Songti SC', 'SimSun', serif;
+        opacity: 1;
+        transition: opacity 0.3s ease;
+      }
+      #boot-splash.boot-splash--hide { opacity: 0; pointer-events: none; }
+      .boot-splash__title {
+        font-size: 46px;
+        font-weight: 400;
+        letter-spacing: 0.14em;
+        text-indent: 0.14em; /* 视觉居中补偿字距 */
+      }
+      .boot-splash__sub {
+        font-family: system-ui, -apple-system, sans-serif;
+        font-size: 11px;
+        letter-spacing: 0.42em;
+        text-indent: 0.42em;
+        color: #77777c;
+      }
+      .boot-splash__spinner {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        border: 2px solid #2c2c30;
+        border-top-color: #7c8da4;
+        animation: boot-spin 0.8s linear infinite;
+      }
+      @keyframes boot-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        .boot-splash__spinner { animation: none; }
+        #boot-splash { transition: none; }
+      }
     </style>
   </head>
   <body>
     <div id="root"></div>
+    <div id="boot-splash">
+      <div class="boot-splash__title">轻驭</div>
+      <div class="boot-splash__spinner"></div>
+      <div class="boot-splash__sub">QYRIS</div>
+    </div>
     <script type="module" src="./main.tsx"></script>
   </body>
 </html>

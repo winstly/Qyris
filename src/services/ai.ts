@@ -9,7 +9,8 @@ export function buildSystemPrompt(projectPath: string | null, skillMetas: SkillM
     '用户使用简体中文，默认用简体中文回复；代码、命令、标识符保持原样。',
     '回复简洁、直接、可执行，不写客套话。',
     '你拥有项目文件工具：list_files / search_files / read_file / write_file。修改文件前必须先 read_file 获取真实内容，禁止凭空臆造；写文件时给出完整内容并通过 write_file 落盘；需要定位文件而不知道确切路径时用 search_files 按文件名搜索。',
-    '「AI 编译」流程（用户点击「AI 编译」按钮，或要求识别启动命令 / 编译项目 / 准备运行环境时）：① 先 list_files 检测技术栈特征文件（package.json / Cargo.toml / go.mod / pyproject.toml / pom.xml 等），必要时 read_file 查看 scripts 配置；② 需要安装依赖或验证编译时用 run_once 执行一次性命令（不要用 run_project，编译类命令不建服务槽）；③ 识别出每个需要长期运行的服务（如前后端分离项目的 web / api）的启动命令后，用 report_start_commands 一次性提交，服务名用简短英文且不重复，run 填完整启动命令。提交后即完成，不要直接 run_project 启动服务——运行由用户决定。仅在存在多个合理命令且无法判断时才 askUserQuestion 询问。',
+    '「AI 编译」流程（用户点击「AI 编译」按钮，或要求识别启动命令 / 编译项目 / 准备运行环境时）：① 先 list_files 检测技术栈特征文件（package.json / Cargo.toml / go.mod / pyproject.toml / pom.xml 等），必要时 read_file 查看 scripts 配置；② 需要安装依赖或验证编译时用 run_once 执行一次性命令（不要用 run_project，编译类命令不建服务槽）；③ 识别出每个需要长期运行的服务（如前后端分离项目的 web / api）的启动命令后，逐个用 verify_start 做启动验证（验证通过会自动停止进程；失败按返回的日志修复后重试）；④ 全部验证通过后用 report_start_commands 一次性提交启动命令清单，服务名用简短英文且不重复，run 填完整启动命令。提交后即完成，不要直接 run_project 启动服务——运行由用户决定。仅在存在多个合理命令且无法判断时才 askUserQuestion 询问。',
+    '工具链缺失处理（run_once / run_project / verify_start 报「未找到 X」）：说明该工具未安装或不在 PATH。先向用户说明将要执行的安装命令并征得同意（用户在预览面板点「授权 AI 自动安装」即视为已授权，无需再问）；同意后用 run_once 安装——Windows 优先 winget install --id <包ID> --silent --accept-package-agreements --accept-source-agreements，macOS 用 brew install，Linux 用发行版包管理器；安装成功后用 run_once 验证工具可用，再重试原命令。严禁未经授权静默安装工具链。',
     '用户在对话中明确要求「启动 / 运行」某服务时，才直接 run_project（每个服务取简短英文名，多服务逐个启动，不要拼进一个脚本），启动后用 get_build_status 跟踪「编译 / 部署 / 运行」阶段并向用户汇报；编译失败时根据错误输出修改文件后再次 run_project 重启（同名服务原地重启，不影响其他服务）。启动过的服务命令会自动沉淀，供用户之后一键运行。',
     '需要用户在选项间做选择或补充信息时，调用 askUserQuestion。',
     '工作方式（任何非平凡任务）：① 先给出简短的编号计划（要做哪几步、每步交给哪个档位），再开始执行；② 边界清晰、可独立完成的子任务用 dispatch_subtasks 派发给子 agent（各自独立上下文，禁止子任务再嵌套派发），按难度选档位：fast=查找/统计/轻量总结，middle=常规代码修改，heavy=复杂重构/跨模块改动，thinking=疑难调试/深度推理，main=主模型；未配置的档位自动回退主模型；③ 简单问答或一两步能完成的事直接做，不需要计划与派发；④ 子任务结果返回后核对并汇总，不照单全收。',
@@ -108,8 +109,23 @@ export const TOOL_DEFS: OAIToolDef[] = [
   {
     type: 'function',
     function: {
+      name: 'verify_start',
+      description: '启动验证：以给定命令启动服务，等待其真正可服务（解析到地址并 HTTP 探测通过；无地址时按启动信号判定），验证完成自动停止进程。用于编译成功后确认「能启动」，失败会返回日志尾部供修复',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '服务名（简短英文，如 web / api），与后续 report_start_commands / run_project 保持一致' },
+          command: { type: 'string', description: '启动命令，如 "npm run dev"、"mvn spring-boot:run"' },
+        },
+        required: ['name', 'command'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'report_start_commands',
-      description: 'AI 编译阶段的收尾动作：提交识别出的启动命令清单（每个需要长期运行的服务一项）。保存后用户可在预览面板一键「运行」。提交即代表识别完成，之后不要再 run_project 启动服务',
+      description: 'AI 编译阶段的收尾动作：提交识别出的启动命令清单（每个需要长期运行的服务一项）。保存后用户可在预览面板一键「全部运行」。提交即代表识别完成，之后不要再 run_project 启动服务',
       parameters: {
         type: 'object',
         properties: {

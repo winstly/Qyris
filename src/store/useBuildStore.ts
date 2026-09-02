@@ -35,7 +35,7 @@ const URL_RE = /https?:\/\/[^\s"'<>）】]+/i
 
 function normalizeUrl(raw: string): string | null {
   try {
-    // 双保险剥掉 ANSI（主进程已剥，这里兜底二次防护，防止 URL 尾巴带控制字符）
+    // 剥掉 ANSI 控制字符
     const cleaned = raw
       .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
       .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')

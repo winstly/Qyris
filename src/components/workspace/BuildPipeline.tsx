@@ -48,7 +48,8 @@ export function BuildPipeline({ phase }: { phase: BuildPhase }) {
               } pipeline__line--${STAGES[i - 1].key}`}
             />
           )}
-          <span className={`pipeline__node pipeline__node--${stage.key} pipeline__node--${states[i]}`}>
+          {/* key 含状态：进入新状态时节点重挂，一次性动效（落定弹跳/异常抖动）得以重放 */}
+          <span key={`${stage.key}:${states[i]}`} className={`pipeline__node pipeline__node--${stage.key} pipeline__node--${states[i]}`}>
             <span className="pipeline__pip" />
             <span className="pipeline__label">{stage.label}</span>
           </span>

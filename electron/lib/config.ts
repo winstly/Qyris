@@ -1,4 +1,4 @@
-/** 非敏感配置持久化（userData/config.json）—— config.rs 的逐语义移植。刻意不含 API Key。 */
+/** 非敏感配置持久化（userData/config.json）。刻意不含 API Key。 */
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { errorMessage } from './util'
@@ -29,7 +29,7 @@ export interface AppConfig {
   startupCommands?: Record<string, StartCommand[]>
 }
 
-/** 读取失败一律回默认值（get_config 永不 reject，与 config.rs 一致） */
+/** 读取失败一律回默认值（get_config 永不 reject） */
 export async function getConfig(): Promise<AppConfig> {
   try {
     const raw = await fsp.readFile(configPath(), 'utf8')

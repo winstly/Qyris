@@ -29,8 +29,10 @@ export default defineConfig({
     },
     clearScreen: false,
     server: {
-      port: 5173,
-      strictPort: true,
+      // 5173 是 Vite 生态默认端口，极易与别的 Vite 项目撞车；避开并允许被占时自动 +1
+      // （electron-vite 会把实际地址写入 ELECTRON_RENDERER_URL，主进程加载不受影响）
+      port: 5188,
+      strictPort: false,
       watch: {
         // 避免监听构建产物与主进程代码造成的无意义重载
         ignored: ['**/out/**', '**/electron/**'],

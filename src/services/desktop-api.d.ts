@@ -24,11 +24,18 @@ declare global {
     createEntry: (projectRoot: string, parentDir: string, name: string, isDir: boolean) => Promise<TreeNode>
     renameEntry: (projectRoot: string, filePath: string, newName: string) => Promise<string>
     deleteEntry: (projectRoot: string, filePath: string) => Promise<void>
+    copyEntry: (projectRoot: string, srcPath: string, destDir: string) => Promise<TreeNode>
+    moveEntry: (projectRoot: string, srcPath: string, destDir: string) => Promise<TreeNode>
     deleteProjectFiles: (projectRoot: string) => Promise<void>
 
     // 子进程 / watcher
     runProject: (projectRoot: string, name: string, command: string) => Promise<number>
-    runOnce: (projectRoot: string, command: string) => Promise<{ code: number | null; output: string }>
+    runOnce: (projectRoot: string, command: string, token?: string) => Promise<{ code: number | null; output: string }>
+    runOnceCancel: (token?: string) => Promise<number>
+    checkUrl: (url: string) => Promise<boolean>
+    portOwner: (port: number) => Promise<{ pid: number; name: string } | null>
+    previewConsoleAttach: (url: string | null) => Promise<void>
+    previewConsoleHistory: () => Promise<PreviewConsoleEntry[]>
     stopProject: (name?: string) => Promise<void>
     startWatching: (projectRoot: string) => Promise<void>
     stopWatching: () => Promise<void>
@@ -51,6 +58,16 @@ declare global {
     testRepo: (url: string) => Promise<{ valid: boolean; branches: string[]; error: string | null }>
     gitRepoInfo: (dir: string) => Promise<{ isRepo: boolean; currentBranch: string | null; branches: string[] }>
     gitCheckout: (dir: string, branch: string) => Promise<void>
+    gitStatus: (dir: string) => Promise<GitStatus>
+    gitIsRepoRoot: (dir: string) => Promise<boolean>
+    gitDiff: (dir: string, path?: string, staged?: boolean) => Promise<string>
+    gitAdd: (dir: string, paths?: string[]) => Promise<void>
+    gitUnstage: (dir: string, paths: string[]) => Promise<void>
+    gitCommit: (dir: string, message: string) => Promise<string>
+    gitPull: (dir: string) => Promise<string>
+    gitFetch: (dir: string) => Promise<string>
+    gitPush: (dir: string) => Promise<string>
+    gitDiscard: (dir: string, paths: string[]) => Promise<void>
     pickParentDir: () => Promise<string | null>
 
     // AI
@@ -70,6 +87,7 @@ declare global {
     onAiDelta: DesktopEventSub<{ requestId: string; delta: string }>
     onAiReasoning: DesktopEventSub<{ requestId: string; delta: string }>
     onFsChanged: DesktopEventSub<{ paths: string[] }>
+    onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>
   }
 
   interface Window {

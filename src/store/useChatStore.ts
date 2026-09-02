@@ -154,6 +154,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     void import('@/services/subagent')
       .then((m) => m.cancelActiveAgentRequests())
       .catch(() => {})
+    // 在途一次性命令（run_once）硬中断：命令挂死时「停止生成」要能立即杀掉进程树，
+    // runOnce 的 Promise 随进程退出收口，循环在下一检查点按取消路径退出
+    void api.runOnceCancel().catch(() => {})
     // 若正卡在 askUserQuestion，解除挂起让循环走到下一轮的取消检查
     const s = get()
     if (s.status === 'awaiting-user' && s.pendingAsk) {

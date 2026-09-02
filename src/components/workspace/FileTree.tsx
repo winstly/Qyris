@@ -1,18 +1,28 @@
-import { useEffect, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useFileStore } from '@/store/useFileStore'
+import { useGitStore } from '@/store/useGitStore'
 import { api } from '@/services/desktop'
 import { basename, joinPath } from '@/utils/path'
 import type { TreeNode } from '@/types'
 import { ContextMenu, type ContextMenuItem } from '@/components/common/ContextMenu'
 import { Select } from '@/components/common/Select'
-import { IconChevron, IconFolder, IconFolderOpen, IconFile, IconPlus, IconFolderPlus, IconPencil, IconTrash, IconRefresh, IconSearch, IconClose, IconBranch } from '@/components/common/icons'
+import { IconChevron, IconFolder, IconFolderOpen, IconFile, IconPlus, IconFolderPlus, IconPencil, IconTrash, IconRefresh, IconSearch, IconClose, IconBranch, IconUndo, IconCopy, IconScissors, IconCheck, IconSend } from '@/components/common/icons'
+import { focusGitCommit } from '@/components/workspace/GitPanel'
 
 /** 右键「切换分支」对话框的目标目录与其仓库信息 */
 interface BranchTarget {
   dir: string
   currentBranch: string | null
   branches: string[]
+}
+
+/** 搜索框 ref，供全局快捷键 Ctrl+F 聚焦 */
+let searchInputRef: HTMLInputElement | null = null
+/** 聚焦文件树搜索框 */
+export function focusFileSearch(): void {
+  searchInputRef?.focus()
+  searchInputRef?.select()
 }
 
 /**
@@ -27,6 +37,25 @@ export function FileTree() {
   const [searching, setSearching] = useState(false)
   const seqRef = useRef(0)
   const [branchTarget, setBranchTarget] = useState<BranchTarget | null>(null)
+
+  /** 右键「切换分支」：目录必须是 Git 仓库（有本地分支）才弹选择框 */
+  const openBranchSwitch = useCallback(async (dir: string) => {
+    const alert = useAppStore.getState().showAlert
+    try {
+      const info = await api.gitRepoInfo(dir)
+      if (!info.isRepo) {
+        void alert('切换分支', '该目录不是 Git 仓库（未找到 .git）。')
+        return
+      }
+      if (info.branches.length === 0) {
+        void alert('切换分支', '该仓库没有任何本地分支。')
+        return
+      }
+      setBranchTarget({ dir, currentBranch: info.currentBranch, branches: info.branches })
+    } catch (e) {
+      void alert('切换分支', String(e))
+    }
+  }, [])
 
   // 防抖 200ms；seq 防竞态（连续输入时旧请求晚到覆盖新结果）
   useEffect(() => {
@@ -58,7 +87,7 @@ export function FileTree() {
 
   if (!rootPath) {
     return (
-      <div className="filetree filetree--empty">
+      <div className="filetree-wrap filetree-wrap--empty">
         <IconFolder size={20} />
         <p>未打开项目</p>
         <button className="btn btn--primary btn--sm" onClick={() => void openProjectDialog()}>
@@ -68,32 +97,14 @@ export function FileTree() {
     )
   }
 
-  /** 右键「切换分支」：目录必须是 Git 仓库（有本地分支）才弹选择框 */
-  const openBranchSwitch = async (dir: string) => {
-    const alert = useAppStore.getState().showAlert
-    try {
-      const info = await api.gitRepoInfo(dir)
-      if (!info.isRepo) {
-        void alert('切换分支', '该目录不是 Git 仓库（未找到 .git）。')
-        return
-      }
-      if (info.branches.length === 0) {
-        void alert('切换分支', '该仓库没有任何本地分支。')
-        return
-      }
-      setBranchTarget({ dir, currentBranch: info.currentBranch, branches: info.branches })
-    } catch (e) {
-      void alert('切换分支', String(e))
-    }
-  }
-
   const rootNode: TreeNode = { name: basename(rootPath), path: rootPath, kind: 'folder' }
   return (
-    <div className="filetree" aria-label="项目文件">
+    <div className="filetree-wrap" aria-label="项目文件">
       <div className="filetree__search">
         <IconSearch size={13} />
         <input
           className="filetree__search-input"
+          ref={(el) => { searchInputRef = el }}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="搜索文件…"
@@ -106,13 +117,26 @@ export function FileTree() {
           </button>
         )}
       </div>
-      {results !== null ? (
-        <SearchResults results={results} searching={searching} query={query.trim()} />
-      ) : (
-        <div role="tree">
-          <NodeRow node={rootNode} depth={0} onSwitchBranch={openBranchSwitch} />
-        </div>
-      )}
+      <div className="filetree" onKeyDown={(e) => {
+        if (!e.ctrlKey && !e.metaKey) return
+        const fs = useFileStore.getState()
+        const active = fs.activePath
+        if (!active) return
+        if (e.key === 'x') { e.preventDefault(); fs.cut(active) }
+        else if (e.key === 'c') { e.preventDefault(); fs.copy(active) }
+        else if (e.key === 'v') {
+          const dest = fs.childrenMap[active] ? active : fs.parentOf(active) ?? fs.rootPath
+          if (dest) { e.preventDefault(); void fs.paste(dest) }
+        }
+      }}>
+        {results !== null ? (
+          <SearchResults results={results} searching={searching} query={query.trim()} />
+        ) : (
+          <div role="tree">
+            <NodeRow node={rootNode} depth={0} onSwitchBranch={openBranchSwitch} />
+          </div>
+        )}
+      </div>
       {branchTarget && (
         <BranchSwitchDialog target={branchTarget} onClose={() => setBranchTarget(null)} />
       )}
@@ -168,7 +192,7 @@ function SearchResults({ results, searching, query }: {
   )
 }
 
-function NodeRow({ node, depth, onSwitchBranch }: {
+const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
   node: TreeNode
   depth: number
   onSwitchBranch: (dir: string) => void
@@ -183,6 +207,7 @@ function NodeRow({ node, depth, onSwitchBranch }: {
   const openFile = useFileStore((s) => s.openFile)
   const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
   const hasSnapshot = useFileStore((s) => !!s.snapshots[node.path])
+  const isActive = activePath === node.path
 
   return (
     <>
@@ -191,9 +216,12 @@ function NodeRow({ node, depth, onSwitchBranch }: {
         aria-expanded={isFolder ? expanded : undefined}
         aria-selected={activePath === node.path}
         tabIndex={-1}
-        className={`tree-row ${activePath === node.path ? 'tree-row--active' : ''}`}
+        className={`tree-row ${isActive ? 'tree-row--active' : ''}`}
         style={{ paddingLeft: 8 + depth * 14 }}
-        onClick={() => (isFolder ? void toggleDir(node.path) : void openFile(node.path))}
+        onClick={() => {
+          if (isFolder) void toggleDir(node.path)
+          else void openFile(node.path)
+        }}
         onContextMenu={(e) => {
           e.preventDefault()
           setMenuPos({ x: e.clientX, y: e.clientY })
@@ -234,7 +262,7 @@ function NodeRow({ node, depth, onSwitchBranch }: {
       )}
     </>
   )
-}
+})
 
 // ---------- 右键菜单 ----------
 
@@ -320,15 +348,66 @@ function buildTreeMenuItems(
     }
   }
 
+  /** Git 操作：走共享操作反馈（GitPanel 状态条就地反馈，成功不弹窗）；完成后刷新树 */
+  const gitSync = (op: 'pull' | 'fetch' | 'push') => {
+    const label = op === 'pull' ? '拉取' : op === 'push' ? '推送' : '获取'
+    void useGitStore.getState().runOp(label, async () => {
+      const info = await api.gitRepoInfo(target.path).catch(() => null)
+      if (!info?.isRepo) throw new Error('该目录不是 Git 仓库（未找到 .git）。')
+      const out = op === 'pull' ? await api.gitPull(target.path)
+        : op === 'push' ? await api.gitPush(target.path)
+        : await api.gitFetch(target.path)
+      await afterFsChange(target.kind === 'folder' ? target.path : rootPath)
+      return out
+    })
+  }
+
   return [
     { label: '新建文件', icon: <IconPlus size={13} />, run: () => void newEntry(false) },
     { label: '新建文件夹', icon: <IconFolderPlus size={13} />, run: () => void newEntry(true) },
     { label: '重命名', icon: <IconPencil size={13} />, run: () => void rename(), disabled: isRoot },
+    { label: '剪切', icon: <IconScissors size={13} />, run: () => useFileStore.getState().cut(target.path), disabled: isRoot },
+    { label: '复制', icon: <IconCopy size={13} />, run: () => useFileStore.getState().copy(target.path) },
+    ...(target.kind === 'folder' && useFileStore.getState().clipboard
+      ? [{ label: '粘贴', icon: <IconFile size={13} />, run: () => void useFileStore.getState().paste(target.path) }]
+      : []),
     ...(hasSnapshot
       ? [{ label: '回退到修改前', icon: <IconRefresh size={13} />, run: () => void restore() }]
       : []),
     ...(target.kind === 'folder'
-      ? [{ label: '切换分支…', icon: <IconBranch size={13} />, run: () => onSwitchBranch(target.path) }]
+      ? [
+          {
+            label: 'Git',
+            icon: <IconBranch size={13} />,
+            children: [
+              { label: '新建分支…', icon: <IconPlus size={13} />, run: () => {
+                void useAppStore.getState().showPrompt('新建分支', '').then(async (name) => {
+                  if (!name) return
+                  void useGitStore.getState().runOp('新建分支', async () => {
+                    await api.gitCheckout(target.path, name)
+                    await afterFsChange(target.kind === 'folder' ? target.path : rootPath)
+                    return `已创建并切换到 ${name}`
+                  })
+                })
+              }},
+              { label: '切换分支…', icon: <IconBranch size={13} />, run: () => onSwitchBranch(target.path) },
+              { label: '提交', icon: <IconCheck size={13} />, run: () => focusGitCommit() },
+              { label: '推送', icon: <IconSend size={13} />, run: () => void gitSync('push') },
+              { label: '拉取', icon: <IconUndo size={13} />, run: () => void gitSync('pull') },
+              { label: '获取', icon: <IconRefresh size={13} />, run: () => void gitSync('fetch') },
+            ],
+          },
+          {
+            label: '全部展开',
+            icon: <IconFolderOpen size={13} />,
+            run: () => void useFileStore.getState().expandAll(target.path),
+          },
+          {
+            label: '全部收起',
+            icon: <IconFolder size={13} />,
+            run: () => useFileStore.getState().collapseAll(target.path),
+          },
+        ]
       : []),
     { label: '删除', icon: <IconTrash size={13} />, run: () => void remove(), disabled: isRoot, danger: true },
     { label: '刷新', icon: <IconRefresh size={13} />, run: () => void refresh() },
@@ -337,8 +416,13 @@ function buildTreeMenuItems(
 
 // ---------- 切换分支对话框 ----------
 
-/** 目录级 Git 分支切换：可搜索选择分支 → checkout → 刷新文件树（watcher 亦会兜底推送变更） */
-function BranchSwitchDialog({ target, onClose }: { target: BranchTarget; onClose: () => void }) {
+/** 目录级 Git 分支切换：可搜索选择分支 → checkout → 刷新文件树（watcher 亦会兜底推送变更）。
+ *  导出供 GitPanel 复用；onSwitched 在 checkout 成功后回调（调用方刷新自己的状态） */
+export function BranchSwitchDialog({ target, onClose, onSwitched }: {
+  target: BranchTarget
+  onClose: () => void
+  onSwitched?: () => void
+}) {
   const [branch, setBranch] = useState(target.currentBranch ?? target.branches[0] ?? '')
   const [switching, setSwitching] = useState(false)
 
@@ -354,6 +438,7 @@ function BranchSwitchDialog({ target, onClose }: { target: BranchTarget; onClose
       const fs = useFileStore.getState()
       await fs.loadChildren(target.dir)
       await fs.refreshExpanded()
+      onSwitched?.()
       onClose()
     } catch (e) {
       void useAppStore.getState().showAlert('切换分支失败', String(e))

@@ -12,6 +12,42 @@ export interface FileContent {
   truncated: boolean
 }
 
+// ---------- Git 工作区 ----------
+
+/** 单个改动文件条目（git status --porcelain v1 解析，与 electron/lib/git.ts 保持一致） */
+export interface GitFileEntry {
+  /** 相对仓库路径（rename 显示新路径） */
+  path: string
+  /** 原路径（仅 rename 有） */
+  renamedFrom?: string
+  x: string
+  y: string
+  /** 已有暂存改动 */
+  staged: boolean
+  /** 工作区有未暂存改动（含 untracked） */
+  unstaged: boolean
+  status: 'staged' | 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted'
+}
+
+export interface GitStatus {
+  isRepo: boolean
+  branch: string | null
+  /** 相对上游：领先 / 落后（无跟踪分支时为 0） */
+  ahead: number
+  behind: number
+  files: GitFileEntry[]
+}
+
+// ---------- 预览控制台 ----------
+
+/** 被预览页面的 console 输出条目（主进程按 origin 过滤后转发） */
+export interface PreviewConsoleEntry {
+  level: 'log' | 'info' | 'warning' | 'error' | 'debug'
+  message: string
+  sourceId: string
+  ts: number
+}
+
 // ---------- 编译 / 预览 ----------
 
 /** idle=未运行 building=编译中 deploying=部署中 running=运行中 error=异常 */
@@ -87,7 +123,7 @@ export interface AppConfig {
   recentProjects?: RecentProject[]
   /** Skills 目录绝对路径（可选） */
   skillsDir?: string | null
-  /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「运行」直接执行） */
+  /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「全部运行」直接执行） */
   startupCommands?: Record<string, StartCommand[]>
 }
 

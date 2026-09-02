@@ -4,12 +4,8 @@
  */
 import { homedir } from 'node:os'
 import path from 'node:path'
-import { promises as fsp } from 'node:fs'
 
 export function storageDir(): string {
   return path.join(homedir(), '.qyris')
 }
 
-export async function ensureStorageDir(): Promise<void> {
-  await fsp.mkdir(storageDir(), { recursive: true })
-}

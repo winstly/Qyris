@@ -47,6 +47,8 @@ interface AppState {
   splitRatio: number
   /** 文件 Tab 内文件树占比 */
   filesSplitRatio: number
+  /** 文件 Tab 内 Git 工作区面板高度占左栏比例 */
+  gitPanelRatio: number
 
   projectPath: string | null
   projectName: string
@@ -62,7 +64,7 @@ interface AppState {
   skillsDir: string | null
   /** 已扫描的 skill 摘要列表 */
   skillMetas: SkillMeta[]
-  /** 当前项目已识别的启动命令（AI 编译产出，「运行」直接执行，零模型） */
+  /** 当前项目已识别的启动命令（AI 编译产出，「全部运行」直接执行，零模型） */
   startupCommands: StartCommand[]
   /** 全部项目的启动命令存档（内存缓存，落盘走 config.json） */
   startupCommandsMap: Record<string, StartCommand[]>
@@ -70,6 +72,7 @@ interface AppState {
   setTab: (t: 'preview' | 'files' | 'history') => void
   setSplitRatio: (r: number) => void
   setFilesSplitRatio: (r: number) => void
+  setGitPanelRatio: (r: number) => void
   setSettingsOpen: (open: boolean) => void
   setTheme: (theme: Theme) => void
   saveSettings: (s: AiSettings) => Promise<void>
@@ -99,6 +102,7 @@ export const useAppStore = create<AppState>()(
       activeTab: 'preview',
       splitRatio: 0.74,
       filesSplitRatio: 0.26,
+      gitPanelRatio: 0.45,
       projectPath: null,
       projectName: '',
       settingsOpen: false,
@@ -115,6 +119,7 @@ export const useAppStore = create<AppState>()(
       setTab: (t) => set({ activeTab: t }),
       setSplitRatio: (r) => set({ splitRatio: Math.min(0.85, Math.max(0.5, r)) }),
       setFilesSplitRatio: (r) => set({ filesSplitRatio: Math.min(0.5, Math.max(0.15, r)) }),
+      setGitPanelRatio: (r) => set({ gitPanelRatio: Math.min(0.75, Math.max(0.2, r)) }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
       setTheme: (theme) => set({ theme }),
 
@@ -313,6 +318,7 @@ export const useAppStore = create<AppState>()(
         activeTab: s.activeTab,
         splitRatio: s.splitRatio,
         filesSplitRatio: s.filesSplitRatio,
+        gitPanelRatio: s.gitPanelRatio,
         theme: s.theme,
       }),
     },
