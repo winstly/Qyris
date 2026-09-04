@@ -344,7 +344,7 @@ export function EditorPane() {
     if (initPath) {
       const content = contents[initPath] ?? ''
       const lang = detectLang(initPath)
-      const uri = monaco.Uri.parse(`file:///${initPath}`)
+      const uri = monaco.Uri.file(initPath)
       let model = monaco.editor.getModel(uri)
       if (model) {
         model.setValue(content)
@@ -400,7 +400,7 @@ export function EditorPane() {
 
     const content = useFileStore.getState().contents[activePath] ?? ''
     const lang = detectLang(activePath)
-    const uri = monaco.Uri.parse(`file:///${activePath}`)
+    const uri = monaco.Uri.file(activePath)
 
     // 复用已有 model 或创建新 model（Monaco 全局 registry 按 URI 去重）
     let model = monaco.editor.getModel(uri)
@@ -423,7 +423,7 @@ export function EditorPane() {
     if (prev.length > curr.length) {
       const closed = prev.filter((p) => !curr.includes(p))
       for (const p of closed) {
-        const uri = monaco.Uri.parse(`file:///${p}`)
+        const uri = monaco.Uri.file(p)
         const model = monaco.editor.getModel(uri)
         if (model) model.dispose()
       }
