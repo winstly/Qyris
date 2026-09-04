@@ -52,11 +52,16 @@ interface ChatState {
   usage: { input: number; output: number; agents?: { input: number; output: number } }
   /** 当前对话会话 id：AI 写文件的快照按会话分组，重置对话时换新 */
   sessionId: string
+  /** CLI 模式：上一轮模型为下一轮指定的模型（null=用主模型；白名单校验后写入） */
+  cliModel: string | null
+  /** CLI 模式：模型请求下一轮附带的 Skill id（按已扫描索引校验后写入；发送时以 [附带 Skill：…] 标记注入历史） */
+  cliSkills: string[]
 
   send: (text: string, meta?: import('@/types').MessageMeta) => Promise<void>
   setPendingElement: (el: PickedElement | null) => void
   appendDelta: (requestId: string, delta: string) => void
   appendReasoning: (requestId: string, delta: string) => void
+  handleCliToolEvent: (requestId: string, id: string, name: string, phase: 'start' | 'stop', argumentsStr: string) => void
   answerAsk: (answer: string) => void
   cancel: () => void
   clear: () => void
@@ -77,6 +82,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   pendingElement: null,
   usage: { input: 0, output: 0 },
   sessionId: uid(),
+  cliModel: null,
+  cliSkills: [],
 
   send: async (text, meta) => {
     const { status } = get()
@@ -95,39 +102,75 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   appendDelta: (requestId, delta) => {
     const s = get()
     if (s.cancelled || requestId !== s.activeRequestId) return
-    const last = s.messages[s.messages.length - 1]
-    if (last && last.role === 'assistant' && last.pending) {
-      set({
-        messages: [...s.messages.slice(0, -1), { ...last, content: last.content + delta }],
-        usage: { ...s.usage, output: s.usage.output + estimateTokens(delta) },
-      })
+    const msgs = [...s.messages]
+    const last = msgs[msgs.length - 1] as ChatMessage | undefined
+    const kind = assistantTailKind(last)
+    if (kind === 'draft') {
+      // 追加到已有 pending 消息（正文阶段，光标已出现）
+      msgs[msgs.length - 1] = { ...last!, content: last!.content + delta }
     } else {
-      // 尚无草稿且 delta 纯空白：不创建气泡（避免模型开头输出空行产生空白气泡）
+      // 纯空白增量不建气泡（避免模型开头输出空行产生空白气泡）
       if (!delta.trim()) return
-      set((s2) => ({
-        messages: [...s2.messages, { id: uid(), role: 'assistant', content: delta, pending: true }],
-        usage: { ...s2.usage, output: s2.usage.output + estimateTokens(delta) },
-      }))
+      if (kind === 'thinking') {
+        // 正文开始：落在思考块所在消息上并转为 pending（光标此时出现）
+        msgs[msgs.length - 1] = { ...last!, content: delta, pending: true }
+      } else {
+        msgs.push({ id: uid(), role: 'assistant', content: delta, pending: true })
+      }
     }
+    set({
+      messages: msgs,
+      usage: { ...s.usage, output: s.usage.output + estimateTokens(delta) },
+    })
   },
 
   appendReasoning: (requestId, delta) => {
     const s = get()
     if (s.cancelled || requestId !== s.activeRequestId) return
-    const last = s.messages[s.messages.length - 1]
-    if (last && last.role === 'assistant' && last.pending) {
+    const msgs = [...s.messages]
+    const last = msgs[msgs.length - 1] as ChatMessage | undefined
+    const kind = assistantTailKind(last)
+    if (kind === 'thinking' || kind === 'draft') {
+      // 思考增量挂到当前 assistant 消息（纯思考块或正文草稿皆可）
+      msgs[msgs.length - 1] = { ...last!, reasoning: (last!.reasoning ?? '') + delta }
+    } else {
+      // 新思考阶段：先收口残留的 pending 正文（CLI 多消息块场景），再新建思考块。
+      // 只关 pending，不动在途工具卡状态——CLI 心跳在本进程也会走这里，若在此把
+      // running 卡打成 done，长命令执行中卡片会中途假完成（终态由 stop 事件/收尾兜底负责）
+      if (!delta.trim()) return
+      const collapsed = msgs.map((m) => (m.role === 'assistant' && m.pending ? { ...m, pending: false } : m))
+      collapsed.push({ id: uid(), role: 'assistant', content: '', reasoning: delta })
       set({
-        messages: [...s.messages.slice(0, -1), { ...last, reasoning: (last.reasoning ?? '') + delta }],
+        messages: collapsed,
         usage: { ...s.usage, output: s.usage.output + estimateTokens(delta) },
       })
-    } else {
-      // 思考先于正文到达：先建一个 content 空的草稿挂上 reasoning
-      if (!delta.trim()) return
-      set((s2) => ({
-        messages: [...s2.messages, { id: uid(), role: 'assistant', content: '', reasoning: delta, pending: true }],
-        usage: { ...s2.usage, output: s2.usage.output + estimateTokens(delta) },
-      }))
+      return
     }
+    set({
+      messages: msgs,
+      usage: { ...s.usage, output: s.usage.output + estimateTokens(delta) },
+    })
+  },
+
+  handleCliToolEvent: (requestId, id, name, phase, argumentsStr) => {
+    // 用函数式 set 基于最新状态更新（避免 get() 快照被 finalizeAssistant 覆盖）
+    set((s) => {
+      if (s.cancelled || requestId !== s.activeRequestId) return s
+      if (phase === 'start') {
+        const tc: ToolCall = { id, name, args: safeParseObject(argumentsStr), status: 'running' }
+        return { messages: [...s.messages, { id: uid(), role: 'assistant', content: '', toolCalls: [tc] }] }
+      }
+      // phase === 'stop'：找到对应工具卡片，更新为 done
+      const msgs = [...s.messages]
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const tcs = msgs[i].toolCalls
+        if (tcs?.some((tc) => tc.id === id)) {
+          msgs[i] = { ...msgs[i], toolCalls: tcs.map((tc) => tc.id === id ? { ...tc, status: 'done' as const, args: safeParseObject(argumentsStr) } : tc) }
+          break
+        }
+      }
+      return { messages: msgs }
+    })
   },
 
   answerAsk: (answer) => {
@@ -177,7 +220,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (get().status !== 'idle') get().cancel()
     set((s) => ({
       messages: [], status: 'idle', pendingAsk: null, activeRequestId: null,
-      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: uid(), epoch: s.epoch + 1,
+      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: uid(), cliModel: null, cliSkills: [], epoch: s.epoch + 1,
     }))
   },
 
@@ -204,6 +247,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       pendingAsk: null,
       activeRequestId: null,
       answers: {},
+      cliModel: null, // 历史分叉：模型上轮的选模/选 Skill 依据已失效，回退主模型重新决策
+      cliSkills: [],
       epoch: s.epoch + 1,
     })
     await runAgentLoop()
@@ -218,6 +263,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       cancelled: false,
       pendingElement: null,
       usage: { input: 0, output: 0 },
+      cliModel: null,
+      cliSkills: [],
     }),
 }))
 
@@ -254,6 +301,17 @@ async function runAgentLoop() {
   const { messages } = store.getState()
   const history = buildHistory(messages)
 
+  // CLI 模式：把上一轮模型请求附带的 Skill 以标记注入本轮首条 user 历史（adapter 从历史提取并内联全文）
+  if (useAppStore.getState().settings.dispatchMode === 'claude-cli' && store.getState().cliSkills.length > 0) {
+    const pending = store.getState().cliSkills
+    for (let i = 0; i < history.length; i++) {
+      if (history[i].role === 'user') {
+        history[i] = { ...history[i], content: `${history[i].content ?? ''}\n[附带 Skill：${pending.join(', ')}]` }
+        break
+      }
+    }
+  }
+
   // 工具调用不设轮数上限（用户拍板）：由「停止生成」取消（cancelled 每轮检查）兜底
   for (;;) {
     // 已取消：不再发起下一轮请求
@@ -288,8 +346,16 @@ async function runAgentLoop() {
           { role: 'system', content: buildSystemPrompt(projectPath, skillMetas) },
           ...history,
         ]
+        // CLI 模式逐轮选模：首轮/未指定用主模型，之后用上一轮模型指定的模型。
+        // 采用时再过一次白名单：设置里的主模型/档位可能在 cliModel 写入后被用户改掉
+        const prevCliModel = store.getState().cliModel
+        const requestModel =
+          settings.dispatchMode === 'claude-cli' && prevCliModel && cliAllowedModels(settings).has(prevCliModel)
+            ? prevCliModel
+            : settings.model
         completion = await api.aiChatStream(
-          requestId, settings.provider, settings.baseUrl, settings.model, payload, TOOL_DEFS,
+          requestId, settings.provider, settings.baseUrl, requestModel, payload, TOOL_DEFS,
+          settings.dispatchMode, projectPath,
         )
         break
       } catch (e) {
@@ -319,6 +385,28 @@ async function runAgentLoop() {
 
     const assistantId = finalizeAssistant(completion, epoch)
     history.push(toHistoryEntry(completion))
+
+    // CLI 模式：白名单校验模型指定的下一轮模型（只认主模型+已配档位，胡说就回退主模型）；
+    // Skill 请求只认已扫描到的 id
+    if (useAppStore.getState().settings.dispatchMode === 'claude-cli') {
+      const s2 = useAppStore.getState().settings
+      const allowed = cliAllowedModels(s2)
+      const pick = completion.nextModel?.trim()
+      const next = pick && allowed.has(pick) ? pick : null
+      const knownSkills = new Set(useAppStore.getState().skillMetas.map((m) => m.id))
+      const skillReq = (completion.nextSkill ?? []).map((s) => s.trim()).filter((s) => s && knownSkills.has(s))
+      // AI 编译场景：CLI 以 [[START_COMMANDS]] 提交的启动命令清单 → 落盘存档（同 report_start_commands 语义）。
+      // 仅认本轮确为 AI 编译任务（末条 user 消息带 projectStart 标记）：该协议行在每轮系统提示都有教学，
+      // 普通对话里模型回显示例行时不能覆盖已验证的启动命令存档
+      const cmds = (completion.startCommands ?? [])
+        .map((s) => ({ name: String(s?.name ?? '').trim(), run: String(s?.run ?? '').trim() }))
+        .filter((s) => s.name && s.run)
+      const lastUserMeta = [...store.getState().messages].reverse().find((m) => m.role === 'user')?.meta
+      if (cmds.length > 0 && lastUserMeta?.projectStart && useAppStore.getState().projectPath) {
+        void useAppStore.getState().setStartupCommands(cmds)
+      }
+      if (useChatStore.getState().epoch === epoch) store.setState({ cliModel: next, cliSkills: skillReq })
+    }
 
     if (completion.toolCalls.length === 0) {
       store.setState({ status: 'idle', activeRequestId: null })
@@ -360,6 +448,15 @@ async function runAgentLoop() {
 
 // ---------- 组装 OpenAI 历史 ----------
 
+/** CLI 模式候选模型白名单：主模型 + 已配档位（trim 后非空）。写入与采用两处共用同一规则 */
+function cliAllowedModels(settings: import('@/types').AiSettings): Set<string> {
+  return new Set(
+    [settings.model, ...Object.values(settings.tiers ?? {})]
+      .filter((v): v is string => typeof v === 'string' && !!v.trim())
+      .map((v) => v.trim()),
+  )
+}
+
 function buildHistory(messages: ChatMessage[]): OAIMessage[] {
   const out: OAIMessage[] = []
   for (const m of messages) {
@@ -378,17 +475,32 @@ function buildHistory(messages: ChatMessage[]): OAIMessage[] {
     }
     if (m.pending) continue // 流式中的半成品不进历史
     if (m.toolCalls?.length) {
-      out.push({
-        role: 'assistant',
-        content: m.content || null,
-        tool_calls: m.toolCalls.map((t) => ({
-          id: t.id,
-          type: 'function' as const,
-          function: { name: t.name, arguments: JSON.stringify(t.args) },
-        })),
-      })
-      for (const tr of m.toolResults ?? []) {
-        out.push({ role: 'tool', tool_call_id: tr.toolCallId, content: tr.content })
+      const results = m.toolResults ?? []
+      // 协议要求 assistant.tool_calls 与 tool 结果一一配对：只有全部调用都有结果才走结构化路径。
+      // CLI 工具卡（executeTool 不参与，永远没有结果）与中途中断的残留没有完整配对，
+      // 降级为文本痕迹，避免切回 API 模式后每轮请求都 400
+      if (results.length >= m.toolCalls.length) {
+        out.push({
+          role: 'assistant',
+          content: m.content || null,
+          tool_calls: m.toolCalls.map((t) => ({
+            id: t.id,
+            type: 'function' as const,
+            function: { name: t.name, arguments: JSON.stringify(t.args) },
+          })),
+        })
+        for (const tr of results) {
+          out.push({ role: 'tool', tool_call_id: tr.toolCallId, content: tr.content })
+        }
+      } else {
+        const lines = m.toolCalls.map((t) => {
+          const tr = results.find((r) => r.toolCallId === t.id)
+          // CLI 工具卡永远没有 toolResults（executeTool 不参与），但卡片状态 done 代表 CLI 已真实执行——
+          // 如实标注「已执行」，否则下一轮历史会告诉 CLI 它成功的命令「未执行」，诱导重跑装依赖/写文件
+          return `- ${t.name}：${tr ? tr.content.slice(0, 200) : t.status === 'done' ? '（已执行）' : '（未执行，被中断）'}`
+        })
+        const text = [m.content, '（此前调用过工具，结果如下：）', ...lines].filter(Boolean).join('\n')
+        out.push({ role: 'assistant', content: text })
       }
     } else if (m.content) {
       out.push({ role: 'assistant', content: m.content })
@@ -413,32 +525,91 @@ function toHistoryEntry(c: AiCompletion): OAIMessage {
 
 // ---------- 消息收尾辅助 ----------
 
-/** 关闭流式草稿：错误 / 取消时以给定文本收尾 */
+/** 末条 assistant 消息的形态分类：决定流式增量落到哪。
+ *  工具卡消息不算草稿也不算思考（增量另起新消息）；pending=true 是正文草稿；
+ *  pending 为假但有 reasoning 是纯思考块（思考先于正文到达的场景） */
+function assistantTailKind(m: ChatMessage | undefined): 'draft' | 'thinking' | 'none' {
+  if (!m || m.role !== 'assistant' || (m.toolCalls?.length ?? 0) > 0) return 'none'
+  if (m.pending) return 'draft'
+  return (m.reasoning ?? '') !== '' ? 'thinking' : 'none'
+}
+
+/** CLI 多块流式去重：result 缺席时 adapter 回退的全文累积（content）会包含此前分段
+ *  已在独立气泡展示过的正文；把最后 pending 分段之前、同一轮内连续 assistant 文本分段
+ *  拼成前缀，权威全文以其开头则剥去，避免同一段文字渲染两遍 */
+function stripStreamedPrefix(msgs: ChatMessage[], pendingIdx: number, content: string): string {
+  let prefix = ''
+  for (let i = pendingIdx - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (m.role !== 'assistant') break // 到本轮 user 消息为止
+    if (m.toolCalls?.length || !m.content) continue // 工具卡/纯思考分段不产生正文
+    prefix = m.content + prefix // 倒序遍历前置入 → 保时序拼接
+  }
+  return prefix && content.startsWith(prefix) ? content.slice(prefix.length) : content
+}
+
+/** 收口所有残留的流式 assistant 消息：关闭 pending 正文，并把在途工具卡打到终态
+ *  （CLI 中断 / stop 事件丢失时的兜底，避免永久打字机光标与永久 running spinner）。
+ *  exceptId 的消息不处理工具卡（finalize 刚挂上的 HTTP 工具卡要留给执行循环打状态）。
+ *  无可改动的消息时原数组返回，便于调用方跳过 setState */
+function collapseStreamingMessages(
+  msgs: ChatMessage[], toolStatus: 'done' | 'error', exceptId?: string,
+): ChatMessage[] {
+  let changed = false
+  const out = msgs.map((m) => {
+    if (m.role !== 'assistant') return m
+    const sweepTools = m.id !== exceptId && (m.toolCalls?.some((tc) => tc.status === 'running') ?? false)
+    if (!m.pending && !sweepTools) return m
+    changed = true
+    return {
+      ...m,
+      pending: false,
+      toolCalls: sweepTools
+        ? m.toolCalls!.map((tc) => tc.status === 'running'
+            ? {
+                ...tc,
+                status: toolStatus,
+                ...(toolStatus === 'error' && !tc.resultSummary ? { resultSummary: '已中断' } : {}),
+              }
+            : tc)
+        : m.toolCalls,
+    }
+  })
+  return changed ? out : msgs
+}
+
+/** 关闭流式草稿：错误 / 取消时以给定文本收尾。
+ *  CLI 多消息块场景可能残留多条 pending / 在途工具卡，除最后一条 pending 外全部强制收口 */
 function finalizeDraft(text: string, isError: boolean, epoch: number) {
   const s = useChatStore.getState()
   if (s.epoch !== epoch) return // 会话已清空/换代：丢弃过期写入
-  const last = s.messages[s.messages.length - 1]
-  if (last && last.role === 'assistant' && last.pending) {
-    useChatStore.setState({
-      messages: [
-        ...s.messages.slice(0, -1),
-        { ...last, content: text || last.content || '（无内容）', pending: false, error: isError },
-      ],
-    })
+  const msgs = [...s.messages]
+  // 找最后一条 pending 正文消息（不是工具消息），以给定文本收尾
+  let pendingIdx = -1
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant' && msgs[i].pending) { pendingIdx = i; break }
+  }
+  if (pendingIdx !== -1) {
+    msgs[pendingIdx] = { ...msgs[pendingIdx], content: text || msgs[pendingIdx].content || '（无内容）', pending: false, error: isError }
   } else if (text) {
-    useChatStore.setState({
-      messages: [...s.messages, { id: uid(), role: 'assistant', content: text, error: isError }],
-    })
+    msgs.push({ id: uid(), role: 'assistant', content: text, error: isError })
+  }
+  // 其余残留 pending / 在途工具卡统一收口
+  const collapsed = collapseStreamingMessages(msgs, 'error')
+  if (pendingIdx !== -1 || text || collapsed !== msgs) {
+    useChatStore.setState({ messages: collapsed })
   }
 }
 
-/** 补全返回后定稿：回填权威内容并挂上工具调用卡片，返回消息 id */
+/** 补全返回后定稿：回填权威内容并挂上工具调用卡片，返回消息 id。
+ *  返回的 id 必须是携带 toolCalls 的那条消息——工具结果按它回填（appendToolResult），
+ *  buildHistory 也要求 tool_calls 与 tool 结果挂在同一条消息上配对，拆开会丢历史（协议 400） */
 function finalizeAssistant(completion: AiCompletion, epoch: number): string {
   const s = useChatStore.getState()
   if (s.epoch !== epoch) return '' // 会话已清空/换代：丢弃过期写入
-  const last = s.messages[s.messages.length - 1]
-  const draftOpen = !!(last && last.role === 'assistant' && last.pending)
 
+  // CLI 模式 adapter 恒回 toolCalls:[]（工具卡已由 cli-tool-event 实时写入独立消息），
+  // 因此无需按传输方式分叉，直接采用 completion.toolCalls 即不会重复建卡
   const toolCalls: ToolCall[] = completion.toolCalls.map((tc) => ({
     id: tc.id,
     name: tc.name,
@@ -446,19 +617,37 @@ function finalizeAssistant(completion: AiCompletion, epoch: number): string {
     status: 'running',
   }))
 
+  // 找到 pending 的正文消息（CLI 多消息块场景下不一定是最后一条）
+  let pendingIdx = -1
+  for (let i = s.messages.length - 1; i >= 0; i--) {
+    if (s.messages[i].role === 'assistant' && s.messages[i].pending) { pendingIdx = i; break }
+  }
+  const draftOpen = pendingIdx !== -1
+  const last = draftOpen ? s.messages[pendingIdx] : s.messages[s.messages.length - 1]
+
   let content = completion.content ?? ''
+  // CLI 多块流式：权威全文可能包含此前分段已展示过的正文，剥前缀防重复渲染
+  if (draftOpen) content = stripStreamedPrefix(s.messages, pendingIdx, content)
   // 纯空白内容按空处理：无工具卡片时显示占位文案，避免定稿出空白气泡
   if (!content.trim() && !toolCalls.length) {
     content = (draftOpen ? last.content.trim() : '') || '（模型未返回内容）'
   }
 
+  const reasoning = draftOpen ? (last.reasoning ?? undefined) : undefined
+
   if (draftOpen) {
-    const updated: ChatMessage = { ...last, content, pending: false, toolCalls }
-    useChatStore.setState({ messages: [...s.messages.slice(0, -1), updated] })
+    // 更新 pending 的正文消息（content + reasoning，不覆盖已有 toolCalls）
+    const updated: ChatMessage = { ...last, content, pending: false, toolCalls: [...(last.toolCalls ?? []), ...toolCalls] }
+    const msgs = [...s.messages]
+    msgs[pendingIdx] = updated
+    // 收口其余残留的流式消息（CLI 多消息块场景）；刚定稿消息上的 HTTP 工具卡留给执行循环
+    useChatStore.setState({ messages: collapseStreamingMessages(msgs, 'done', updated.id) })
     return updated.id
   }
+  // 无草稿（纯 tool_calls 轮）：工具卡与正文同条消息，保证结果回填与历史配对都落在一条上
   const msg: ChatMessage = { id: uid(), role: 'assistant', content, pending: false, toolCalls }
-  useChatStore.setState({ messages: [...s.messages, msg] })
+  if (reasoning) msg.reasoning = reasoning
+  useChatStore.setState({ messages: collapseStreamingMessages([...s.messages, msg], 'done', msg.id) })
   return msg.id
 }
 

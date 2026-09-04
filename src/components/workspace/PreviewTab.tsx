@@ -148,7 +148,9 @@ export function PreviewTab() {
   /** AI 编译：调模型探测技术栈 + 识别启动命令并存档。已识别过时需用户确认覆盖 */
   const aiCompile = async () => {
     if (!projectPath) return
-    if (!hasApiKey) {
+    const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
+    // CLI 模式无需 API Key（走本机 claude 命令自身的登录态）
+    if (!hasApiKey && !cliMode) {
       void showAlert('尚未配置 API Key', '点击右上角对话栏的齿轮图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
       return
     }
@@ -164,13 +166,18 @@ export function PreviewTab() {
       void showAlert('AI 正忙', '上一条消息还在处理中，请稍候，或点击「停止生成」后重试。')
       return
     }
-    void chat.send(
-      '这是 AI 编译阶段：请探测当前项目的技术栈，需要时用 run_once 安装依赖 / 验证编译，' +
-      '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
-      '逐个用 verify_start 验证启动命令能真正启动（验证通过会自动停止服务），' +
-      '全部通过后用 report_start_commands 提交启动命令清单。不要直接 run_project 启动服务，运行由我来决定。',
-      { projectStart: true },
-    )
+    // CLI 模式：轻驭工具（run_once/verify_start/report_start_commands）不存在于 CLI，
+    // 话术改为指令式 + [[START_COMMANDS]] 尾行协议（由系统消费登记）
+    const prompt = cliMode
+      ? '这是 AI 编译阶段：请探测当前项目的技术栈，需要时安装依赖 / 验证编译，' +
+        '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
+        '逐个验证启动命令能真正启动（验证通过即停止服务，不要把服务留在后台运行），' +
+        '全部通过后在回复最后一行用 [[START_COMMANDS: [{"name":"portal","run":"npm run dev"}]]] 格式（紧凑单行 JSON）提交启动命令清单。运行由我来决定。'
+      : '这是 AI 编译阶段：请探测当前项目的技术栈，需要时用 run_once 安装依赖 / 验证编译，' +
+        '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
+        '逐个用 verify_start 验证启动命令能真正启动（验证通过会自动停止服务），' +
+        '全部通过后用 report_start_commands 提交启动命令清单。不要直接 run_project 启动服务，运行由我来决定。'
+    void chat.send(prompt, { projectStart: true })
   }
 
   /** 工具链缺失：用户点「授权 AI 自动安装」即视为授权，AI 直接安装后重启服务 */

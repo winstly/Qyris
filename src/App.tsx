@@ -3,7 +3,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useChatStore } from '@/store/useChatStore'
-import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onFsChanged, isDesktop, api } from '@/services/desktop'
+import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onFsChanged, isDesktop, api } from '@/services/desktop'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useIsWide } from '@/hooks/useMediaQuery'
 import { Workspace } from '@/components/workspace/Workspace'
@@ -81,6 +81,7 @@ export default function App() {
       onBuildExit((p) => useBuildStore.getState().onExit(p.name, p.code)),
       onAiDelta((p) => useChatStore.getState().appendDelta(p.requestId, p.delta)),
       onAiReasoning((p) => useChatStore.getState().appendReasoning(p.requestId, p.delta)),
+      onCliToolEvent((p) => useChatStore.getState().handleCliToolEvent(p.requestId, p.id, p.name, p.phase, p.arguments)),
       onFsChanged((p) => { scheduleFsRefresh(p.paths) }),
     ]
     return () => { offs.forEach((f) => f()) }

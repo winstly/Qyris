@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import type { ChatMessage, SkillMeta } from '@/types'
 import { IconClose, IconCheck } from '@/components/common/icons'
 import { Markdown } from './Markdown'
@@ -17,14 +17,16 @@ export function MessageBubble({ msg }: { msg: ChatMessage }) {
   // 纯空白文本不算内容；思考过程也算内容（纯思考回复时也不出空壳）
   const hasText = msg.content.trim() !== ''
   const hasReasoning = (msg.reasoning ?? '').trim() !== ''
+  // 光标只在纯正文流式输出时显示：有工具调用时不闪（进度由 ToolCallCard 展示）
+  const showCursor = msg.pending && hasText && (msg.toolCalls?.length ?? 0) === 0
 
   return (
     <div className={`msg msg--ai ${msg.error ? 'msg--error' : ''}`}>
       {(hasText || hasReasoning || msg.pending) && (
         <div className="msg__bubble">
-          {hasReasoning && <ReasoningBlock content={msg.reasoning!} pending={msg.pending} />}
+          {hasReasoning && <ReasoningBlock content={msg.reasoning!} />}
           {hasText && <Markdown source={msg.content} />}
-          {msg.pending && <span className="type-cursor" aria-label="正在输出" />}
+          {showCursor && <span className="type-cursor" aria-label="正在输出" />}
         </div>
       )}
 
@@ -34,8 +36,23 @@ export function MessageBubble({ msg }: { msg: ChatMessage }) {
   )
 }
 
-function ReasoningBlock({ content, pending }: { content: string; pending?: boolean }) {
+function ReasoningBlock({ content }: { content: string }) {
   const [open, setOpen] = useState(false)
+  // 追踪 thinking 是否还在流式增长：内容变化时标记活跃，2s 无变化视为结束
+  const [thinking, setThinking] = useState(false)
+  // 以挂载时的长度为基线：历史消息重挂载（切页签/重开项目）不再误闪「正在思考…」，
+  // 只有挂载后内容真正增长才视为思考中
+  const prevLen = useRef(content.length)
+  const timer = useRef<ReturnType<typeof setTimeout>>()
+  useEffect(() => {
+    if (content.length !== prevLen.current) {
+      prevLen.current = content.length
+      setThinking(true)
+      clearTimeout(timer.current)
+      timer.current = setTimeout(() => setThinking(false), 2000)
+    }
+    return () => clearTimeout(timer.current)
+  }, [content])
   return (
     <div className="reasoning">
       <button
@@ -45,7 +62,7 @@ function ReasoningBlock({ content, pending }: { content: string; pending?: boole
         aria-expanded={open}
       >
         <span className="reasoning__chevron">{open ? '▾' : '▸'}</span>
-        <span>{pending ? '正在思考…' : '已深度思考'}</span>
+        <span>{thinking ? '正在思考…' : '已深度思考'}</span>
       </button>
       {open && <div className="reasoning__body">{content}</div>}
     </div>

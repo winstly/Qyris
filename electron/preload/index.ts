@@ -67,8 +67,8 @@ const desktopAPI = {
   deleteSecret: (key: string) => ipcRenderer.invoke('delete_secret', { key }),
 
   // Skills 目录
-  scanSkills: (dir: string) => ipcRenderer.invoke('scan_skills', { dir }) as Promise<{ id: string; name: string; description: string; triggers: string[] }[]>,
-  readSkill: (dir: string, skillId: string) => ipcRenderer.invoke('read_skill', { dir, skillId }) as Promise<string | null>,
+  scanSkills: (dirs: string[]) => ipcRenderer.invoke('scan_skills', { dirs }) as Promise<{ id: string; name: string; description: string; triggers: string[] }[]>,
+  readSkill: (dirs: string[], skillId: string) => ipcRenderer.invoke('read_skill', { dirs, skillId }) as Promise<string | null>,
   pickSkillsDir: () => ipcRenderer.invoke('pick_skills_dir') as Promise<string | null>,
 
   // 创建项目 / Git
@@ -93,9 +93,10 @@ const desktopAPI = {
   pickParentDir: () => ipcRenderer.invoke('pick_parent_dir') as Promise<string | null>,
 
   // AI
-  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown) =>
-    ipcRenderer.invoke('ai_chat_stream', { requestId, provider, baseUrl, model, messages, tools }),
-  aiTestConnection: (provider: string, baseUrl: string, model: string) => ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model }),
+  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null) =>
+    ipcRenderer.invoke('ai_chat_stream', { requestId, provider, baseUrl, model, messages, tools, dispatchMode: dispatchMode ?? 'api', projectRoot: projectRoot ?? null }),
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
+    ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api' }),
   aiCancel: (requestId: string) => ipcRenderer.invoke('ai_cancel', { requestId }),
 
   // 窗口
@@ -112,6 +113,8 @@ const desktopAPI = {
     subscribe('ai-delta', cb),
   onAiReasoning: (cb: (payload: { requestId: string; delta: string }) => void): Unsubscribe =>
     subscribe('ai-reasoning', cb),
+  onCliToolEvent: (cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }) => void): Unsubscribe =>
+    subscribe('cli-tool-event', cb),
   onFsChanged: (cb: (payload: { paths: string[] }) => void): Unsubscribe => subscribe('fs-changed', cb),
   onPreviewConsole: (cb: (payload: { level: string; message: string; sourceId: string; ts: number }) => void): Unsubscribe =>
     subscribe('preview-console', cb),

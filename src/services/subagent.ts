@@ -84,7 +84,7 @@ function toHistoryEntry(c: AiCompletion): OAIMessage {
 type RunOutcome = { text: string; kind: 'done' | 'cancelled' | 'model-error' | 'rounds' }
 
 async function runOne(task: SubTask, threadId: string): Promise<RunOutcome> {
-  const { settings } = useAppStore.getState()
+  const { settings, projectPath } = useAppStore.getState()
   const agents = useAgentStore.getState()
   agents.beginThread(threadId)
   const model = modelForTier(task.tier)
@@ -107,7 +107,7 @@ async function runOne(task: SubTask, threadId: string): Promise<RunOutcome> {
     const requestId = uid()
     activeRequests.add(requestId)
     try {
-      completion = await api.aiChatStream(requestId, settings.provider, settings.baseUrl, model, messages, TOOL_DEFS)
+      completion = await api.aiChatStream(requestId, settings.provider, settings.baseUrl, model, messages, TOOL_DEFS, settings.dispatchMode, projectPath)
     } catch (e) {
       // 取消引发的请求中止按取消收尾，不算错误
       if (useChatStore.getState().cancelled) return finish('cancelled', '（已取消）')

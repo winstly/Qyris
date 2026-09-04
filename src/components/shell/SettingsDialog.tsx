@@ -19,8 +19,8 @@ export function SettingsDialog() {
   const refreshHasApiKey = useAppStore((s) => s.refreshHasApiKey)
   const theme = useAppStore((s) => s.theme)
   const setTheme = useAppStore((s) => s.setTheme)
-  const skillsDir = useAppStore((s) => s.skillsDir)
-  const setSkillsDir = useAppStore((s) => s.setSkillsDir)
+  const skillsDirs = useAppStore((s) => s.skillsDirs)
+  const setSkillsDirs = useAppStore((s) => s.setSkillsDirs)
   const skillMetas = useAppStore((s) => s.skillMetas)
   const loadSkills = useAppStore((s) => s.loadSkills)
 
@@ -28,10 +28,15 @@ export function SettingsDialog() {
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
   const [model, setModel] = useState(settings.model)
   const [provider, setProvider] = useState<'openai' | 'anthropic'>(settings.provider)
+  const [dispatchMode, setDispatchMode] = useState<'api' | 'claude-cli'>(settings.dispatchMode)
+  const [cliPermission, setCliPermission] = useState<'auto' | 'readonly'>(settings.cliPermission)
   const [tiers, setTiers] = useState<ModelTiers>(settings.tiers ?? {})
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [testing, setTesting] = useState(false)
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
+  // Skills 目录本地编辑草稿：输入过程不落盘不重扫（否则每个按键 = 一次配置写盘 + 全目录扫描），
+  // 失焦/增删行时统一提交。null = 未在编辑，直接透传 store 值
+  const [dirsDraft, setDirsDraft] = useState<string[] | null>(null)
 
   useEffect(() => {
     if (open) {
@@ -39,13 +44,24 @@ export function SettingsDialog() {
       setBaseUrl(settings.baseUrl)
       setModel(settings.model)
       setProvider(settings.provider)
+      setDispatchMode(settings.dispatchMode)
+      setCliPermission(settings.cliPermission)
       setTiers(settings.tiers ?? {})
       setApiKeyInput('')
       setTestResult(null)
+      setDirsDraft(null)
     }
   }, [open, settings])
 
   if (!open) return null
+
+  // Skills 目录：编辑草稿 → 提交（trim + 去空 + 去重保序）→ 未变化则跳过（避免无谓落盘重扫）
+  const editingDirs = dirsDraft ?? skillsDirs
+  const commitDirs = (list: string[]) => {
+    const clean = [...new Set(list.map((d) => d.trim()).filter(Boolean))]
+    setDirsDraft(null)
+    if (clean.join('\n') !== skillsDirs.join('\n')) setSkillsDirs(clean)
+  }
 
   const onSave = async () => {
     if (apiKeyInput.trim()) {
@@ -60,6 +76,8 @@ export function SettingsDialog() {
       baseUrl: baseUrl.trim(),
       model: model.trim(),
       provider,
+      dispatchMode,
+      cliPermission,
       tiers: Object.keys(cleanTiers).length ? cleanTiers : undefined,
     })
     await refreshHasApiKey()
@@ -76,7 +94,7 @@ export function SettingsDialog() {
     setTestResult(null)
     try {
       if (apiKeyInput.trim()) await api.setSecret(SECRET_KEY, apiKeyInput.trim())
-      const msg = await api.aiTestConnection(provider, baseUrl.trim(), model.trim())
+      const msg = await api.aiTestConnection(provider, baseUrl.trim(), model.trim(), dispatchMode)
       setTestResult({ ok: true, text: msg })
     } catch (e) {
       setTestResult({ ok: false, text: String(e) })
@@ -119,45 +137,81 @@ export function SettingsDialog() {
           <>
             <div className="modal__body">
             <label className="field">
-              <span className="field__label">服务商</span>
+              <span className="field__label">调度模型方式</span>
               <Select
-                value={provider}
-                onChange={(v) => setProvider(v as 'openai' | 'anthropic')}
+                value={dispatchMode}
+                onChange={(v) => setDispatchMode(v as 'api' | 'claude-cli')}
                 options={[
-                  { value: 'openai', label: 'OpenAI 兼容' },
-                  { value: 'anthropic', label: 'Anthropic' },
+                  { value: 'api', label: 'API 直连（OpenAI 兼容 / Anthropic）' },
+                  { value: 'claude-cli', label: 'Claude CLI（本机 agent）' },
                 ]}
               />
-              <span className="field__hint">Base URL 填服务 base（OpenAI 到 /v1，Anthropic 到 anthropic 根路径），具体端点由程序拼接</span>
-            </label>
-
-            <label className="field">
-              <span className="field__label">API Base URL</span>
-              <input
-                className="field__input mono"
-                value={baseUrl}
-                onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="https://api.openai.com/v1"
-              />
-              <span className="field__hint">填 service base：OpenAI 到 /v1（阿里云为 …/compatible-mode/v1）；Anthropic 到根路径（如 …/apps/anthropic）</span>
-            </label>
-
-            <label className="field">
-              <span className="field__label">API Key</span>
-              <input
-                className="field__input mono"
-                type="password"
-                value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-                placeholder={hasApiKey ? '已保存在系统 keychain（输入可覆盖）' : 'sk-…'}
-                autoComplete="off"
-              />
               <span className="field__hint">
-                {hasApiKey
-                  ? '已通过操作系统凭据存储加密保存，不写配置文件、不进 localStorage'
-                  : '将存入操作系统 keychain（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service）'}
+                {dispatchMode === 'claude-cli'
+                  ? '经由本机 claude 命令自主执行，自带文件/命令工具，无需 API Key；首轮用主模型，后续 CLI 按任务轻重在每轮末尾为下一轮挑选模型（任务档位即候选菜单）；需已安装并登录 Claude Code'
+                  : '主进程直连模型服务；需要调度本机工具时切换到 Claude CLI'}
               </span>
             </label>
+
+            {dispatchMode === 'claude-cli' && (
+              <label className="field">
+                <span className="field__label">CLI 权限模式</span>
+                <Select
+                  value={cliPermission}
+                  onChange={(v) => setCliPermission(v as 'auto' | 'readonly')}
+                  options={[
+                    { value: 'auto', label: '全自动（跳过权限确认）' },
+                    { value: 'readonly', label: '受限只读（仅检索类工具）' },
+                  ]}
+                />
+                <span className="field__hint">全自动下 CLI 可直接改文件、执行命令；受限只读仅允许检索/浏览类工具，更安全但能力受限</span>
+              </label>
+            )}
+
+            {dispatchMode === 'api' && (
+              <>
+                <label className="field">
+                  <span className="field__label">服务商</span>
+                  <Select
+                    value={provider}
+                    onChange={(v) => setProvider(v as 'openai' | 'anthropic')}
+                    options={[
+                      { value: 'openai', label: 'OpenAI 兼容' },
+                      { value: 'anthropic', label: 'Anthropic' },
+                    ]}
+                  />
+                  <span className="field__hint">Base URL 填服务 base（OpenAI 到 /v1，Anthropic 到 anthropic 根路径），具体端点由程序拼接</span>
+                </label>
+
+                <label className="field">
+                  <span className="field__label">API Base URL</span>
+                  <input
+                    className="field__input mono"
+                    value={baseUrl}
+                    onChange={(e) => setBaseUrl(e.target.value)}
+                    placeholder="https://api.openai.com/v1"
+                  />
+                  <span className="field__hint">填 service base：OpenAI 到 /v1（阿里云为 …/compatible-mode/v1）；Anthropic 到根路径（如 …/apps/anthropic）</span>
+                </label>
+
+                <label className="field">
+                  <span className="field__label">API Key</span>
+                  <input
+                    className="field__input mono"
+                    type="password"
+                    value={apiKeyInput}
+                    onChange={(e) => setApiKeyInput(e.target.value)}
+                    placeholder={hasApiKey ? '已保存在系统 keychain（输入可覆盖）' : 'sk-…'}
+                    autoComplete="off"
+                  />
+                  <span className="field__hint">
+                    {hasApiKey
+                      ? '已通过操作系统凭据存储加密保存，不写配置文件、不进 localStorage'
+                      : '将存入操作系统 keychain（Windows 凭据管理器 / macOS 钥匙串 / Linux Secret Service）'}
+                  </span>
+                </label>
+              </>
+            )}
 
             <label className="field">
               <span className="field__label">主模型</span>
@@ -190,49 +244,64 @@ export function SettingsDialog() {
                   </label>
                 ))}
               </div>
-              <span className="field__hint">AI 规划后按子任务难度选档执行；未配置的档位自动回退主模型</span>
+              <span className="field__hint">API 模式：按子任务难度自动选档，未配置回退主模型；CLI 模式：作为模型菜单，CLI 在每轮末尾为下一轮挑选</span>
             </div>
 
-            <label className="field">
-              <span className="field__label">Skills 目录</span>
-              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <input
-                  className="field__input mono"
-                  value={skillsDir ?? ''}
-                  onChange={(e) => setSkillsDir(e.target.value.trim() || null)}
-                  placeholder="未配置（留空禁用 Skills）"
-                  style={{ flex: 1 }}
-                />
-                <button
-                  className="btn btn--ghost btn--sm"
-                  onClick={async () => {
-                    try {
-                      const dir = await api.pickSkillsDir()
-                      if (dir) setSkillsDir(dir)
-                    } catch (e) {
-                      console.error('pickSkillsDir 失败：', e)
-                    }
-                  }}
-                  title="浏览选择目录"
-                >
-                  <IconFolder size={13} />
-                </button>
-                {skillsDir && (
+            <div className="field">
+              <span className="field__label">Skills 目录（可多个，按序扫描，同名取首个；失焦后生效）</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                {editingDirs.map((d, i) => (
+                  <div key={i} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                    <input
+                      className="field__input mono"
+                      value={d}
+                      onChange={(e) => {
+                        const next = [...editingDirs]
+                        next[i] = e.target.value
+                        setDirsDraft(next)
+                      }}
+                      onBlur={() => commitDirs(editingDirs)}
+                      placeholder="Skills 目录绝对路径"
+                      style={{ flex: 1 }}
+                    />
+                    <button
+                      className="icon-btn"
+                      onClick={() => commitDirs(editingDirs.filter((_, j) => j !== i))}
+                      aria-label="移除该目录"
+                      title="移除该目录"
+                    >
+                      <IconClose size={12} />
+                    </button>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', gap: '8px' }}>
                   <button
                     className="btn btn--ghost btn--sm"
-                    onClick={() => void loadSkills()}
-                    title="重新扫描 Skills"
+                    onClick={async () => {
+                      try {
+                        const dir = await api.pickSkillsDir()
+                        if (dir && !editingDirs.includes(dir)) commitDirs([...editingDirs, dir])
+                      } catch (e) {
+                        console.error('pickSkillsDir 失败：', e)
+                      }
+                    }}
+                    title="浏览选择目录"
                   >
-                    刷新
+                    <IconFolder size={13} /> 添加目录
                   </button>
-                )}
+                  {skillsDirs.length > 0 && (
+                    <button className="btn btn--ghost btn--sm" onClick={() => void loadSkills()} title="重新扫描 Skills">
+                      刷新
+                    </button>
+                  )}
+                </div>
               </div>
               <span className="field__hint">
-                {skillsDir
-                  ? `已扫描到 ${skillMetas.length} 个 Skill（.md 文件，含 YAML frontmatter）`
-                  : '配置一个目录后，AI 可在对话中按场景自动加载专业指令集'}
+                {skillsDirs.length > 0
+                  ? `已扫描到 ${skillMetas.length} 个 Skill（每个 Skill 是一个含 SKILL.md 的子目录）`
+                  : '配置目录后，AI 可在对话中按场景加载专业指令集（每个 Skill 是一个含 SKILL.md 的子目录）'}
               </span>
-            </label>
+            </div>
 
             {testResult && (
               <div className={`notice ${testResult.ok ? 'notice--ok' : 'notice--err'}`}>
@@ -249,11 +318,11 @@ export function SettingsDialog() {
                 )}
               </div>
               <div className="modal__actions-right">
-                <button className="btn btn--ghost" onClick={onTest} disabled={testing || !baseUrl.trim()}>
+                <button className="btn btn--ghost" onClick={onTest} disabled={testing || (dispatchMode === 'api' && !baseUrl.trim())}>
                   {testing ? '测试中…' : '测试连接'}
                 </button>
                 <button className="btn btn--ghost" onClick={() => setOpen(false)}>取消</button>
-                <button className="btn btn--primary" onClick={onSave} disabled={!baseUrl.trim() || !model.trim()}>
+                <button className="btn btn--primary" onClick={onSave} disabled={!model.trim() || (dispatchMode === 'api' && !baseUrl.trim())}>
                   保存
                 </button>
               </div>

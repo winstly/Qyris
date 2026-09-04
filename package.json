@@ -10,6 +10,7 @@
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
     "smoke:git": "esbuild scripts/smoke-git.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --outfile=node_modules/.cache/smoke-git.cjs && node node_modules/.cache/smoke-git.cjs",
+    "smoke:cli": "esbuild scripts/smoke-ai-cli.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --outfile=node_modules/.cache/smoke-ai-cli.cjs && node node_modules/.cache/smoke-ai-cli.cjs",
     "smoke:env": "esbuild scripts/smoke-env.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --outfile=node_modules/.cache/smoke-env.cjs && node node_modules/.cache/smoke-env.cjs",
     "dist": "electron-vite build && electron-builder"
   },

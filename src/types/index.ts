@@ -82,9 +82,13 @@ export interface ModelTiers {
 
 export interface AiSettings {
   baseUrl: string
-  /** 主模型：规划 + 复杂任务 + 兜底 */
+  /** 主模型：规划 + 复杂任务 + 兜底；CLI 模式下透传为 claude --model */
   model: string
   provider: 'openai' | 'anthropic'
+  /** 调度模型方式：api=HTTP 直连；claude-cli=本机 Claude Code CLI 自主 agent */
+  dispatchMode: 'api' | 'claude-cli'
+  /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
+  cliPermission: 'auto' | 'readonly'
   /** 可选档位模型 */
   tiers?: ModelTiers
 }
@@ -103,7 +107,7 @@ export interface StartCommand {
 
 /** Skill 文件的 frontmatter 摘要（不含 body 内容） */
 export interface SkillMeta {
-  /** 唯一标识：相对 skillsDir 的文件路径（如 "debug-react.md"） */
+  /** 唯一标识：Skill 子目录名（如 "debug-react"，多目录时按目录序首中优先） */
   id: string
   /** 显示名称（来自 frontmatter name，缺省取文件名） */
   name: string
@@ -120,8 +124,14 @@ export interface AppConfig {
   aiProvider: 'openai' | 'anthropic' | null
   /** 任务档位模型（thinking/fast/middle/heavy，空缺回退主模型） */
   aiTiers?: ModelTiers
+  /** 调度模型方式：api=HTTP 直连；claude-cli=本机 Claude Code CLI */
+  aiDispatchMode?: 'api' | 'claude-cli'
+  /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
+  aiCliPermission?: 'auto' | 'readonly'
   recentProjects?: RecentProject[]
-  /** Skills 目录绝对路径（可选） */
+  /** Skills 目录列表（兼容旧单目录 skillsDir 字段，读取时合并去重） */
+  skillsDirs?: string[]
+  /** @deprecated 旧单目录字段：仅启动迁移时写 null 清空，其余写入方一律用 skillsDirs */
   skillsDir?: string | null
   /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「全部运行」直接执行） */
   startupCommands?: Record<string, StartCommand[]>
@@ -138,6 +148,12 @@ export interface AiCompletion {
   reasoning: string | null
   toolCalls: AiToolCall[]
   finishReason: string | null
+  /** 仅 CLI 模式：模型为下一轮对话指定的模型（指令行已从正文剥离；消费方白名单校验后采用） */
+  nextModel?: string | null
+  /** 仅 CLI 模式：模型请求下一轮附带的 Skill id 列表（消费方按已扫描索引校验后采用） */
+  nextSkill?: string[]
+  /** 仅 CLI 模式：模型提交的启动命令清单（AI 编译场景；消费方落盘 startupCommands） */
+  startCommands?: StartCommand[] | null
 }
 
 export interface ToolCall {

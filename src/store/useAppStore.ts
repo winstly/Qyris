@@ -36,6 +36,8 @@ export const DEFAULT_SETTINGS: AiSettings = {
   baseUrl: 'https://api.openai.com/v1',
   model: 'gpt-4o-mini',
   provider: 'openai',
+  dispatchMode: 'api',
+  cliPermission: 'auto',
 }
 
 export type Theme = 'system' | 'light' | 'dark'
@@ -60,8 +62,8 @@ interface AppState {
   theme: Theme
   /** 历史工程列表 */
   recentProjects: RecentProject[]
-  /** Skills 目录路径 */
-  skillsDir: string | null
+  /** Skills 目录列表（按序扫描，同名取首个） */
+  skillsDirs: string[]
   /** 已扫描的 skill 摘要列表 */
   skillMetas: SkillMeta[]
   /** 当前项目已识别的启动命令（AI 编译产出，「全部运行」直接执行，零模型） */
@@ -81,7 +83,7 @@ interface AppState {
   openProjectDialog: () => Promise<void>
   openProject: (path: string) => Promise<void>
   removeRecentProject: (path: string) => void
-  setSkillsDir: (dir: string | null) => void
+  setSkillsDirs: (dirs: string[]) => void
   loadSkills: () => Promise<void>
   /** 覆盖当前项目的启动命令存档（AI 编译结果 / run_project 沉淀），同步落盘 */
   setStartupCommands: (cmds: StartCommand[]) => Promise<void>
@@ -111,7 +113,7 @@ export const useAppStore = create<AppState>()(
       dialog: null,
       theme: 'system',
       recentProjects: [],
-      skillsDir: null,
+      skillsDirs: [],
       skillMetas: [],
       startupCommands: [],
       startupCommandsMap: {},
@@ -127,7 +129,10 @@ export const useAppStore = create<AppState>()(
         set({ settings: s })
         if (!isDesktop) return
         try {
-          await api.mergeConfig({ aiBaseUrl: s.baseUrl, aiModel: s.model, aiProvider: s.provider, aiTiers: s.tiers })
+          await api.mergeConfig({
+            aiBaseUrl: s.baseUrl, aiModel: s.model, aiProvider: s.provider, aiTiers: s.tiers,
+            aiDispatchMode: s.dispatchMode, aiCliPermission: s.cliPermission,
+          })
         } catch { /* 配置盘写失败不阻塞界面 */ }
       },
 
@@ -150,15 +155,22 @@ export const useAppStore = create<AppState>()(
               baseUrl: cfg.aiBaseUrl || DEFAULT_SETTINGS.baseUrl,
               model: cfg.aiModel || DEFAULT_SETTINGS.model,
               provider: cfg.aiProvider || DEFAULT_SETTINGS.provider,
+              dispatchMode: cfg.aiDispatchMode ?? DEFAULT_SETTINGS.dispatchMode,
+              cliPermission: cfg.aiCliPermission ?? DEFAULT_SETTINGS.cliPermission,
               tiers: cfg.aiTiers,
             },
             recentProjects: cfg.recentProjects ?? [],
-            skillsDir: cfg.skillsDir ?? null,
+            skillsDirs: cfg.skillsDirs ?? [],
             startupCommandsMap: cfg.startupCommands ?? {},
           })
           // 扫描 skills 目录（异步，不阻塞启动）
-          if (cfg.skillsDir) {
+          if ((cfg.skillsDirs ?? []).length > 0) {
             void get().loadSkills()
+          }
+          // 旧单目录字段一次性迁移：并入 skillsDirs 后清空 skillsDir。
+          // 不迁移的话读取侧合并会让「删除旧目录」在下次启动时复活（浅合并永远保留该字段）
+          if (cfg.skillsDir) {
+            void api.mergeConfig({ skillsDirs: cfg.skillsDirs ?? [], skillsDir: null }).catch(() => {})
           }
           // 记住上次打开的项目目录：启动时自动恢复
           if (cfg.lastProjectPath) {
@@ -234,15 +246,13 @@ export const useAppStore = create<AppState>()(
         void api.mergeConfig({ recentProjects: updated }).catch(() => {})
       },
 
-      setSkillsDir: (dir) => {
-        set({ skillsDir: dir })
+      setSkillsDirs: (dirs) => {
+        // 归一化唯一入口（trim + 去空 + 去重保序）：设置面板草稿提交与此处的规则保持一致
+        const clean = [...new Set(dirs.map((d) => d.trim()).filter(Boolean))]
+        set({ skillsDirs: clean })
         // 异步持久化 + 重新扫描
-        void api.mergeConfig({ skillsDir: dir }).catch(() => {})
-        if (dir) {
-          void get().loadSkills()
-        } else {
-          set({ skillMetas: [] })
-        }
+        void api.mergeConfig({ skillsDirs: clean }).catch(() => {})
+        void get().loadSkills()
       },
 
       setStartupCommands: async (cmds) => {
@@ -266,14 +276,14 @@ export const useAppStore = create<AppState>()(
       },
 
       loadSkills: async () => {
-        const dir = get().skillsDir
-        if (!dir || !isDesktop) {
+        const dirs = get().skillsDirs
+        if (!isDesktop || dirs.length === 0) {
           set({ skillMetas: [] })
           return
         }
         try {
-          const metas = await api.scanSkills(dir)
-          set({ skillMetas: metas })
+          // 多目录按序扫描：同名 id 首个命中者优先（去重规则统一在主进程 skills.ts）
+          set({ skillMetas: await api.scanSkills(dirs) })
         } catch {
           set({ skillMetas: [] })
         }

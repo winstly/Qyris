@@ -32,7 +32,10 @@ function isInstalled() {
     const pathTxt = path.join(electronDir, 'path.txt');
     if (!fs.existsSync(pathTxt)) return false;
     const content = fs.readFileSync(pathTxt, 'utf8').trim();
-    return fs.existsSync(path.join(electronDir, content));
+    if (!content) return false;
+    // path.txt 记录的是相对 dist/ 的路径（electron/index.js 同款解析）：
+    // win=electron.exe、mac=Electron.app/Contents/MacOS/Electron、linux=electron
+    return fs.existsSync(path.join(electronDir, 'dist', content));
   } catch {
     return false;
   }

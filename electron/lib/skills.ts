@@ -68,6 +68,30 @@ export async function scanSkills(dir: string): Promise<SkillMeta[]> {
   return results
 }
 
+/** 多目录按序扫描：同名 id 首个命中者优先（与 load_skill / CLI resolve 的查找序一致）。
+ *  多目录解析的唯一入口——渲染层 IPC 与 CLI adapter 都从这里取，避免各层各写一份去重规则 */
+export async function scanSkillsDirs(dirs: string[]): Promise<SkillMeta[]> {
+  const seen = new Set<string>()
+  const metas: SkillMeta[] = []
+  for (const dir of dirs) {
+    for (const m of await scanSkills(dir)) {
+      if (seen.has(m.id)) continue
+      seen.add(m.id)
+      metas.push(m)
+    }
+  }
+  return metas
+}
+
+/** 多目录按序读取 Skill：首个命中即返回（readSkill 自带路径穿越守卫） */
+export async function readSkillFromDirs(dirs: string[], skillId: string): Promise<string | null> {
+  for (const dir of dirs) {
+    const content = await readSkill(dir, skillId)
+    if (content !== null) return content
+  }
+  return null
+}
+
 /** 读取单个 skill 的完整 SKILL.md 内容 */
 export async function readSkill(dir: string, skillId: string): Promise<string | null> {
   // 安全校验：skillId 只允许目录名（不能含路径分隔符）

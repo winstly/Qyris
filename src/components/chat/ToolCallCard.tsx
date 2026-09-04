@@ -7,6 +7,16 @@ const TOOL_META: Record<string, { label: string; icon: ReactNode }> = {
   list_files: { label: '列出目录', icon: <IconFolder size={13} /> },
   read_file: { label: '读取文件', icon: <IconFile size={13} /> },
   write_file: { label: '写入文件', icon: <IconPencil size={13} /> },
+  // CLI 工具（Claude Code 内置工具）
+  Read: { label: '读取文件', icon: <IconFile size={13} /> },
+  Write: { label: '写入文件', icon: <IconPencil size={13} /> },
+  Glob: { label: '搜索文件', icon: <IconFolder size={13} /> },
+  Grep: { label: '搜索内容', icon: <IconFile size={13} /> },
+  LS: { label: '列出目录', icon: <IconFolder size={13} /> },
+  Bash: { label: '执行命令', icon: <IconTerminal size={13} /> },
+  Edit: { label: '编辑文件', icon: <IconPencil size={13} /> },
+  WebFetch: { label: '获取网页', icon: <IconTerminal size={13} /> },
+  WebSearch: { label: '搜索网络', icon: <IconTerminal size={13} /> },
 }
 
 /** 工具调用过程卡片：正在读取 xxx → 已读取 xxx（点击展开详情）。 */
@@ -15,7 +25,11 @@ export function ToolCallCard({ call }: { call: ToolCall }) {
   // 子任务编排走专用卡片（批次面板 + 实时转录）
   if (call.name === 'dispatch_subtasks') return <AgentToolCard call={call} />
   const meta = TOOL_META[call.name] ?? { label: call.name, icon: <IconTerminal size={13} /> }
-  const target = String(call.args.path ?? call.args.dir ?? '')
+  // 参数目标提取：Qyris 工具用 path/dir，CLI 工具用 file_path/command/pattern/url
+  const target = String(
+    call.args.path ?? call.args.dir ?? call.args.file_path ?? call.args.command
+      ?? call.args.pattern ?? call.args.url ?? call.args.summary ?? '',
+  ).slice(0, 120)
 
   return (
     <button

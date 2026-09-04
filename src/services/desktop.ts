@@ -75,18 +75,18 @@ export const api = {
   hasSecret: (key: string) => wrap((d) => d.hasSecret(key)),
   deleteSecret: (key: string) => wrap((d) => d.deleteSecret(key)),
 
-  // AI（主进程流式代理）
+  // AI（主进程流式代理；dispatchMode='claude-cli' 时走本机 Claude Code CLI）
   aiChatStream: (
     requestId: string, provider: string, baseUrl: string, model: string,
-    messages: unknown, tools: unknown,
-  ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools)),
-  aiTestConnection: (provider: string, baseUrl: string, model: string) =>
-    wrap((d) => d.aiTestConnection(provider, baseUrl, model)),
+    messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null,
+  ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot)),
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
+    wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode)),
   aiCancel: (requestId: string) => wrap((d) => d.aiCancel(requestId)),
 
   // Skills 目录
-  scanSkills: (dir: string) => wrap((d) => d.scanSkills(dir)),
-  readSkill: (dir: string, skillId: string) => wrap((d) => d.readSkill(dir, skillId)),
+  scanSkills: (dirs: string[]) => wrap((d) => d.scanSkills(dirs)),
+  readSkill: (dirs: string[], skillId: string) => wrap((d) => d.readSkill(dirs, skillId)),
   pickSkillsDir: () => wrap((d) => d.pickSkillsDir()),
 
   // 创建项目 / Git
@@ -137,6 +137,12 @@ export function onAiReasoning(cb: (payload: { requestId: string; delta: string }
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onAiReasoning(cb)
 }
+
+export function onCliToolEvent(cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onCliToolEvent(cb)
+}
+
 
 export function onFsChanged(cb: (payload: { paths: string[] }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}

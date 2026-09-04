@@ -267,13 +267,14 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         if (!skillId) {
           return { result: '错误：skill_id 不能为空。', summary: 'skill_id 为空' }
         }
-        const { skillsDir } = useAppStore.getState()
-        if (!skillsDir) {
+        const { skillsDirs, skillMetas } = useAppStore.getState()
+        if (!skillsDirs.length) {
           return { result: '错误：未配置 Skills 目录。请在设置 → 系统设置中配置。', summary: '未配置 Skills 目录' }
         }
-        const content = await api.readSkill(skillsDir, skillId)
+        // 多目录按序查找首个命中（去重/查找序规则统一在主进程 skills.ts，单次 IPC）
+        const content = await api.readSkill(skillsDirs, skillId)
         if (content === null) {
-          const known = useAppStore.getState().skillMetas.map((m) => m.id).join('、') || '（无）'
+          const known = skillMetas.map((m) => m.id).join('、') || '（无）'
           return { result: `错误：Skill「${skillId}」不存在或无法读取。可用 Skills：${known}`, summary: `Skill 不存在：${skillId}` }
         }
         return { result: content, summary: `已加载 Skill：${skillId}` }

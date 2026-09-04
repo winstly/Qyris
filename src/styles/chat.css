@@ -688,7 +688,7 @@
   transition: background var(--motion-fast) var(--ease-standard);
 }
 .slash-menu__item:hover,
-.slash-menu__item--active { background: var(--row-hover); }
+.slash-menu__item--active { background: var(--accent-dim); }
 
 .slash-menu__item-name {
   display: flex;

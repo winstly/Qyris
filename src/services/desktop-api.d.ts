@@ -48,8 +48,8 @@ declare global {
     deleteSecret: (key: string) => Promise<void>
 
     // Skills 目录
-    scanSkills: (dir: string) => Promise<SkillMeta[]>
-    readSkill: (dir: string, skillId: string) => Promise<string | null>
+    scanSkills: (dirs: string[]) => Promise<SkillMeta[]>
+    readSkill: (dirs: string[], skillId: string) => Promise<string | null>
     pickSkillsDir: () => Promise<string | null>
 
     // 创建项目 / Git
@@ -71,8 +71,8 @@ declare global {
     pickParentDir: () => Promise<string | null>
 
     // AI
-    aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown) => Promise<AiCompletion>
-    aiTestConnection: (provider: string, baseUrl: string, model: string) => Promise<string>
+    aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null) => Promise<AiCompletion>
+    aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) => Promise<string>
     aiCancel: (requestId: string) => Promise<void>
 
     // 窗口
@@ -86,6 +86,7 @@ declare global {
     onBuildExit: DesktopEventSub<{ name: string; code: number }>
     onAiDelta: DesktopEventSub<{ requestId: string; delta: string }>
     onAiReasoning: DesktopEventSub<{ requestId: string; delta: string }>
+    onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }>
     onFsChanged: DesktopEventSub<{ paths: string[] }>
     onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>
   }

@@ -56,9 +56,10 @@ function saveWindowState(win: BrowserWindow): void {
 
 let mainWindow: BrowserWindow | null = null
 
-/** 退出清理（幂等）：先杀运行中的子进程树，再停 watcher */
+/** 退出清理（幂等）：先杀运行中的子进程树（含在途 CLI 子进程），再停 watcher */
 function cleanup(): void {
   proc.killRunningForCleanup()
+  proc.cancelRunOnce()
   void watcher.stopWatchingInternal()
 }
 
@@ -111,9 +112,9 @@ function registerIpc(): void {
   handle('has_secret', (p) => secrets.hasSecret(p.key))
   handle('delete_secret', (p) => secrets.deleteSecret(p.key))
 
-  // Skills 目录
-  handle('scan_skills', (p) => skills.scanSkills(p.dir))
-  handle('read_skill', (p) => skills.readSkill(p.dir, p.skillId))
+  // Skills 目录（多目录按序解析的规则统一在 skills.ts，IPC 只透传目录列表）
+  handle('scan_skills', (p) => skills.scanSkillsDirs(p.dirs))
+  handle('read_skill', (p) => skills.readSkillFromDirs(p.dirs, p.skillId))
   handle('pick_skills_dir', async () => {
     if (!mainWindow) return null
     const result = await dialog.showOpenDialog(mainWindow, {
@@ -149,9 +150,10 @@ function registerIpc(): void {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
-  // AI（ai_chat_stream resolve 前持续推 ai-delta 事件）
-  handle('ai_chat_stream', (p) => ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools))
-  handle('ai_test_connection', (p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model))
+  // AI（ai_chat_stream resolve 前持续推 ai-delta 事件；dispatchMode 选择 API 直连 / Claude CLI）
+  handle('ai_chat_stream', (p) =>
+    ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot))
+  handle('ai_test_connection', (p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode))
   handle('ai_cancel', (p) => ai.aiCancel(p.requestId))
 
   // 窗口

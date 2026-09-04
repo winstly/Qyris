@@ -199,6 +199,14 @@ export function cancelRunOnce(token?: unknown): number {
   return killed
 }
 
+/** 在途子进程登记（供 ai-cli 等外部模块复用 onceProcs 的取消/清理链），返回注销函数 */
+export function registerOnceProc(token: string, child: ChildProcess): () => void {
+  onceProcs.set(token, child)
+  return () => {
+    onceProcs.delete(token)
+  }
+}
+
 /** 停止单个服务；name 省略 = 停止全部槽 */
 export async function stopProject(name?: unknown): Promise<void> {
   if (typeof name === 'string' && name.trim()) {

@@ -191,7 +191,7 @@ export function ChatInput() {
               key={skill.id}
               className={`slash-menu__item ${i === slashIndex ? 'slash-menu__item--active' : ''}`}
               role="option"
-              aria-selected={i === slashIndex}
+              aria-selected={selectedSkills.some((s) => s.id === skill.id)}
               onMouseEnter={() => setSlashIndex(i)}
               onClick={() => void selectSkill(skill)}
             >
