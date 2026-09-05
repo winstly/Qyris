@@ -20,7 +20,7 @@ const IDLE_ROW: UrlRowState = { status: 'idle', branches: [], branch: '', error:
  * 创建项目对话框：两种模式 —— 创建空项目 / 从远端仓库克隆（支持多仓库、连接测试、分支选择）。
  */
 export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const openProject = useAppStore((s) => s.openProject)
+  const openProjectWithChoice = useAppStore((s) => s.openProjectWithChoice)
   const showAlert = useAppStore((s) => s.showAlert)
 
   const [tab, setTab] = useState<Tab>('empty')
@@ -75,7 +75,7 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
     setCreating(true)
     try {
       const projectPath = await api.createEmptyProject(emptyParent.trim(), emptyName.trim())
-      await openProject(projectPath)
+      await openProjectWithChoice(projectPath)
       handleClose()
     } catch (e) {
       await showAlert('创建失败', String(e))
@@ -92,9 +92,8 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
     setCreating(true)
     try {
       const paths = await api.cloneRepos(cloneParent.trim(), repos)
-      // 打开第一个克隆的目录（或多仓库时打开父目录）
       const openPath = paths.length === 1 ? paths[0] : cloneParent.trim()
-      await openProject(openPath)
+      await openProjectWithChoice(openPath)
       handleClose()
     } catch (e) {
       await showAlert('克隆失败', String(e))

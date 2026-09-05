@@ -5,8 +5,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 
-// Monaco 无 worker 时默认尝试 CDN（Electron 下必然失败）。
-// 提供一个 no-op worker 避免控制台报错；语法高亮在主线程，不依赖 worker。
+// Monaco no-op worker
 ;(self as any).MonacoEnvironment = {
   getWorker() {
     return new Worker(URL.createObjectURL(new Blob([''], { type: 'application/javascript' })))
@@ -56,218 +55,142 @@ function detectLang(filePath: string): string {
   }
 }
 
-// ---------- 自定义主题（与 tokens.css 暖灰体系对齐） ----------
+// ---------- 主题：从 tokens.css CSS 变量构建 Monaco 主题 ----------
 
-monaco.editor.defineTheme('qyris-dark', {
-  base: 'vs-dark',
-  inherit: true,
-  rules: [
-    // Atom One Dark 配色
-    { token: 'comment', foreground: '5c6370', fontStyle: 'italic' },
-    { token: 'keyword', foreground: 'c678dd' },
-    { token: 'keyword.control', foreground: 'c678dd' },
-    { token: 'string', foreground: '98c379' },
-    { token: 'string.escape', foreground: '56b6c2' },
-    { token: 'number', foreground: 'd19a66' },
-    { token: 'number.hex', foreground: 'd19a66' },
-    { token: 'type', foreground: 'e5c07b' },
-    { token: 'type.identifier', foreground: 'e5c07b' },
-    { token: 'entity.name.function', foreground: '61afef' },
-    { token: 'support.function', foreground: '61afef' },
-    { token: 'variable', foreground: 'e06c75' },
-    { token: 'variable.predefined', foreground: '56b6c2' },
-    { token: 'delimiter', foreground: 'abb2bf' },
-    { token: 'operator', foreground: '56b6c2' },
-    { token: 'regexp', foreground: '98c379' },
-    // HTML/XML
-    { token: 'tag', foreground: 'e06c75' },
-    { token: 'tag.tag-name', foreground: 'e06c75' },
-    { token: 'tag.punctuation', foreground: 'abb2bf' },
-    { token: 'metatag', foreground: 'e06c75' },
-    { token: 'metatag.content', foreground: '98c379' },
-    { token: 'metatag.html', foreground: 'e06c75' },
-    { token: 'metatag.xml', foreground: 'e06c75' },
-    { token: 'attribute.name', foreground: 'd19a66' },
-    { token: 'attribute.name.html', foreground: 'd19a66' },
-    { token: 'attribute.value', foreground: '98c379' },
-    { token: 'attribute.value.html', foreground: '98c379' },
-    { token: 'attribute.value.html.css', foreground: '98c379' },
-    { token: 'tag.doctype', foreground: '5c6370' },
-    { token: 'constant', foreground: 'd19a66' },
-    { token: 'predefined', foreground: '56b6c2' },
-    // Markdown
-    { token: 'markup.heading', foreground: 'e5c07b', fontStyle: 'bold' },
-    { token: 'markup.bold', foreground: 'e06c75', fontStyle: 'bold' },
-    { token: 'markup.italic', foreground: 'c678dd', fontStyle: 'italic' },
-    { token: 'markup.raw', foreground: '98c379' },
-    { token: 'markup.raw.inline', foreground: '98c379' },
-    { token: 'markup.raw.block', foreground: '98c379' },
-    { token: 'string.link', foreground: '61afef' },
-    { token: 'string.other', foreground: '98c379' },
-    { token: 'meta.separator', foreground: '5c6370' },
-    // JSON
-    { token: 'string.key.json', foreground: 'e06c75' },
-    { token: 'string.value.json', foreground: '98c379' },
-    { token: 'number.json', foreground: 'd19a66' },
-    { token: 'keyword.json', foreground: 'c678dd' },
-    // CSS
-    { token: 'tag.css', foreground: 'e06c75' },
-    { token: 'attribute.name.css', foreground: 'd19a66' },
-    { token: 'attribute.value.css', foreground: '98c379' },
-    { token: 'number.css', foreground: 'd19a66' },
-    { token: 'constant.css', foreground: '56b6c2' },
-  ],
-  colors: {
-    /* 表面：与 tokens.css 五档暖灰一致 */
-    'editor.background': '#1f1f22',                    // --s2
-    'editorGutter.background': '#1a1a1c',              // --s1
-    'editorGutter.border': '#28282e',                  // --edge-hair
-    /* 文字 */
-    'editor.foreground': '#e8e4df',                    // --fg
-    /* 光标 */
-    'editorCursor.foreground': '#7c8da4',              // --accent
-    /* 行 */
-    'editor.lineHighlightBackground': '#26262a',       // --s3
-    'editor.lineHighlightBorder': '#00000000',         // 无边框
-    /* 行号 */
-    'editorLineNumber.foreground': '#6b6560',          // --muted
-    'editorLineNumber.activeForeground': '#a8a29e',    // --fg-2
-    /* 选区 */
-    'editor.selectionBackground': '#7c8da433',
-    'editor.inactiveSelectionBackground': '#7c8da41a',
-    'editor.selectionHighlightBackground': '#7c8da41a',
-    /* 匹配括号 */
-    'editorBracketMatch.background': '#7c8da430',
-    'editorBracketMatch.border': '#7c8da460',
-    /* 缩进指南 */
-    'editorIndentGuide.background': '#28282e',         // --edge-hair
-    'editorIndentGuide.activeBackground': '#34343a',   // --edge
-    /* 搜索高亮 */
-    'editor.findMatchBackground': '#c4a26540',
-    'editor.findMatchHighlightBackground': '#c4a26520',
-    /* 边框 */
-    'editorWidget.border': '#34343a',                  // --edge
-    'editorWidget.background': '#26262a',              // --s3
-    /* 滚动条 */
-    'scrollbar.shadow': '#00000030',
-    'scrollbarSlider.background': '#6b656030',
-    'scrollbarSlider.hoverBackground': '#6b656050',
-    'scrollbarSlider.activeBackground': '#6b656070',
-    /* 悬浮提示 */
-    'editorHoverWidget.background': '#26262a',
-    'editorHoverWidget.border': '#34343a',
-    /* 自动补全 */
-    'editorSuggestWidget.background': '#26262a',
-    'editorSuggestWidget.border': '#34343a',
-    'editorSuggestWidget.selectedBackground': '#7c8da425',
-    /* diff 编辑器 */
-    'diffEditor.insertedTextBackground': '#6bba7a15',
-    'diffEditor.removedTextBackground': '#c4707015',
-    /* 边缘（minimap 等） */
-    'minimap.background': '#1a1a1c',
-  },
-})
+/** 读取根元素上的 CSS 变量（含当前 data-theme 解析后的值） */
+function cssVar(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
+}
 
-// ---------- 浅色主题 ----------
+/** 给 6 位 hex 追加 2 位 alpha */
+function withAlpha(hex: string, alpha: string): string {
+  return hex.startsWith('#') && hex.length === 7 ? hex + alpha : hex
+}
 
-monaco.editor.defineTheme('qyris-light', {
-  base: 'vs',
-  inherit: true,
-  rules: [
-    // Atom One Light 配色
-    { token: 'comment', foreground: 'a0a1a7', fontStyle: 'italic' },
-    { token: 'keyword', foreground: 'a626a4' },
-    { token: 'keyword.control', foreground: 'a626a4' },
-    { token: 'string', foreground: '50a14f' },
-    { token: 'string.escape', foreground: '0184bc' },
-    { token: 'number', foreground: '986801' },
-    { token: 'number.hex', foreground: '986801' },
-    { token: 'type', foreground: 'c18401' },
-    { token: 'type.identifier', foreground: 'c18401' },
-    { token: 'entity.name.function', foreground: '4078f2' },
-    { token: 'support.function', foreground: '4078f2' },
-    { token: 'variable', foreground: 'e45649' },
-    { token: 'variable.predefined', foreground: '0184bc' },
-    { token: 'delimiter', foreground: '383a42' },
-    { token: 'operator', foreground: '0184bc' },
-    { token: 'regexp', foreground: '50a14f' },
-    // HTML/XML
-    { token: 'tag', foreground: 'e45649' },
-    { token: 'tag.tag-name', foreground: 'e45649' },
-    { token: 'tag.punctuation', foreground: '383a42' },
-    { token: 'metatag', foreground: 'e45649' },
-    { token: 'metatag.content', foreground: '50a14f' },
-    { token: 'metatag.html', foreground: 'e45649' },
-    { token: 'metatag.xml', foreground: 'e45649' },
-    { token: 'attribute.name', foreground: '986801' },
-    { token: 'attribute.name.html', foreground: '986801' },
-    { token: 'attribute.value', foreground: '50a14f' },
-    { token: 'attribute.value.html', foreground: '50a14f' },
-    { token: 'attribute.value.html.css', foreground: '50a14f' },
-    { token: 'tag.doctype', foreground: 'a0a1a7' },
-    { token: 'constant', foreground: '986801' },
-    { token: 'predefined', foreground: '0184bc' },
-    // Markdown
-    { token: 'markup.heading', foreground: 'c18401', fontStyle: 'bold' },
-    { token: 'markup.bold', foreground: 'e45649', fontStyle: 'bold' },
-    { token: 'markup.italic', foreground: 'a626a4', fontStyle: 'italic' },
-    { token: 'markup.raw', foreground: '50a14f' },
-    { token: 'markup.raw.inline', foreground: '50a14f' },
-    { token: 'markup.raw.block', foreground: '50a14f' },
-    { token: 'string.link', foreground: '4078f2' },
-    { token: 'string.other', foreground: '50a14f' },
-    { token: 'meta.separator', foreground: 'a0a1a7' },
-    // JSON
-    { token: 'string.key.json', foreground: 'e45649' },
-    { token: 'string.value.json', foreground: '50a14f' },
-    { token: 'number.json', foreground: '986801' },
-    { token: 'keyword.json', foreground: 'a626a4' },
-    // CSS
-    { token: 'tag.css', foreground: 'e45649' },
-    { token: 'attribute.name.css', foreground: '986801' },
-    { token: 'attribute.value.css', foreground: '50a14f' },
-    { token: 'number.css', foreground: '986801' },
-    { token: 'constant.css', foreground: '0184bc' },
-  ],
-  colors: {
-    'editor.background': '#ffffff',
-    'editorGutter.background': '#f8f7f5',
-    'editorGutter.border': '#e8e5e0',
-    'editor.foreground': '#1a1816',
-    'editorCursor.foreground': '#5a6e84',
-    'editor.lineHighlightBackground': '#f8f7f5',
-    'editor.lineHighlightBorder': '#00000000',
-    'editorLineNumber.foreground': '#8a8478',
-    'editorLineNumber.activeForeground': '#5a5650',
-    'editor.selectionBackground': '#5a6e8433',
-    'editor.inactiveSelectionBackground': '#5a6e841a',
-    'editor.selectionHighlightBackground': '#5a6e841a',
-    'editorBracketMatch.background': '#5a6e8430',
-    'editorBracketMatch.border': '#5a6e8460',
-    'editorIndentGuide.background': '#e8e5e0',
-    'editorIndentGuide.activeBackground': '#dcd8d2',
-    'editor.findMatchBackground': '#9a7a2840',
-    'editor.findMatchHighlightBackground': '#9a7a2820',
-    'editorWidget.border': '#dcd8d2',
-    'editorWidget.background': '#ffffff',
-    'scrollbarSlider.background': '#8a847830',
-    'scrollbarSlider.hoverBackground': '#8a847850',
-    'scrollbarSlider.activeBackground': '#8a847870',
-    'editorHoverWidget.background': '#ffffff',
-    'editorHoverWidget.border': '#dcd8d2',
-    'editorSuggestWidget.background': '#ffffff',
-    'editorSuggestWidget.border': '#dcd8d2',
-    'editorSuggestWidget.selectedBackground': '#5a6e8415',
-    'diffEditor.insertedTextBackground': '#2e7d5215',
-    'diffEditor.removedTextBackground': '#b0404015',
-    'minimap.background': '#f8f7f5',
-  },
-})
+/** 从 tokens.css 读取当前配色并（重新）定义 Monaco 主题 */
+function applyMonacoTheme(): void {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light'
 
-// ---------- 主题检测 ----------
+  const s1 = cssVar('--s1')
+  const s2 = cssVar('--s2')
+  const s3 = cssVar('--s3')
+  const edge = cssVar('--edge')
+  const edgeHair = cssVar('--edge-hair')
+  const fg = cssVar('--fg')
+  const fg2 = cssVar('--fg-2')
+  const muted = cssVar('--muted')
+  const accent = cssVar('--accent')
+  const warn = cssVar('--warn')
+  const success = cssVar('--success')
+  const danger = cssVar('--danger')
 
-function currentTheme(): 'qyris-dark' | 'qyris-light' {
-  return document.documentElement.getAttribute('data-theme') === 'light' ? 'qyris-light' : 'qyris-dark'
+  const syn = {
+    comment: cssVar('--syn-comment'),
+    keyword: cssVar('--syn-keyword'),
+    string: cssVar('--syn-string'),
+    number: cssVar('--syn-number'),
+    type: cssVar('--syn-type'),
+    func: cssVar('--syn-function'),
+    variable: cssVar('--syn-variable'),
+    operator: cssVar('--syn-operator'),
+    punct: cssVar('--syn-punct'),
+  }
+
+  monaco.editor.defineTheme('qyris', {
+    base: isLight ? 'vs' : 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'comment', foreground: syn.comment, fontStyle: 'italic' },
+      { token: 'keyword', foreground: syn.keyword },
+      { token: 'keyword.control', foreground: syn.keyword },
+      { token: 'string', foreground: syn.string },
+      { token: 'string.escape', foreground: syn.operator },
+      { token: 'number', foreground: syn.number },
+      { token: 'number.hex', foreground: syn.number },
+      { token: 'type', foreground: syn.type },
+      { token: 'type.identifier', foreground: syn.type },
+      { token: 'entity.name.function', foreground: syn.func },
+      { token: 'support.function', foreground: syn.func },
+      { token: 'variable', foreground: syn.variable },
+      { token: 'variable.predefined', foreground: syn.operator },
+      { token: 'delimiter', foreground: syn.punct },
+      { token: 'operator', foreground: syn.operator },
+      { token: 'regexp', foreground: syn.string },
+      // HTML/XML
+      { token: 'tag', foreground: syn.variable },
+      { token: 'tag.tag-name', foreground: syn.variable },
+      { token: 'tag.punctuation', foreground: syn.punct },
+      { token: 'metatag', foreground: syn.variable },
+      { token: 'metatag.content', foreground: syn.string },
+      { token: 'metatag.html', foreground: syn.variable },
+      { token: 'metatag.xml', foreground: syn.variable },
+      { token: 'attribute.name', foreground: syn.number },
+      { token: 'attribute.name.html', foreground: syn.number },
+      { token: 'attribute.value', foreground: syn.string },
+      { token: 'attribute.value.html', foreground: syn.string },
+      { token: 'attribute.value.html.css', foreground: syn.string },
+      { token: 'tag.doctype', foreground: syn.comment },
+      { token: 'constant', foreground: syn.number },
+      { token: 'predefined', foreground: syn.operator },
+      // Markdown
+      { token: 'markup.heading', foreground: syn.type, fontStyle: 'bold' },
+      { token: 'markup.bold', foreground: syn.variable, fontStyle: 'bold' },
+      { token: 'markup.italic', foreground: syn.keyword, fontStyle: 'italic' },
+      { token: 'markup.raw', foreground: syn.string },
+      { token: 'markup.raw.inline', foreground: syn.string },
+      { token: 'markup.raw.block', foreground: syn.string },
+      { token: 'string.link', foreground: syn.func },
+      { token: 'string.other', foreground: syn.string },
+      { token: 'meta.separator', foreground: syn.comment },
+      // JSON
+      { token: 'string.key.json', foreground: syn.variable },
+      { token: 'string.value.json', foreground: syn.string },
+      { token: 'number.json', foreground: syn.number },
+      { token: 'keyword.json', foreground: syn.keyword },
+      // CSS
+      { token: 'tag.css', foreground: syn.variable },
+      { token: 'attribute.name.css', foreground: syn.number },
+      { token: 'attribute.value.css', foreground: syn.string },
+      { token: 'number.css', foreground: syn.number },
+      { token: 'constant.css', foreground: syn.operator },
+    ],
+    colors: {
+      /* 表面：与 tokens.css 五档暖灰一致 */
+      'editor.background': s2,
+      'editorGutter.background': s1,
+      'editorGutter.border': edgeHair,
+      'editor.foreground': fg,
+      'editorCursor.foreground': accent,
+      'editor.lineHighlightBackground': s3,
+      'editor.lineHighlightBorder': '#00000000',
+      'editorLineNumber.foreground': muted,
+      'editorLineNumber.activeForeground': fg2,
+      'editor.selectionBackground': withAlpha(accent, '33'),
+      'editor.inactiveSelectionBackground': withAlpha(accent, '1a'),
+      'editor.selectionHighlightBackground': withAlpha(accent, '1a'),
+      'editorBracketMatch.background': withAlpha(accent, '30'),
+      'editorBracketMatch.border': withAlpha(accent, '60'),
+      'editorIndentGuide.background': edgeHair,
+      'editorIndentGuide.activeBackground': edge,
+      'editor.findMatchBackground': withAlpha(warn, '40'),
+      'editor.findMatchHighlightBackground': withAlpha(warn, '20'),
+      'editorWidget.border': edge,
+      'editorWidget.background': s3,
+      'scrollbar.shadow': '#00000030',
+      'scrollbarSlider.background': withAlpha(muted, '30'),
+      'scrollbarSlider.hoverBackground': withAlpha(muted, '50'),
+      'scrollbarSlider.activeBackground': withAlpha(muted, '70'),
+      'editorHoverWidget.background': s3,
+      'editorHoverWidget.border': edge,
+      'editorSuggestWidget.background': s3,
+      'editorSuggestWidget.border': edge,
+      'editorSuggestWidget.selectedBackground': withAlpha(accent, '25'),
+      'diffEditor.insertedTextBackground': withAlpha(success, '15'),
+      'diffEditor.removedTextBackground': withAlpha(danger, '15'),
+      'minimap.background': s1,
+    },
+  })
+  monaco.editor.setTheme('qyris')
 }
 
 // ---------- 组件 ----------
@@ -315,10 +238,11 @@ export function EditorPane() {
     const host = hostEl
     if (!host) return
 
+    applyMonacoTheme()
     const editor = monaco.editor.create(host, {
       value: '',
       language: 'plaintext',
-      theme: currentTheme(),
+      theme: 'qyris',
       automaticLayout: true,
       fontSize: 13,
       fontFamily: '"JetBrains Mono", ui-monospace, Menlo, monospace',
@@ -336,7 +260,6 @@ export function EditorPane() {
     })
     editorRef.current = editor
     activeEditor = editor
-    // 首次创建强制 layout（防止 automaticLayout 延迟导致白屏）
     requestAnimationFrame(() => editor.layout())
 
     // 如果创建时已有 activePath，立即加载对应文件
@@ -371,15 +294,14 @@ export function EditorPane() {
       useFileStore.setState({ cursor: { line: e.position.lineNumber, col: e.position.column } })
     })
 
-    // 监听 data-theme 变化，同步切换 Monaco 主题
+    // 监听 data-theme 变化，重新读 token 并重建 Monaco 主题
     const observer = new MutationObserver(() => {
-      monaco.editor.setTheme(currentTheme())
+      applyMonacoTheme()
     })
     observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] })
 
     return () => {
       observer.disconnect()
-      // 清理当前 model（防止 Monaco 全局 registry 泄漏）
       const model = editor.getModel()
       if (model) model.dispose()
       editor.dispose()
@@ -402,7 +324,6 @@ export function EditorPane() {
     const lang = detectLang(activePath)
     const uri = monaco.Uri.file(activePath)
 
-    // 复用已有 model 或创建新 model（Monaco 全局 registry 按 URI 去重）
     let model = monaco.editor.getModel(uri)
     if (model) {
       model.setValue(content)
@@ -415,7 +336,6 @@ export function EditorPane() {
     editor.focus()
   }, [activePath])
 
-  // ---- 关闭页签时释放对应的 Monaco model，防止 registry 泄漏 ----
   const prevTabsRef = useRef<string[]>([])
   useEffect(() => {
     const prev = prevTabsRef.current

@@ -37,19 +37,16 @@ function normalize(rawLevel: unknown, rawMessage: unknown, rawSourceId: unknown)
   let message: string
   let sourceId: string
   if (typeof rawLevel === 'number') {
-    // 数字级别签名：(event, level: number, message, lineNumber, sourceId)
     level = NUM_LEVELS[rawLevel] ?? 'log'
     message = String(rawMessage ?? '')
     sourceId = String(rawSourceId ?? '')
   } else if (typeof rawLevel === 'string') {
-    // 字符串级别签名
     level = (['log', 'info', 'warning', 'error', 'debug'] as const).includes(rawLevel as never)
       ? (rawLevel as PreviewConsoleEntry['level'])
       : 'log'
     message = String(rawMessage ?? '')
     sourceId = String(rawSourceId ?? '')
   } else if (rawLevel && typeof rawLevel === 'object') {
-    // 对象签名：(event: { level, message, sourceId, ... })
     const ev = rawLevel as { level?: unknown; message?: unknown; sourceId?: unknown }
     const l = ev.level
     level = typeof l === 'number'
@@ -75,7 +72,6 @@ function onConsoleMessage(...args: unknown[]): void {
   if (!filterOrigin) return
   const entry = normalize(args[1] ?? args[0], args[2] ?? (args[0] as { message?: unknown })?.message, args[4] ?? (args[0] as { sourceId?: unknown })?.sourceId)
   if (!entry) return
-  // 归属过滤：脚本 URL 以预览 origin 开头才算被预览页面的输出
   if (!entry.sourceId.startsWith(filterOrigin)) return
   buffer.push(entry)
   if (buffer.length > BUFFER_CAP) buffer.splice(0, buffer.length - BUFFER_CAP)
@@ -89,17 +85,15 @@ export function attachConsoleCapture(win: BrowserWindow): void {
   attached = true
 }
 
-/** 设置/更新预览过滤 origin；origin 变化时清空缓冲 */
+/** 设置预览过滤 origin。url=null 解除过滤 */
 export function setConsoleFilter(url: string | null): void {
+  buffer = []
   if (!url) {
     filterOrigin = null
     return
   }
   try {
-    const origin = new URL(url).origin
-    if (origin === filterOrigin) return
-    filterOrigin = origin
-    buffer = []
+    filterOrigin = new URL(url).origin
   } catch {
     filterOrigin = null
   }

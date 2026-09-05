@@ -1,8 +1,8 @@
-/** Electron 主进程入口：生命周期、窗口状态持久化、IPC 注册、退出清理 */
+/** Electron 主进程入口：多窗口管理、IPC 注册、退出清理 */
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { setMainWindow } from '../lib/emitter'
+import { registerWindow, removeWindow, getAllWindows } from '../lib/emitter'
 import * as fsops from '../lib/fsops'
 import * as config from '../lib/config'
 import * as watcher from '../lib/watcher'
@@ -54,70 +54,71 @@ function saveWindowState(win: BrowserWindow): void {
   }
 }
 
-let mainWindow: BrowserWindow | null = null
-
-/** 退出清理（幂等）：先杀运行中的子进程树（含在途 CLI 子进程），再停 watcher */
+/** 退出清理（幂等）：先杀运行中的子进程树（含在途 CLI 子进程），再停所有 watcher */
 function cleanup(): void {
   proc.killRunningForCleanup()
   proc.cancelRunOnce()
-  void watcher.stopWatchingInternal()
+  void watcher.stopWatching()
 }
 
 function registerIpc(): void {
-  const handle = (channel: string, listener: (payload: any) => unknown): void => {
-    ipcMain.handle(channel, (_event, payload: any) => listener(payload))
+  const handle = (channel: string, listener: (event: Electron.IpcMainInvokeEvent, payload: any) => unknown): void => {
+    ipcMain.handle(channel, (event, payload: any) => listener(event, payload))
   }
 
-  // 文件系统
-  handle('list_dir', (p) => fsops.listDir(p.projectRoot, p.dir))
-  handle('search_files', (p) => fsops.searchFiles(p.projectRoot, p.query))
-  handle('read_text_file', (p) => fsops.readTextFile(p.projectRoot, p.path))
-  handle('write_text_file', (p) => fsops.writeTextFile(p.projectRoot, p.path, p.content))
-  handle('create_entry', (p) => fsops.createEntry(p.projectRoot, p.parentDir, p.name, p.isDir))
-  handle('rename_entry', (p) => fsops.renameEntry(p.projectRoot, p.path, p.newName))
-  handle('delete_entry', (p) => fsops.deleteEntry(p.projectRoot, p.path))
-  handle('copy_entry', (p) => fsops.copyEntry(p.projectRoot, p.srcPath, p.destDir))
-  handle('move_entry', (p) => fsops.moveEntry(p.projectRoot, p.srcPath, p.destDir))
-  handle('delete_project_files', (p) => fsops.deleteProjectFiles(p.projectRoot))
+  // 文件系统（projectRoot 来自渲染层，主进程做 ensureInside 校验）
+  handle('list_dir', (_e, p) => fsops.listDir(p.projectRoot, p.dir))
+  handle('search_files', (_e, p) => fsops.searchFiles(p.projectRoot, p.query))
+  handle('read_text_file', (_e, p) => fsops.readTextFile(p.projectRoot, p.path))
+  handle('write_text_file', (_e, p) => fsops.writeTextFile(p.projectRoot, p.path, p.content))
+  handle('create_entry', (_e, p) => fsops.createEntry(p.projectRoot, p.parentDir, p.name, p.isDir))
+  handle('rename_entry', (_e, p) => fsops.renameEntry(p.projectRoot, p.path, p.newName))
+  handle('delete_entry', (_e, p) => fsops.deleteEntry(p.projectRoot, p.path))
+  handle('copy_entry', (_e, p) => fsops.copyEntry(p.projectRoot, p.srcPath, p.destDir))
+  handle('move_entry', (_e, p) => fsops.moveEntry(p.projectRoot, p.srcPath, p.destDir))
+  handle('delete_project_files', (_e, p) => fsops.deleteProjectFiles(p.projectRoot))
 
-  // 文件快照：AI 写文件前的回退点（按对话会话分组）
-  handle('snapshot_file', (p) => snapshot.snapshotFile(p.projectRoot, p.sessionId, p.path))
-  handle('list_snapshots', (p) => snapshot.listSnapshots(p.projectRoot))
-  handle('restore_file', (p) => snapshot.restoreFile(p.projectRoot, p.path))
-  handle('restore_session', (p) => snapshot.restoreSession(p.projectRoot, p.sessionId))
-  handle('clear_project_snapshots', (p) => snapshot.clearProjectSnapshots(p.projectRoot))
+  // 文件快照
+  handle('snapshot_file', (_e, p) => snapshot.snapshotFile(p.projectRoot, p.sessionId, p.path))
+  handle('list_snapshots', (_e, p) => snapshot.listSnapshots(p.projectRoot))
+  handle('restore_file', (_e, p) => snapshot.restoreFile(p.projectRoot, p.path))
+  handle('restore_session', (_e, p) => snapshot.restoreSession(p.projectRoot, p.sessionId))
+  handle('clear_project_snapshots', (_e, p) => snapshot.clearProjectSnapshots(p.projectRoot))
 
   // 会话历史持久化
-  handle('load_session', (p) => sessions.loadSession(p.projectRoot))
-  handle('save_session', (p) => sessions.saveSession(p.projectRoot, p.messages))
+  handle('load_session', (_e, p) => sessions.loadSession(p.projectRoot))
+  handle('save_session', (_e, p) => sessions.saveSession(p.projectRoot, p.messages))
 
-  // 子进程 / watcher
-  handle('run_project', (p) => proc.runProject(p.projectRoot, p.name, p.command))
-  handle('run_once', (p) => proc.runOnce(p.projectRoot, p.command, p.token))
-  handle('run_once_cancel', (p) => proc.cancelRunOnce(p?.token))
-  handle('stop_project', (p) => proc.stopProject(p?.name))
-  handle('check_url', (p) => proc.checkUrlHealthy(String(p?.url ?? '')))
+  // 子进程 / watcher（windowId 用于事件定向路由）
+  handle('run_project', (e, p) => proc.runProject(p.projectRoot, p.name, p.command, e.sender.id))
+  handle('run_once', (_e, p) => proc.runOnce(p.projectRoot, p.command, p.token))
+  handle('run_once_cancel', (_e, p) => proc.cancelRunOnce(p?.token))
+  handle('stop_project', (_e, p) => proc.stopProject(p?.projectRoot ?? null, p?.name ?? null))
+  handle('check_url', (_e, p) => proc.checkUrlHealthy(String(p?.url ?? '')))
   // 预览控制台
-  handle('preview_console_attach', (p) => consolebridge.setConsoleFilter(p?.url ? String(p.url) : null))
+  handle('preview_console_attach', (_e, p) => consolebridge.setConsoleFilter(p?.url ? String(p.url) : null))
   handle('preview_console_history', () => consolebridge.consoleHistory())
-  // 端口占用查询（错误卡片的「端口被谁占着」展示）
-  handle('port_owner', (p) => proc.portOwner(Number(p?.port)))
-  handle('start_watching', (p) => watcher.startWatching(p.projectRoot))
-  handle('stop_watching', () => watcher.stopWatching())
+  // 端口占用查询
+  handle('port_owner', (_e, p) => proc.portOwner(Number(p?.port)))
+  // 多窗口 watcher：传入 windowId
+  handle('start_watching', (e, p) => watcher.startWatching(p.projectRoot, e.sender.id))
+  handle('stop_watching', (e) => watcher.stopWatchingForWindow(e.sender.id))
+  handle('stop_watching_project', (e, p) => watcher.stopProjectWatching(p.projectRoot, e.sender.id))
 
-  // 配置与密钥（刻意无 get_secret：明文 Key 不出主进程）
+  // 配置与密钥
   handle('get_config', () => config.getConfig())
-  handle('merge_config', (p) => config.mergeConfig(p.patch))
-  handle('set_secret', (p) => secrets.setSecret(p.key, p.value))
-  handle('has_secret', (p) => secrets.hasSecret(p.key))
-  handle('delete_secret', (p) => secrets.deleteSecret(p.key))
+  handle('merge_config', (_e, p) => config.mergeConfig(p.patch))
+  handle('set_secret', (_e, p) => secrets.setSecret(p.key, p.value))
+  handle('has_secret', (_e, p) => secrets.hasSecret(p.key))
+  handle('delete_secret', (_e, p) => secrets.deleteSecret(p.key))
 
-  // Skills 目录（多目录按序解析的规则统一在 skills.ts，IPC 只透传目录列表）
-  handle('scan_skills', (p) => skills.scanSkillsDirs(p.dirs))
-  handle('read_skill', (p) => skills.readSkillFromDirs(p.dirs, p.skillId))
-  handle('pick_skills_dir', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
+  // Skills 目录
+  handle('scan_skills', (_e, p) => skills.scanSkillsDirs(p.dirs))
+  handle('read_skill', (_e, p) => skills.readSkillFromDirs(p.dirs, p.skillId))
+  handle('pick_skills_dir', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
       title: '选择 Skills 目录',
       properties: ['openDirectory'],
     })
@@ -125,50 +126,53 @@ function registerIpc(): void {
   })
 
   // 创建项目 / Git
-  handle('create_empty_project', (p) => projectCreate.createEmptyProject(p.parentDir, p.name))
-  handle('clone_repos', (p) => projectCreate.cloneRepos(p.parentDir, p.repos))
-  handle('test_repo', (p) => projectCreate.testRepo(p.url))
-  handle('git_repo_info', (p) => projectCreate.gitRepoInfo(p.dir))
-  handle('git_checkout', (p) => projectCreate.gitCheckout(p.dir, p.branch))
-  // Git 工作区（commit 工作区面板）
-  handle('git_status', (p) => git.gitStatus(p.dir))
-  handle('git_is_repo_root', (p) => git.gitIsRepoRoot(p.dir))
-  handle('git_diff', (p) => git.gitDiff(p.dir, p.path, p.staged === true))
-  handle('git_add', (p) => git.gitAdd(p.dir, p.paths))
-  handle('git_unstage', (p) => git.gitUnstage(p.dir, p.paths ?? []))
-  handle('git_commit', (p) => git.gitCommit(p.dir, String(p.message ?? '')))
-  handle('git_pull', (p) => git.gitPull(p.dir))
-  handle('git_fetch', (p) => git.gitFetch(p.dir))
-  handle('git_push', (p) => git.gitPush(p.dir))
-  handle('git_discard', (p) => git.gitDiscard(p.dir, p.paths ?? []))
-  handle('pick_parent_dir', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
+  handle('create_empty_project', (_e, p) => projectCreate.createEmptyProject(p.parentDir, p.name))
+  handle('clone_repos', (_e, p) => projectCreate.cloneRepos(p.parentDir, p.repos))
+  handle('test_repo', (_e, p) => projectCreate.testRepo(p.url))
+  handle('git_repo_info', (_e, p) => projectCreate.gitRepoInfo(p.dir))
+  handle('git_checkout', (_e, p) => projectCreate.gitCheckout(p.dir, p.branch))
+  // Git 工作区
+  handle('git_status', (_e, p) => git.gitStatus(p.dir))
+  handle('git_is_repo_root', (_e, p) => git.gitIsRepoRoot(p.dir))
+  handle('git_diff', (_e, p) => git.gitDiff(p.dir, p.path, p.staged === true))
+  handle('git_add', (_e, p) => git.gitAdd(p.dir, p.paths))
+  handle('git_unstage', (_e, p) => git.gitUnstage(p.dir, p.paths ?? []))
+  handle('git_commit', (_e, p) => git.gitCommit(p.dir, String(p.message ?? '')))
+  handle('git_pull', (_e, p) => git.gitPull(p.dir))
+  handle('git_fetch', (_e, p) => git.gitFetch(p.dir))
+  handle('git_push', (_e, p) => git.gitPush(p.dir))
+  handle('git_discard', (_e, p) => git.gitDiscard(p.dir, p.paths ?? []))
+  handle('pick_parent_dir', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
       title: '选择父目录',
       properties: ['openDirectory'],
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
-  // AI（ai_chat_stream resolve 前持续推 ai-delta 事件；dispatchMode 选择 API 直连 / Claude CLI）
-  handle('ai_chat_stream', (p) =>
-    ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot))
-  handle('ai_test_connection', (p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode))
-  handle('ai_cancel', (p) => ai.aiCancel(p.requestId))
+  // AI（windowId 绑定到发起请求的窗口，用于事件定向路由）
+  handle('ai_chat_stream', (e, p) =>
+    ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot, e.sender.id))
+  handle('ai_test_connection', (_e, p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode))
+  handle('ai_cancel', (_e, p) => ai.aiCancel(p.requestId))
 
-  // 窗口
-  handle('pick_directory', async () => {
-    if (!mainWindow) return null
-    const result = await dialog.showOpenDialog(mainWindow, {
+  // 窗口（对话框绑定到调用方窗口）
+  handle('pick_directory', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
       title: '选择项目目录',
       properties: ['openDirectory'],
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
-  handle('set_window_title', (p) => {
-    mainWindow?.setTitle(String(p.title))
+  handle('set_window_title', (e, p) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    win?.setTitle(String(p.title))
   })
-  handle('open_external', (p) => {
+  handle('open_external', (_e, p) => {
     const url = String(p.url ?? '')
     let parsed: URL
     try {
@@ -181,23 +185,33 @@ function registerIpc(): void {
     }
     return shell.openExternal(url)
   })
-  handle('start_element_pick', (p) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      void inspect.startElementPick(mainWindow.webContents, String(p.url ?? ''))
+  handle('start_element_pick', (e, p) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (win && !win.isDestroyed()) {
+      void inspect.startElementPick(win.webContents, String(p.url ?? ''))
     }
   })
 }
 
+/** 窗口位置偏移：新窗口相对上一个偏移 40px */
+function nextWindowOffset(): { x: number; y: number } {
+  const wins = getAllWindows()
+  if (wins.length === 0) return { x: NaN, y: NaN }
+  const last = wins[wins.length - 1]
+  const bounds = last.getBounds()
+  return { x: bounds.x + 40, y: bounds.y + 40 }
+}
+
+/** 创建主窗口（渲染层 boot 时读取配置自动恢复上次项目） */
 function createWindow(): void {
   const state = loadWindowState()
-  // 窗口/任务栏图标：dev 用仓库内的 build/icon.png；打包后从 extraResources 取
-  // （不设置时 Windows 显示宿主二进制的图标——dev 下就是默认 Electron 图标）
+  const offset = nextWindowOffset()
   const iconPath = app.isPackaged
     ? path.join(process.resourcesPath, 'icon.png')
     : path.join(app.getAppPath(), 'build', 'icon.png')
   const win = new BrowserWindow({
-    x: state.x,
-    y: state.y,
+    x: Number.isFinite(offset.x) ? offset.x : state.x,
+    y: Number.isFinite(offset.y) ? offset.y : state.y,
     width: state.width,
     height: state.height,
     minWidth: 960,
@@ -205,7 +219,6 @@ function createWindow(): void {
     title: '轻驭',
     icon: iconPath,
     show: false,
-    // 与 index.html 内联底色一致：首帧绘制前窗口就是主题深色，避免 OS 级黑块/白闪
     backgroundColor: '#131315',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -215,14 +228,11 @@ function createWindow(): void {
     },
   })
 
-  if (state.maximized) win.maximize()
-  mainWindow = win
-  setMainWindow(win)
+  if (state.maximized && getAllWindows().length === 0) win.maximize()
+  registerWindow(win)
 
   win.once('ready-to-show', () => win.show())
-  // 预览控制台：捕获被预览页面的 console 输出（按 origin 过滤，见 consolebridge.ts）
   consolebridge.attachConsoleCapture(win)
-  // 外链统一走系统默认浏览器（target="_blank" 的 <a> 也经此处）：拒绝弹 Electron 新窗口
   win.webContents.setWindowOpenHandler(({ url }) => {
     try {
       const parsed = new URL(url)
@@ -235,7 +245,6 @@ function createWindow(): void {
     }
     return { action: 'allow' }
   })
-  // 无应用菜单后失去 Ctrl+Shift+I：F12 兜底切换开发者工具
   win.webContents.on('before-input-event', (_event, input) => {
     if (input.type === 'keyDown' && input.key === 'F12') {
       win.webContents.toggleDevTools()
@@ -243,26 +252,27 @@ function createWindow(): void {
   })
   win.on('close', () => saveWindowState(win))
   win.on('closed', () => {
-    mainWindow = null
-    setMainWindow(null)
+    removeWindow(win)
+    void watcher.stopWatchingForWindow(win.id)
   })
 
-  if (process.env['ELECTRON_RENDERER_URL']) {
-    void win.loadURL(process.env['ELECTRON_RENDERER_URL']) // electron-vite dev server
+  const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+  const fileUrl = path.join(__dirname, '../renderer/index.html')
+  if (rendererUrl) {
+    void win.loadURL(rendererUrl)
   } else {
-    void win.loadFile(path.join(__dirname, '../renderer/index.html'))
+    void win.loadFile(fileUrl)
   }
 }
 
 app.whenReady().then(() => {
-  // 先清理上次异常退出（强杀/崩溃）遗留的服务进程树，再开窗口——避免新服务撞上泄漏端口
+  // 清理上次异常退出遗留的服务进程树
   try {
     const killed = proc.cleanupOrphanServices()
     if (killed > 0) console.log(`[cleanup] 已清理 ${killed} 个上次遗留的服务进程`)
   } catch { /* 清理失败不阻塞启动 */ }
 
-  // 应用菜单：Windows/Linux 直接去掉（File/Edit/View/Window 对本应用无意义）；
-  // macOS 保留精简 role 菜单——其文本编辑快捷键（Cmd+C/V 等）依赖应用菜单存在
+  // 应用菜单
   if (process.platform === 'darwin') {
     Menu.setApplicationMenu(Menu.buildFromTemplate([
       { role: 'appMenu' },
@@ -280,7 +290,7 @@ app.whenReady().then(() => {
   })
 })
 
-// 与 Tauri 行为一致：关窗即退出（含 macOS）
+// 所有窗口关闭后退出
 app.on('window-all-closed', () => {
   app.quit()
 })

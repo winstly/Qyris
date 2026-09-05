@@ -27,7 +27,7 @@ export default function App() {
     void useAppStore.getState().boot()
   }, [])
 
-  // 主题应用：偏好 system/light/dark → 实际 data-theme；system 态跟随系统配色（白天浅、晚上深）
+  // 主题应用
   useEffect(() => {
     const mq = window.matchMedia('(prefers-color-scheme: dark)')
     const apply = () => {
@@ -56,12 +56,14 @@ export default function App() {
     if (!isDesktop) return
     let timer: number | null = null
     const unsub = useChatStore.subscribe((state, prev) => {
-      if (state.messages === prev.messages) return
       const { projectPath } = useAppStore.getState()
       if (!projectPath) return
+      const msgs = state.byProject[projectPath]?.messages
+      if (msgs === prev.byProject[projectPath]?.messages) return
       if (timer !== null) window.clearTimeout(timer)
       timer = window.setTimeout(() => {
-        const toSave = state.messages.map((m) =>
+        const cur = useChatStore.getState().byProject[projectPath]?.messages ?? []
+        const toSave = cur.map((m) =>
           m.pending ? { ...m, pending: false, content: m.content || '' } : m,
         )
         void api.saveSession(projectPath, toSave).catch(() => {})
@@ -77,12 +79,12 @@ export default function App() {
   useEffect(() => {
     if (!isDesktop) return
     const offs = [
-      onBuildOutput((p) => useBuildStore.getState().onOutput(p.name, p.stream, p.line)),
-      onBuildExit((p) => useBuildStore.getState().onExit(p.name, p.code)),
+      onBuildOutput((p) => useBuildStore.getState().onOutput(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.stream, p.line)),
+      onBuildExit((p) => useBuildStore.getState().onExit(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.code)),
       onAiDelta((p) => useChatStore.getState().appendDelta(p.requestId, p.delta)),
       onAiReasoning((p) => useChatStore.getState().appendReasoning(p.requestId, p.delta)),
       onCliToolEvent((p) => useChatStore.getState().handleCliToolEvent(p.requestId, p.id, p.name, p.phase, p.arguments)),
-      onFsChanged((p) => { scheduleFsRefresh(p.paths) }),
+      onFsChanged((p) => { scheduleFsRefresh(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.paths) }),
     ]
     return () => { offs.forEach((f) => f()) }
   }, [])
@@ -156,7 +158,9 @@ export default function App() {
 let fsTimer: number | null = null
 let pendingPaths: string[] = []
 
-function scheduleFsRefresh(paths: string[]) {
+function scheduleFsRefresh(projectRoot: string, paths: string[]) {
+  // 只处理当前工程的变更
+  if (projectRoot && projectRoot !== useAppStore.getState().projectPath) return
   pendingPaths.push(...paths.slice(0, 50))
   if (fsTimer !== null) return
   fsTimer = window.setTimeout(() => {

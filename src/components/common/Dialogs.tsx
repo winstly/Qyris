@@ -2,10 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { IconClose } from './icons'
 
-/**
- * 内联 prompt / confirm 对话框（支持可选复选框）。
- * 不用 window.confirm / alert —— Electron WebView 对原生弹窗支持不完整。
- */
+/** 内联 prompt / confirm 对话框（支持可选复选框） */
 export function Dialogs() {
   const dialog = useAppStore((s) => s.dialog)
   const resolveDialog = useAppStore((s) => s.resolveDialog)
@@ -34,34 +31,22 @@ export function Dialogs() {
 
   const isPrompt = dialog.kind === 'prompt'
   const isAlert = dialog.kind === 'alert'
+  const isChoice = dialog.kind === 'choice'
   const hasChecks = !!dialog.checks?.length
 
   const toggleCheck = (id: string) => setChecks((prev) => ({ ...prev, [id]: !prev[id] }))
 
   const confirm = () => {
-    if (hasChecks) {
-      if (dialog.holdOpen) {
-        // 异步任务模式：resolve 后保持打开并进入 loading，由调用方完成后 closeDialog()
-        setConfirming(true)
-        dialog.resolve({ confirmed: true, checks } as never)
-        return
-      }
-      // 直接调用 dialog 自带的 resolve，绕过 resolveDialog 的类型限制
-      dialog.resolve({ confirmed: true, checks } as never)
-      // 关闭对话框（不经过 resolveDialog 二次 resolve）
-      useAppStore.setState({ dialog: null })
-    } else {
-      resolveDialog(isPrompt ? value.trim() : true)
-    }
+    if (!hasChecks) { resolveDialog(isPrompt ? value.trim() : true); return }
+    if (dialog.holdOpen) { setConfirming(true); dialog.resolve({ confirmed: true, checks } as never); return }
+    dialog.resolve({ confirmed: true, checks } as never)
+    useAppStore.setState({ dialog: null })
   }
   const cancel = () => {
-    if (confirming) return // 执行中不可取消
-    if (hasChecks) {
-      dialog.resolve({ confirmed: false, checks } as never)
-      useAppStore.setState({ dialog: null })
-    } else {
-      resolveDialog(isPrompt ? null : false)
-    }
+    if (confirming) return
+    if (!hasChecks) { resolveDialog(isPrompt ? null : false); return }
+    dialog.resolve({ confirmed: false, checks } as never)
+    useAppStore.setState({ dialog: null })
   }
 
   return (
@@ -107,15 +92,36 @@ export function Dialogs() {
         )}
 
         <div className="modal__actions">
-          {!isAlert && <button className="btn btn--ghost" onClick={cancel} disabled={confirming}>取消</button>}
-          <button
-            className="btn btn--primary"
-            onClick={confirm}
-            autoFocus
-            disabled={(isPrompt && !value.trim()) || confirming}
-          >
-            {confirming ? (dialog.confirmingText ?? '处理中…') : isAlert ? '知道了' : '确定'}
-          </button>
+          {isChoice && dialog.choices ? (
+            <>
+              <button className="btn btn--ghost" onClick={cancel} disabled={confirming}>取消</button>
+              {dialog.choices.map((c) => (
+                <button
+                  key={c.id}
+                  className={`btn btn--${c.variant ?? 'primary'}`}
+                  onClick={() => {
+                    dialog.resolve(c.id as never)
+                    useAppStore.setState({ dialog: null })
+                  }}
+                  disabled={confirming}
+                >
+                  {c.label}
+                </button>
+              ))}
+            </>
+          ) : (
+            <>
+              {!isAlert && <button className="btn btn--ghost" onClick={cancel} disabled={confirming}>取消</button>}
+              <button
+                className="btn btn--primary"
+                onClick={confirm}
+                autoFocus
+                disabled={(isPrompt && !value.trim()) || confirming}
+              >
+                {confirming ? (dialog.confirmingText ?? '处理中…') : isAlert ? '知道了' : '确定'}
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

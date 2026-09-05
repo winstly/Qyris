@@ -70,7 +70,7 @@
   /* ----- 阴影 / 层级 ----- */
   --elev-flat: none;
   --elev-ring: 0 0 0 1px var(--edge);
-  --elev-raised: 0 12px 32px rgba(0, 0, 0, 0.45);
+  --elev-raised: 0 6px 20px rgba(0, 0, 0, 0.30), 0 1px 2px rgba(0, 0, 0, 0.20);
   --focus-ring: 0 0 0 3px rgba(124, 141, 164, 0.2);
 
   /* ----- 动效 ----- */
@@ -94,6 +94,17 @@
   --border-soft: var(--edge-hair);
   --accent-hover: color-mix(in oklab, var(--accent), white 14%);
   --accent-active: color-mix(in oklab, var(--accent), white 22%);
+
+  /* ----- 语法高亮：muted 暖调（去饱和，替代 One-Dark 外来饱和盘）----- */
+  --syn-comment: #6b6560;
+  --syn-keyword: #b291c4;
+  --syn-string: #90b57e;
+  --syn-number: #c99c6d;
+  --syn-type: #c6a96b;
+  --syn-function: #8fa8c4;
+  --syn-variable: #c48a8a;
+  --syn-operator: #7fb0ae;
+  --syn-punct: #8b857e;
 }
 
 :root {
@@ -107,6 +118,12 @@
   --stage-deploy: var(--warn);
   --stage-run: var(--success);
   --stage-error: var(--danger);
+
+  /* 流水线阶段 tint：活跃节点底色，统一收敛到 token（不再各处内联 color-mix）*/
+  --stage-build-dim: color-mix(in oklab, var(--stage-build), transparent 88%);
+  --stage-deploy-dim: color-mix(in oklab, var(--stage-deploy), transparent 88%);
+  --stage-run-dim: color-mix(in oklab, var(--stage-run), transparent 88%);
+  --stage-error-dim: color-mix(in oklab, var(--stage-error), transparent 88%);
 
   --bubble-user: color-mix(in oklab, var(--accent), var(--s2) 80%);
   --bubble-ai: color-mix(in oklab, var(--s3), var(--fg) 2%);
@@ -151,7 +168,7 @@
   --deepen: #8a857e;
   --lift: white;
 
-  --elev-raised: 0 12px 32px rgba(26, 24, 22, 0.1);
+  --elev-raised: 0 6px 20px rgba(26, 24, 22, 0.08), 0 1px 2px rgba(26, 24, 22, 0.06);
   --focus-ring: 0 0 0 3px rgba(90, 110, 132, 0.15);
 
   --lamp-glow: radial-gradient(ellipse 60% 40% at 15% 0%, rgba(90, 110, 132, 0.02), transparent 70%);
@@ -177,6 +194,17 @@
   --warn-dim: color-mix(in oklab, var(--warn), transparent 90%);
   --danger-dim: color-mix(in oklab, var(--danger), transparent 90%);
   --accent-dim: color-mix(in oklab, var(--accent), transparent 90%);
+
+  /* 语法高亮（浅色：同色相压暗，保证白底对比度）*/
+  --syn-comment: #8a8478;
+  --syn-keyword: #7a5a92;
+  --syn-string: #4c7a44;
+  --syn-number: #9a6b2e;
+  --syn-type: #8a6d2c;
+  --syn-function: #46618a;
+  --syn-variable: #a24f4f;
+  --syn-operator: #3d7a76;
+  --syn-punct: #8a8478;
 
   --font-ui: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
 }

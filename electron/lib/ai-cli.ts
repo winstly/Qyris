@@ -9,7 +9,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { Readable } from 'node:stream'
 import { homedir } from 'node:os'
-import { emitToRenderer } from './emitter'
+import { emitToRenderer, emitToWindow, registerRequestWindow, unregisterRequestWindow } from './emitter'
 import { getConfig, type AppConfig } from './config'
 import { readSkillFromDirs, scanSkillsDirs } from './skills'
 import { buildChildEnv, cancelRunOnce, detectCommand, registerOnceProc } from './proc'
@@ -18,9 +18,9 @@ import type { AiCompletion, AiToolCall } from './ai'
 
 type Json = Record<string, any>
 
-const CLI_MAX_TURNS = 60 // 防失控兜底（探索+装依赖+启动验证类任务轮次消耗大），不进设置
-const CLI_TIMEOUT_MS = 30 * 60_000 // 硬超时：冷启动装依赖可能很慢，期间靠心跳证明存活
-const CLI_HEARTBEAT_MS = 30_000 // 静默期心跳间隔
+const CLI_MAX_TURNS = 60
+const CLI_TIMEOUT_MS = 30 * 60_000
+const CLI_HEARTBEAT_MS = 30_000
 /** stream-json 必配：verbose 才有完整事件；include-partial-messages 才有逐 token 增量 */
 const CLI_ARGS_BASE = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages']
 /** 受限只读档白名单（--allowedTools，逗号拼接单参数） */
@@ -31,8 +31,7 @@ const NOT_INSTALLED_MSG = '未找到 claude 命令：请先安装 Claude Code CL
 /** CLI 解析名：默认 'claude'（Windows 经 cmd 自查 PATH → claude.cmd，unix 经 PATH 直启） */
 let cliCommand = 'claude'
 
-/** 仅供冒烟测试：注入假 CLI 绝对路径，屏蔽本机真实 claude（PATH 前插会被 buildChildEnv
- *  的注册表优先合并稀释——冒烟曾因此误调真 CLI。proc.ts parseProbedPath 同款测试接缝惯例） */
+/** 冒烟测试用：注入假 CLI 路径 */
 export function setCliCommandForTest(cmd: string): void {
   cliCommand = cmd
 }
@@ -109,8 +108,7 @@ export function serializeConversation(messages: unknown): string {
   return joined
 }
 
-/** 下一轮模型指令：回复末行 [[NEXT_MODEL: <模型名>]]，系统消费后从正文剥离。
- *  字符集含 ':'（网关限定名如 anthropic:claude-…），与 buildCliArgs 的净化白名单保持一致 */
+/** 下一轮模型指令：回复末行 [[NEXT_MODEL: <模型名>]] */
 const NEXT_MODEL_RE = /\[\[NEXT_MODEL:\s*([A-Za-z0-9._:/-]+)\s*\]\]\s*$/i
 
 /** 从回复尾部提取下一轮模型指令并剥离；无指令/不在末尾/含非法字符时原样返回 */
@@ -133,9 +131,7 @@ export function extractNextSkill(text: string): { text: string; ids: string[] } 
   return { text: text.slice(0, m.index).trimEnd(), ids }
 }
 
-/** 从回复尾部提取 [[START_COMMANDS: [{"name":"p","run":"x"}]]]（紧凑单行 JSON）并剥离。
- *  /i 容忍模型小写输出（与 NEXT_MODEL/NEXT_SKILL 一致）；/s 容忍美化换行的 JSON 数组。
- *  非法 JSON / 非数组 / 缺 name-run 的条目：指令行仍剥离，但清单不采纳 */
+/** 从回复尾部提取 [[START_COMMANDS: ...]] 并剥离 */
 export function extractStartCommands(text: string): { text: string; commands: { name: string; run: string }[] } {
   if (!text) return { text, commands: [] }
   const m = text.match(/\[\[START_COMMANDS:\s*(\[.*\])\s*\]\]\s*$/is)
@@ -226,7 +222,6 @@ export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Pro
   if (dirs.length === 0) return ''
   const excluded = new Set(excludeIds)
   const rows: string[] = []
-  // 多目录按序扫描去重统一走 skills.ts 入口（同名 id 首个命中者优先）
   for (const m of await scanSkillsDirs(dirs)) {
     if (excluded.has(m.id)) continue
     rows.push(`- ${m.id}：${m.name}${m.description ? `（${m.description}）` : ''}`)
@@ -256,8 +251,7 @@ export function buildCliSystemPrompt(projectRoot: string | null, modelMenu = '',
   return lines.join('\n')
 }
 
-/** CLI 启动参数（prompt 不进 argv：走 stdin，规避引号/换行/长度限制）。
- *  argv 全为无空格定长 flag —— Windows cmd.exe /C 拼接零引号问题 */
+/** CLI 启动参数（prompt 走 stdin） */
 export function buildCliArgs(model: string, permissionMode: 'auto' | 'readonly'): string[] {
   const args = [...CLI_ARGS_BASE, '--max-turns', String(CLI_MAX_TURNS)]
   const m = model.replace(/[^A-Za-z0-9._\-/:]/g, '')
@@ -272,19 +266,24 @@ export function buildCliArgs(model: string, permissionMode: 'auto' | 'readonly')
 export async function claudeCliChatStream(
   requestId: string, model: string, messages: unknown,
   projectRoot: string | null, permissionMode: 'auto' | 'readonly',
-  /** 调用方已读的 config（ai.ts dispatch 层读一次透传，避免每轮重复读盘）；缺省自读 */
+  /** 调用方透传的 config */
   cfgIn?: AppConfig | null,
+  /** 发起请求的窗口 ID（多窗口事件定向路由） */
+  windowId: number | null = null,
 ): Promise<AiCompletion> {
+  if (windowId != null) registerRequestWindow(requestId, windowId)
+  const emit = (event: string, payload: unknown): void => {
+    if (windowId != null) emitToWindow(windowId, event, payload)
+    else emitToRenderer(event, payload)
+  }
   if (cliCommand === 'claude' && detectCommand('claude') === false) {
     throw new Error(NOT_INSTALLED_MSG)
   }
 
-  // config 单次读取：模型菜单 + Skill 目录同源（getConfig 内部自兜底，永不 reject）
   const cfg = cfgIn ?? await getConfig().catch(() => null)
   const skillDirs = cfg?.skillsDirs ?? []
   const modelMenu = buildModelMenu(cfg)
   const referencedIds = extractSkillIds(messages)
-  // 两块独立磁盘 I/O（读取引用全文 / 扫描目录索引），并行取
   const [skillBlock, skillIndex] = await Promise.all([
     resolveSkillBlock(skillDirs, referencedIds),
     buildSkillIndex(skillDirs, referencedIds),
@@ -300,7 +299,7 @@ export async function claudeCliChatStream(
         cwd: projectRoot ?? homedir(),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,
-        detached: !isWin, // unix 进程组，killTree 整组强杀
+        detached: !isWin,
         env: { ...buildChildEnv(), NO_COLOR: '1', FORCE_COLOR: '0' },
       })
     } catch (e) {
@@ -309,17 +308,12 @@ export async function claudeCliChatStream(
     }
     const unregister = registerOnceProc(requestId, child)
 
-    // prompt 走 stdin；CLI 早退时 write 会 EPIPE，静默（退出收口统一报错）
     child.stdin?.on('error', () => {})
     child.stdin?.write(prompt)
     child.stdin?.end()
 
     let content = '' // text_delta 累积（result 缺席时的回退）
     let reasoning = '' // thinking 增量（工具活动走 tool_use 流式组装，不进 reasoning）
-    // tool_use 流式组装（与 HTTP openaiChatStream 的 delta.tool_calls 聚合同构）：
-    //   content_block_start(tool_use) → 新建 AiToolCall
-    //   content_block_delta(input_json_delta) → arguments 累积
-    //   content_block_stop → 推入 toolCalls 数组
     const toolCalls: AiToolCall[] = []
     let currentTool: AiToolCall | null = null
     let finalText: string | null = null // result 事件的权威全文
@@ -333,8 +327,6 @@ export async function claudeCliChatStream(
       cancelRunOnce(requestId)
     }, CLI_TIMEOUT_MS)
 
-    // 心跳：CLI 执行长命令（npm install 等）期间零事件，thinking 静默得像卡死——
-    // 定期报存活 + 最近活动，给用户「还在跑」的硬证据
     const startedAt = Date.now()
     let lastActiveAt = startedAt
     let lastActivity = ''
@@ -349,7 +341,7 @@ export async function claudeCliChatStream(
       const line =
         `（运行中 · 累计 ${Math.floor(total / 60)}m${total % 60}s · 距上次活动 ${idle}s` +
         `${lastActivity ? ` · 最近：${lastActivity}` : ''}）`
-      emitToRenderer('ai-reasoning', { requestId, delta: `\n${line}\n` })
+      emit('ai-reasoning', { requestId, delta: `\n${line}\n` })
     }, CLI_HEARTBEAT_MS)
 
     const settle = (fn: () => void): void => {
@@ -358,6 +350,7 @@ export async function claudeCliChatStream(
       clearTimeout(timer)
       clearInterval(heartbeat)
       unregister()
+      unregisterRequestWindow(requestId)
       fn()
     }
 
@@ -385,25 +378,23 @@ export async function claudeCliChatStream(
         if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
           touch('生成正文')
           content += delta.text
-          emitToRenderer('ai-delta', { requestId, delta: delta.text })
+          emit('ai-delta', { requestId, delta: delta.text })
         } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking) {
           touch('思考中')
           reasoning += delta.thinking
-          emitToRenderer('ai-reasoning', { requestId, delta: delta.thinking })
+          emit('ai-reasoning', { requestId, delta: delta.thinking })
         } else if (evt?.type === 'content_block_start') {
           const block = evt.content_block as Json | undefined
           if (block?.type === 'tool_use') {
             currentTool = { id: String(block.id ?? `cli-${toolCalls.length}`), name: String(block.name ?? 'tool'), arguments: '' }
             touch(`[cli] ${currentTool.name}`)
-            // 实时通知渲染层：工具开始（渲染层创建 ToolCallCard，与 HTTP 流式体验一致）
-            emitToRenderer('cli-tool-event', { requestId, id: currentTool.id, name: currentTool.name, phase: 'start', arguments: '' })
+            emit('cli-tool-event', { requestId, id: currentTool.id, name: currentTool.name, phase: 'start', arguments: '' })
           }
         } else if (delta?.type === 'input_json_delta' && currentTool && typeof delta.partial_json === 'string') {
           currentTool.arguments += delta.partial_json
         } else if (evt?.type === 'content_block_stop' && currentTool) {
           toolCalls.push(currentTool)
-          // 实时通知渲染层：工具完成（渲染层更新 ToolCallCard 状态为 done）
-          emitToRenderer('cli-tool-event', { requestId, id: currentTool.id, name: currentTool.name, phase: 'stop', arguments: currentTool.arguments })
+          emit('cli-tool-event', { requestId, id: currentTool.id, name: currentTool.name, phase: 'stop', arguments: currentTool.arguments })
           currentTool = null
         }
         return
@@ -422,16 +413,14 @@ export async function claudeCliChatStream(
           if (meta.length) {
             const metaLine = `\n（CLI 完成：${meta.join(' · ')}）\n`
             reasoning += metaLine
-            emitToRenderer('ai-reasoning', { requestId, delta: metaLine })
+            emit('ai-reasoning', { requestId, delta: metaLine })
           }
         } else if (json.subtype === 'error_max_turns') {
           finalText = typeof json.result === 'string' && json.result ? json.result : null
           finishReason = 'max_turns'
-          // 截断必须让用户看见：否则达到轮数上限的半成品收口与正常完成无异，
-          // AI 编译等任务会静默丢失产出
           const note = '\n（CLI 已达到 60 轮上限，任务可能未完成——请检查中间结果，必要时拆分任务后继续）\n'
           reasoning += note
-          emitToRenderer('ai-reasoning', { requestId, delta: note })
+          emit('ai-reasoning', { requestId, delta: note })
         } else {
           finalText = null
           stderrTail = `${stderrTail}\n${typeof json.result === 'string' ? json.result : 'CLI 报告执行失败'}`.slice(-2000)
@@ -452,13 +441,9 @@ export async function claudeCliChatStream(
       settle(() => reject(new Error(`Claude CLI 启动失败：${errorMessage(e)}`)))
     })
 
-    // 收口必须等 'close'（stdio 冲刷完毕）而非 'exit'：否则末尾 NDJSON 行——
-    // 尤其是权威 result 事件——可能还没被 readline 送达就 resolve/reject，
-    // 导致指令行丢失、finishReason/费用缺失、非零退出时 stderr 尾巴为空
+    // 等 close 而非 exit：确保 stdio 冲刷完毕
     child.on('close', (code, signal) => {
       settle(() => {
-        // 剥离末尾指令行（[[NEXT_MODEL]] / [[NEXT_SKILL]]，任意次序、最多消化 4 行）：
-        // 正文保持干净，选择经渲染层白名单校验后用于下一轮
         const finalizeContent = (): {
           content: string | null
           nextModel: string | null
@@ -488,13 +473,10 @@ export async function claudeCliChatStream(
           if (notes.length > 0) {
             const note = `\n（${notes.join('；')}）\n`
             reasoning += note
-            emitToRenderer('ai-reasoning', { requestId, delta: note })
+            emit('ai-reasoning', { requestId, delta: note })
           }
           return { content: work.length > 0 ? work : null, nextModel, nextSkill, startCommands }
         }
-        // 拿到权威结果（或轮数上限的部分成果）→ 正常返回
-        // CLI 工具活动已通过 cli-tool-event 实时写入消息（不进 completion.toolCalls），
-        // 这样 runAgentLoop 看到 toolCalls=[] 就不会触发 executeTool
         if (finalText !== null || finishReason === 'max_turns') {
           const { content: clean, nextModel, nextSkill, startCommands } = finalizeContent()
           resolve({
@@ -508,9 +490,7 @@ export async function claudeCliChatStream(
           })
           return
         }
-        // 30 分钟硬超时（interrupted）：如实报超时中止，不能伪装成「已取消」——
-        // 用户没点停止，报「已取消」会让其误以为是自己误触；文案须避开渲染层
-        // isRetryableError 的关键词（超时/网络等），否则会被当网络错误自动重试
+        // 超时中止（文案避开 isRetryableError 关键词防误重试）
         if (interrupted) {
           reject(new Error('Claude CLI 连续运行超过 30 分钟，已被强制中止（任务过长请拆分步骤后重试）'))
           return
@@ -539,8 +519,7 @@ export async function claudeCliChatStream(
   })
 }
 
-/** stderr 转译。文案纪律：非瞬态错误必须避开「无法连接/网络/超时」等词——
- *  渲染层 isRetryableError 按关键词重试 10×15s，错误文案是被该正则消费的接口 */
+/** stderr 转译 */
 function translateCliError(stderrTail: string): string | null {
   if (/not logged in|please (run )?\/login|Invalid API key|authentication|unauthorized/i.test(stderrTail)) {
     return 'Claude CLI 未登录或凭据失效：请在终端运行 claude 完成登录（或设置 ANTHROPIC_API_KEY 环境变量）'
@@ -556,9 +535,7 @@ function translateCliError(stderrTail: string): string | null {
 
 // ---------------- 连接测试（二进制 + 版本 + 登录态） ----------------
 
-/** 异步执行一次 CLI 探测命令。不用 spawnSync：它在 Electron 主进程同步阻塞事件循环，
- *  claude 冷启动/挂起时整个应用（全部 IPC 与窗口）随之卡死；经 cliCommand 走同一测试接缝
- *  （与 claudeCliChatStream 一致，冒烟注入的假 CLI 路径在探测路径同样生效） */
+/** 异步执行 CLI 探测命令 */
 async function runCli(args: string[], timeoutMs = 10_000): Promise<{ status: number | null; stdout: string; stderr: string; error: string | null }> {
   return new Promise((resolve) => {
     const isWin = process.platform === 'win32'
@@ -606,7 +583,6 @@ export async function testCliConnection(): Promise<string> {
 
   const auth = await runCli(['auth', 'status'])
   if (auth.status === 0) return `Claude CLI 就绪 · ${versionText} · 已登录`
-  // 老版 CLI 无 auth 子命令：降级为「登录状态未知」，不误报未登录
   const combined = `${auth.stderr}\n${auth.stdout}`
   if (/unknown|unrecognized|invalid/i.test(combined)) {
     return `Claude CLI 已安装 · ${versionText}（登录状态未知，直接对话验证）`

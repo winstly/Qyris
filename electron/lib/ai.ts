@@ -41,13 +41,12 @@ export async function aiChatStream(
   requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown,
   dispatchMode: string = 'api',
   projectRoot: string | null = null,
+  windowId: number | null = null,
 ): Promise<AiCompletion> {
   if (dispatchMode === 'claude-cli') {
-    // config 只读一次：权限档位 + 模型菜单 + Skill 目录同源透传（adapter 内不再重复读盘）
     const cfg = await getConfig()
-    return claudeCliChatStream(requestId, model, messages, projectRoot, cfg.aiCliPermission === 'readonly' ? 'readonly' : 'auto', cfg)
+    return claudeCliChatStream(requestId, model, messages, projectRoot, cfg.aiCliPermission === 'readonly' ? 'readonly' : 'auto', cfg, windowId)
   }
-  // Key 检查必须在 CLI 分发之后：CLI 模式不依赖 API Key，先查会把它卡死
   const key = await getSecretInternal(SECRET_ACCOUNT)
   if (!key) throw new Error('尚未配置 API Key，请打开设置面板填写（将存入系统 keychain）')
   if (provider === 'anthropic') {

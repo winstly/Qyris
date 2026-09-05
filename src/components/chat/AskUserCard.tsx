@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useChatStore } from '@/store/useChatStore'
+import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import type { ToolCall } from '@/types'
 import { IconCheck } from '@/components/common/icons'
 
@@ -8,10 +8,8 @@ import { IconCheck } from '@/components/common/icons'
  * 回答会作为工具结果回传给模型继续对话。
  */
 export function AskUserCard({ call }: { call: ToolCall }) {
-  const pendingAsk = useChatStore((s) => s.pendingAsk)
-  const answers = useChatStore((s) => s.answers)
+  const { pendingAsk, answers, status } = useChatStore(selectCurrentChat)
   const answerAsk = useChatStore((s) => s.answerAsk)
-  const status = useChatStore((s) => s.status)
 
   const answered = answers[call.id]
   const isActive = pendingAsk?.id === call.id && status === 'awaiting-user'

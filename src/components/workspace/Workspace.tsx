@@ -1,29 +1,29 @@
-import { useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { PreviewTab } from './PreviewTab'
 import { FilesTab } from './FilesTab'
-import { HistoryTab } from './HistoryTab'
+import { ProjectsTab } from './ProjectsTab'
 import { CreateProjectDialog } from './CreateProjectDialog'
-import { IconEye, IconFolder, IconFile, IconClock, IconPlus } from '@/components/common/icons'
+import { ProjectSwitcher } from './ProjectSwitcher'
+import { IconEye, IconFolder, IconFile } from '@/components/common/icons'
 
-/** 左侧工作区：「预览 / 文件 / 历史」三个 Tab。窗格常驻挂载（切换只做过渡动画，
- *  避免 iframe 与编辑器状态因重挂载而丢失）。 */
+/** 工作区：「项目 / 文件 / 预览」三个 Tab */
 export function Workspace() {
   const activeTab = useAppStore((s) => s.activeTab)
   const setTab = useAppStore((s) => s.setTab)
-  const openProjectDialog = useAppStore((s) => s.openProjectDialog)
-  const [createOpen, setCreateOpen] = useState(false)
+  const projectPath = useAppStore((s) => s.projectPath)
+  const createProjectOpen = useAppStore((s) => s.createProjectOpen)
+  const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
 
   return (
     <div className="workspace">
       <div className="workspace__tabs" role="tablist" aria-label="工作区视图">
         <button
           role="tab"
-          aria-selected={activeTab === 'preview'}
-          className={`workspace__tab ${activeTab === 'preview' ? 'workspace__tab--active' : ''}`}
-          onClick={() => setTab('preview')}
+          aria-selected={activeTab === 'projects'}
+          className={`workspace__tab ${activeTab === 'projects' ? 'workspace__tab--active' : ''}`}
+          onClick={() => setTab('projects')}
         >
-          <IconEye size={13} /> 预览
+          <IconFolder size={13} /> 项目
         </button>
         <button
           role="tab"
@@ -35,34 +35,28 @@ export function Workspace() {
         </button>
         <button
           role="tab"
-          aria-selected={activeTab === 'history'}
-          className={`workspace__tab ${activeTab === 'history' ? 'workspace__tab--active' : ''}`}
-          onClick={() => setTab('history')}
+          aria-selected={activeTab === 'preview'}
+          className={`workspace__tab ${activeTab === 'preview' ? 'workspace__tab--active' : ''}`}
+          onClick={() => setTab('preview')}
         >
-          <IconClock size={13} /> 历史
+          <IconEye size={13} /> 预览
         </button>
 
         <div className="workspace__spacer" />
-
-        <button className="btn btn--ghost btn--sm" onClick={() => setCreateOpen(true)}>
-          <IconPlus size={13} /> 创建项目
-        </button>
-        <button className="btn btn--ghost btn--sm" onClick={() => void openProjectDialog()}>
-          <IconFolder size={13} /> 打开项目
-        </button>
+        <ProjectSwitcher />
       </div>
 
-      <CreateProjectDialog open={createOpen} onClose={() => setCreateOpen(false)} />
+      <CreateProjectDialog open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
 
-      <div className="workspace__panes">
-        <div className={`pane ${activeTab === 'preview' ? 'pane--active' : ''}`}>
-          <PreviewTab />
+      <div className="workspace__panes" key={projectPath ?? 'none'}>
+        <div className={`pane ${activeTab === 'projects' ? 'pane--active' : ''}`}>
+          <ProjectsTab />
         </div>
         <div className={`pane ${activeTab === 'files' ? 'pane--active' : ''}`}>
           <FilesTab />
         </div>
-        <div className={`pane ${activeTab === 'history' ? 'pane--active' : ''}`}>
-          <HistoryTab />
+        <div className={`pane ${activeTab === 'preview' ? 'pane--active' : ''}`}>
+          <PreviewTab />
         </div>
       </div>
     </div>

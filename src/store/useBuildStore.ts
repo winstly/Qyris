@@ -3,6 +3,9 @@
  * idle → building(编译中) → deploying(部署中) → running(运行中) 状态。
  * 阶段由各槽的进程输出启发式解析；退出码非 0 或编译期致命 stderr → error(异常) + 错误详情。
  *
+ * 多工程常驻：状态按工程（projectRoot）隔离。build-output/build-exit 事件携带 projectRoot，
+ * 后台工程（非当前）的输出也照常写入对应切片，切回时状态已是最新。
+ *
  * TODO(适配): 以下正则是针对 vite / next / webpack / create-react-app 的常见输出总结的，
  * 换其他构建工具时请在 READY_HINTS / FATAL_HINTS 中补充关键词。
  */
@@ -77,147 +80,225 @@ function normName(name: string): string {
   return name.trim().toLowerCase() || 'default'
 }
 
-interface BuildState {
+/** 单个工程的构建切片 */
+interface BuildSlice {
   slots: Record<string, SlotState>
   /** 插槽顺序（保持插入序，供列表渲染） */
   slotOrder: string[]
   /** 预览面板正在查看的槽 */
   activeSlot: string | null
+}
+
+function emptyBuildSlice(): BuildSlice {
+  return { slots: {}, slotOrder: [], activeSlot: null }
+}
+
+function patchSliceSlot(slice: BuildSlice, key: string, patch: Partial<SlotState>): Record<string, SlotState> {
+  const cur = slice.slots[key]
+  if (!cur) return slice.slots
+  return { ...slice.slots, [key]: { ...cur, ...patch } }
+}
+
+interface BuildState {
+  /** 当前工程（useAppStore.projectPath 的镜像，供选择器用） */
+  current: string | null
+  /** 工程路径 → 构建切片 */
+  byProject: Record<string, BuildSlice>
 
   selectSlot: (name: string) => void
   selectUrl: (name: string, u: string) => void
-  /** 启动（或同名重启）一个服务槽；命令回填到槽状态 */
-  start: (name: string, command: string) => Promise<void>
-  stop: (name: string) => Promise<void>
-  stopAll: () => Promise<void>
-  /** 打开项目 / 切换项目时清空全部槽（主进程侧已全停） */
+  /** 启动（或同名重启）一个服务槽；projectPath 缺省取当前工程（子 agent 必须显式传入所属工程） */
+  start: (name: string, command: string, projectPath?: string) => Promise<void>
+  stop: (name: string, projectPath?: string) => Promise<void>
+  stopAll: (projectPath?: string) => Promise<void>
+  /** 打开项目 / 切换项目时清空当前工程全部槽（主进程侧已全停） */
   reset: () => void
-  onOutput: (name: string, stream: 'stdout' | 'stderr', line: string) => void
-  onExit: (name: string, code: number) => void
-}
-
-function patchSlot(s: BuildState, key: string, patch: Partial<SlotState>): Record<string, SlotState> {
-  const cur = s.slots[key]
-  if (!cur) return s.slots
-  return { ...s.slots, [key]: { ...cur, ...patch } }
+  /** 确保某工程的切片存在（不改变 current；打开工程时初始化） */
+  ensureProject: (path: string) => void
+  /** 设置当前工程（切换工程时由 useAppStore 调用） */
+  setCurrent: (path: string) => void
+  /** 关闭工程时移除其切片 */
+  closeProject: (path: string) => void
+  onOutput: (projectRoot: string, name: string, stream: 'stdout' | 'stderr', line: string) => void
+  onExit: (projectRoot: string, name: string, code: number) => void
+  /** 当前工程的槽表（供 tools.ts 等 getState 直读） */
+  currentSlots: () => Record<string, SlotState>
 }
 
 export const useBuildStore = create<BuildState>()((set, get) => ({
-  slots: {},
-  slotOrder: [],
-  activeSlot: null,
+  current: null,
+  byProject: {},
 
-  selectSlot: (name) => set({ activeSlot: normName(name) }),
-
-  selectUrl: (name, u) =>
+  selectSlot: (name) => {
+    const cur = get().current
+    if (!cur) return
     set((s) => {
-      const key = normName(name)
-      return { slots: patchSlot(s, key, { detectedUrl: u }) }
-    }),
+      const slice = s.byProject[cur]
+      if (!slice) return s
+      return { byProject: { ...s.byProject, [cur]: { ...slice, activeSlot: normName(name) } } }
+    })
+  },
 
-  start: async (name, command) => {
-    const { projectPath } = useAppStore.getState()
-    if (!projectPath) return
+  selectUrl: (name, u) => {
+    const cur = get().current
+    if (!cur) return
+    set((s) => {
+      const slice = s.byProject[cur]
+      if (!slice) return s
+      return { byProject: { ...s.byProject, [cur]: { ...slice, slots: patchSliceSlot(slice, normName(name), { detectedUrl: u }) } } }
+    })
+  },
+
+  start: async (name, command, projectPath) => {
+    const p = projectPath ?? useAppStore.getState().projectPath
+    if (!p) return
     const cmd = command.trim()
     if (!cmd) return
     const key = normName(name)
-    set((s) => ({
-      slots: { ...s.slots, [key]: newSlot(key, cmd) },
-      slotOrder: s.slotOrder.includes(key) ? s.slotOrder : [...s.slotOrder, key],
-      activeSlot: key,
-    }))
+    get().ensureProject(p)
+    set((s) => {
+      const slice = s.byProject[p]
+      return {
+        byProject: {
+          ...s.byProject,
+          [p]: {
+            ...slice,
+            slots: { ...slice.slots, [key]: newSlot(key, cmd) },
+            slotOrder: slice.slotOrder.includes(key) ? slice.slotOrder : [...slice.slotOrder, key],
+            activeSlot: key,
+          },
+        },
+      }
+    })
     try {
-      await api.runProject(projectPath, key, cmd)
+      await api.runProject(p, key, cmd)
     } catch (e) {
-      set((s) => ({
-        slots: patchSlot(s, key, { phase: 'error', errorText: String(e), processAlive: false }),
-      }))
+      set((s) => {
+        const slice = s.byProject[p]
+        if (!slice) return s
+        return { byProject: { ...s.byProject, [p]: { ...slice, slots: patchSliceSlot(slice, key, { phase: 'error', errorText: String(e), processAlive: false }) } } }
+      })
     }
   },
 
-  stop: async (name) => {
+  stop: async (name, projectPath) => {
+    const p = projectPath ?? get().current ?? useAppStore.getState().projectPath
+    if (!p) return
     const key = normName(name)
     try {
-      await api.stopProject(key)
-    } catch { /* 进程可能已退出 */ }
-    set((s) => ({ slots: patchSlot(s, key, { phase: 'idle', processAlive: false }) }))
-  },
-
-  stopAll: async () => {
-    try {
-      await api.stopProject()
+      await api.stopProject(p, key)
     } catch { /* 进程可能已退出 */ }
     set((s) => {
+      const slice = s.byProject[p]
+      if (!slice) return s
+      return { byProject: { ...s.byProject, [p]: { ...slice, slots: patchSliceSlot(slice, key, { phase: 'idle', processAlive: false }) } } }
+    })
+  },
+
+  stopAll: async (projectPath) => {
+    const p = projectPath ?? get().current ?? useAppStore.getState().projectPath
+    if (!p) return
+    try {
+      await api.stopProject(p)
+    } catch { /* 进程可能已退出 */ }
+    set((s) => {
+      const slice = s.byProject[p]
+      if (!slice) return s
       const slots: Record<string, SlotState> = {}
-      for (const [key, slot] of Object.entries(s.slots)) {
+      for (const [key, slot] of Object.entries(slice.slots)) {
         slots[key] = { ...slot, phase: 'idle', processAlive: false }
       }
-      return { slots }
+      return { byProject: { ...s.byProject, [p]: { ...slice, slots } } }
     })
   },
 
-  reset: () => set({ slots: {}, slotOrder: [], activeSlot: null }),
+  reset: () => {
+    const cur = get().current
+    if (!cur) return
+    set((s) => ({ byProject: { ...s.byProject, [cur]: emptyBuildSlice() } }))
+  },
 
-  // 事件兜底：slot 尚不存在（事件先于 start resolve 到达的极端时序）时创建再追加
-  onOutput: (name, stream, line) => {
-    const key = normName(name)
-    const state = get()
-    if (!state.slots[key]) {
-      set((s) => ({
-        slots: { ...s.slots, [key]: { ...newSlot(key, ''), processAlive: true } },
-        slotOrder: s.slotOrder.includes(key) ? s.slotOrder : [...s.slotOrder, key],
-      }))
-    }
-    const cur = get().slots[key]
-    const logs = [...cur.logs, { stream, line }]
-    if (logs.length > MAX_LOG_LINES) logs.splice(0, logs.length - MAX_LOG_LINES)
+  ensureProject: (path) => {
+    if (get().byProject[path]) return
+    set((s) => ({ byProject: { ...s.byProject, [path]: emptyBuildSlice() } }))
+  },
 
-    let patch: Partial<SlotState> = { logs }
-    const phase = cur.phase
-    // 首次解析出可预览地址时，是否自动选中本槽（默认把跑起来的前端页面直接展示出来）
-    let autoSelect: string | null = null
+  setCurrent: (path) => set({ current: path }),
 
-    // 致命 stderr（编译期）→ 异常态
-    if ((phase === 'building' || phase === 'deploying') && stream === 'stderr' && FATAL_HINTS.some((re) => re.test(line))) {
-      const tail = logs.filter((l) => l.stream === 'stderr').slice(-20).map((l) => l.line).join('\n')
-      patch = { ...patch, phase: 'error', errorText: tail || line }
-    } else {
-      // URL 提取不受阶段限制：running 中后续输出地址也能补上（如 vite 先 ready 再印 Local）
-      const m = line.match(URL_RE)
-      const norm = m ? normalizeUrl(m[0]) : null
-      if (norm) {
-        const urls = cur.detectedUrls.includes(norm) ? cur.detectedUrls : [...cur.detectedUrls, norm]
-        patch = {
-          ...patch,
-          detectedUrls: urls,
-          detectedUrl: cur.detectedUrl ?? norm,
-          phase: 'running',
-        }
-        // 当前选中槽不可预览（空 / 无地址 / 未 running）时，自动切到这个刚跑起来、有地址的服务
-        const activeKey = get().activeSlot
-        const activeSt = activeKey ? get().slots[activeKey] : undefined
-        if (!(activeSt && activeSt.phase === 'running' && activeSt.detectedUrl)) {
-          autoSelect = key
-        }
-      } else if (phase === 'building' || phase === 'deploying') {
-        // 启动成功信号（可能无 URL，如 Java 后端）→ 运行中
-        if (RUN_HINTS.some((re) => re.test(line))) {
-          patch = { ...patch, phase: 'running' }
-        } else if (phase === 'building' && DEPLOY_HINTS.some((re) => re.test(line))) {
-          patch = { ...patch, phase: 'deploying' }
-        }
+  closeProject: (path) => {
+    set((s) => {
+      const byProject = { ...s.byProject }
+      delete byProject[path]
+      return { byProject, current: s.current === path ? null : s.current }
+    })
+  },
+
+  // slot 不存在时自动创建
+  onOutput: (projectRoot, name, stream, line) => {
+    const lineUrl = line.match(URL_RE)
+    const normUrl = lineUrl ? normalizeUrl(lineUrl[0]) : null
+    if (normUrl) {
+      const conflict = findUrlConflict(get().byProject, projectRoot, normUrl)
+      if (conflict) {
+        set((s) => {
+          const slice = s.byProject[projectRoot]
+          if (!slice) return s
+          return { byProject: { ...s.byProject, [projectRoot]: { ...slice, slots: patchSliceSlot(slice, normName(name), { phase: 'error', errorText: `端口冲突：地址 ${normUrl} 已被项目「${conflict.project}」的服务「${conflict.slot}」占用。请修改本项目端口配置后重试。` }) } } }
+        })
+        return
       }
     }
+
+    const key = normName(name)
     set((s) => {
-      const slots = patchSlot(s, key, patch)
-      return autoSelect ? { slots, activeSlot: autoSelect } : { slots }
+      const slice = s.byProject[projectRoot] ?? emptyBuildSlice()
+      let slots = slice.slots
+      let slotOrder = slice.slotOrder
+      if (!slots[key]) {
+        slots = { ...slots, [key]: { ...newSlot(key, ''), processAlive: true } }
+        slotOrder = slotOrder.includes(key) ? slotOrder : [...slotOrder, key]
+      }
+      const cur = slots[key]
+      const logs = [...cur.logs, { stream, line }]
+      if (logs.length > MAX_LOG_LINES) logs.splice(0, logs.length - MAX_LOG_LINES)
+
+      let patch: Partial<SlotState> = {}
+      let autoSelect: string | undefined
+      const phase = cur.phase
+
+      if ((phase === 'building' || phase === 'deploying') && stream === 'stderr' && FATAL_HINTS.some((re) => re.test(line))) {
+        const tail = logs.filter((l) => l.stream === 'stderr').slice(-20).map((l) => l.line).join('\n')
+        patch = { phase: 'error', errorText: tail || line }
+      } else {
+        const m = line.match(URL_RE)
+        const norm = m ? normalizeUrl(m[0]) : null
+        if (norm) {
+          const urls = cur.detectedUrls.includes(norm) ? cur.detectedUrls : [...cur.detectedUrls, norm]
+          patch = { detectedUrls: urls, detectedUrl: cur.detectedUrl ?? norm, phase: 'running' }
+          const activeSt = slice.activeSlot ? slots[slice.activeSlot] : undefined
+          if (!(activeSt && activeSt.phase === 'running' && activeSt.detectedUrl)) autoSelect = key
+        } else if (phase === 'building' || phase === 'deploying') {
+          if (RUN_HINTS.some((re) => re.test(line))) patch = { phase: 'running' }
+          else if (phase === 'building' && DEPLOY_HINTS.some((re) => re.test(line))) patch = { phase: 'deploying' }
+        }
+      }
+
+      const patchedSlots = patchSliceSlot({ ...slice, slots }, key, { logs, ...patch })
+      return {
+        byProject: {
+          ...s.byProject,
+          [projectRoot]: { ...slice, slots: patchedSlots, slotOrder, activeSlot: autoSelect ?? slice.activeSlot },
+        },
+      }
     })
   },
 
-  onExit: (name, code) => {
+  onExit: (projectRoot, name, code) => {
     const key = normName(name)
     set((s) => {
-      const cur = s.slots[key]
+      const slice = s.byProject[projectRoot]
+      if (!slice) return s
+      const cur = slice.slots[key]
       if (!cur) return s
       const patch: Partial<SlotState> = { processAlive: false, lastExitCode: code }
       if (cur.phase !== 'idle') {
@@ -229,12 +310,42 @@ export const useBuildStore = create<BuildState>()((set, get) => ({
           patch.phase = 'idle'
         }
       }
-      return { slots: patchSlot(s, key, patch) }
+      return { byProject: { ...s.byProject, [projectRoot]: { ...slice, slots: patchSliceSlot(slice, key, patch) } } }
     })
+  },
+
+  currentSlots: () => {
+    const cur = get().current
+    return cur ? (get().byProject[cur]?.slots ?? {}) : {}
   },
 }))
 
 /** 便捷选择器：取某个槽（不存在返回 undefined） */
 export function selectSlotState(s: BuildState, name: string | null): SlotState | undefined {
-  return name ? s.slots[normName(name)] : undefined
+  const slice = s.current ? s.byProject[s.current] : undefined
+  if (!slice || !name) return undefined
+  return slice.slots[normName(name)]
+}
+
+/** 稳定空切片：选择器兜底，避免每次返回新对象引发重渲染 */
+const EMPTY_BUILD: BuildSlice = { slots: {}, slotOrder: [], activeSlot: null }
+
+/** 取当前工程的构建切片 */
+export function selectCurrentBuild(s: BuildState): BuildSlice {
+  return (s.current && s.byProject[s.current]) || EMPTY_BUILD
+}
+
+/** 跨项目 URL 冲突检测 */
+function findUrlConflict(
+  byProject: Record<string, BuildSlice>, selfProject: string, url: string,
+): { project: string; slot: string } | null {
+  for (const [project, slice] of Object.entries(byProject)) {
+    if (project === selfProject) continue
+    for (const [key, slot] of Object.entries(slice.slots)) {
+      if (slot.processAlive && (slot.detectedUrl === url || slot.detectedUrls.includes(url))) {
+        return { project: project.split(/[\\/]/).pop() ?? project, slot: key }
+      }
+    }
+  }
+  return null
 }

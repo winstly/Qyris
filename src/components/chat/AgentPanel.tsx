@@ -5,7 +5,7 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ToolCall } from '@/types'
-import { useAgentStore, type AgentThread } from '@/store/useAgentStore'
+import { useAgentStore, selectCurrentAgent, type AgentThread } from '@/store/useAgentStore'
 import { fmtTok } from '@/utils/tokens'
 import { IconAlert, IconBranch, IconCheck } from '@/components/common/icons'
 
@@ -13,9 +13,7 @@ export const AGENT_STATUS_LABEL: Record<string, string> = {
   pending: '待执行', running: '运行中', done: '完成', error: '异常', cancelled: '已取消',
 }
 
-/** 实时转录：文本轮次 + 工具调用入账，按 entries 顺序渲染。
- *  embedded=true（卡片内展开）不限高、不内部滚动，随内容自然生长交给外层消息列表滚动；
- *  全屏模式（专注视图）撑满面板高度、内部滚动。 */
+/** 实时转录：文本轮次 + 工具调用入账。embedded=true 不限高；全屏模式撑满面板高度 */
 export function AgentTranscript({ thread, embedded = false }: { thread: AgentThread; embedded?: boolean }) {
   const ref = useRef<HTMLDivElement>(null)
   const entryCount = thread.entries.length
@@ -47,9 +45,7 @@ export function AgentTranscript({ thread, embedded = false }: { thread: AgentThr
 
 /** dispatch_subtasks 卡片内的批次面板 */
 export function AgentPanel({ cardId }: { cardId: string }) {
-  // selector 只取稳定引用；派生数组用 useMemo 计算
-  const order = useAgentStore((s) => s.order)
-  const threadsMap = useAgentStore((s) => s.threads)
+  const { order, threads: threadsMap } = useAgentStore(selectCurrentAgent)
   const threads = useMemo(
     () => order.map((id) => threadsMap[id]).filter((t): t is AgentThread => !!t && t.cardId === cardId),
     [order, threadsMap, cardId],
@@ -97,7 +93,7 @@ export function AgentPanel({ cardId }: { cardId: string }) {
   )
 }
 
-/** dispatch_subtasks 的工具卡片（替换默认 ToolCallCard 渲染） */
+/** dispatch_subtasks 的工具卡片 */
 export function AgentToolCard({ call }: { call: ToolCall }) {
   const [open, setOpen] = useState(() => call.status === 'running')
 
@@ -120,7 +116,10 @@ export function AgentToolCard({ call }: { call: ToolCall }) {
 
 /** 专注视图：对话面板中整屏查看某个 agent 的实时进度 */
 export function AgentView() {
-  const thread = useAgentStore((s) => (s.activeThreadId ? s.threads[s.activeThreadId] : undefined))
+  const thread = useAgentStore((s) => {
+    const slice = selectCurrentAgent(s)
+    return slice.activeThreadId ? slice.threads[slice.activeThreadId] : undefined
+  })
   const selectThread = useAgentStore((s) => s.selectThread)
 
   if (!thread) return null

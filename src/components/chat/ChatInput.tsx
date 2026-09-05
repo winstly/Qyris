@@ -1,6 +1,6 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
 import { useAppStore } from '@/store/useAppStore'
-import { useChatStore } from '@/store/useChatStore'
+import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { isDesktop } from '@/services/desktop'
 import { fmtTok } from '@/utils/tokens'
 import { IconSend, IconStop, IconClose, IconTarget, IconCheck } from '@/components/common/icons'
@@ -11,25 +11,19 @@ import type { SkillMeta } from '@/types'
 export function ChatInput() {
   const [text, setText] = useState('')
   const taRef = useRef<HTMLTextAreaElement>(null)
-  const status = useChatStore((s) => s.status)
+  const { status, pendingElement, usage } = useChatStore(selectCurrentChat)
   const send = useChatStore((s) => s.send)
   const cancel = useChatStore((s) => s.cancel)
   const hasApiKey = useAppStore((s) => s.hasApiKey)
-  const pendingElement = useChatStore((s) => s.pendingElement)
   const setPendingElement = useChatStore((s) => s.setPendingElement)
-  const usage = useChatStore((s) => s.usage)
   const skillMetas = useAppStore((s) => s.skillMetas)
 
   // Slash 命令菜单状态
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
-  // 输入 / 之前的文本暂存（用户输入 / 前的内容）
   const savedTextRef = useRef('')
-  // 追踪上一次文本值，用于检测何时插入了 /
   const prevTextRef = useRef('')
-
-  // 已选中的 Skills（多选，选中后不发送，等用户写描述再一起发）
   const [selectedSkills, setSelectedSkills] = useState<SkillMeta[]>([])
 
   const busy = status === 'streaming' || status === 'tools' || status === 'awaiting-user' || status === 'retrying'
@@ -39,7 +33,6 @@ export function ChatInput() {
       ? '请先在设置中配置 API Key'
       : undefined
 
-  // 过滤匹配的 skills
   const filteredSkills = slashOpen
     ? skillMetas.filter((s) => {
         if (!slashFilter) return true
@@ -51,10 +44,8 @@ export function ChatInput() {
       })
     : []
 
-  // slashFilter 变化时重置选中索引
   useEffect(() => { setSlashIndex(0) }, [slashFilter])
 
-  // 方向键导航时自动滚动到可见区域
   useEffect(() => {
     if (!slashOpen) return
     const el = document.querySelector('.slash-menu__item--active')
@@ -106,7 +97,6 @@ export function ChatInput() {
     }
     const userText = text.trim()
     if ((!userText && selectedSkills.length === 0) || busy || disabledHint) return
-    // 构建 AI 消息（系统指令）和 UI 元数据（卡片）
     let aiMsg = ''
     const meta: import('@/types').MessageMeta = {}
     if (selectedSkills.length > 0) {
@@ -132,27 +122,20 @@ export function ChatInput() {
     prevTextRef.current = val
     setText(val)
     resize()
-    // 检测 "/" 触发：现在以 / 开头但之前不以 / 开头 → 用户在开头插入了 /
+    // 触发 slash 菜单
     if (val.startsWith('/') && !prev.startsWith('/') && !slashOpen && skillMetas.length > 0) {
-      // 暂存之前的文本（"帮我" 变成 "/帮我" → 暂存 "帮我"）
       savedTextRef.current = prev
       setSlashOpen(true)
       setSlashFilter('')
-    } else if (slashOpen) {
-      if (!val.startsWith('/')) {
-        savedTextRef.current = ''
-        closeSlash()
-      } else {
-        // 搜索关键字 = / 之后、暂存文本之前的部分
-        // /react帮我 → savedText="帮我" → keyword="react"
-        const afterSlash = val.slice(1)
-        const saved = savedTextRef.current
-        const keyword = saved && afterSlash.endsWith(saved)
-          ? afterSlash.slice(0, -saved.length)
-          : afterSlash
-        setSlashFilter(keyword)
-      }
+      return
     }
+    if (!slashOpen) return
+    // 关闭 slash 菜单
+    if (!val.startsWith('/')) { savedTextRef.current = ''; closeSlash(); return }
+    // 更新 slash 过滤关键字
+    const afterSlash = val.slice(1)
+    const saved = savedTextRef.current
+    setSlashFilter(saved && afterSlash.endsWith(saved) ? afterSlash.slice(0, -saved.length) : afterSlash)
   }
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

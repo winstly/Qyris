@@ -1,37 +1,24 @@
 import { useAppStore } from '@/store/useAppStore'
-import { useBuildStore } from '@/store/useBuildStore'
+import { useBuildStore, selectCurrentBuild } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
 import { basename, languageLabel, extOf } from '@/utils/path'
 
 export function StatusBar() {
   const projectPath = useAppStore((s) => s.projectPath)
   const activeTab = useAppStore((s) => s.activeTab)
-  const slots = useBuildStore((s) => s.slots)
-  const slotOrder = useBuildStore((s) => s.slotOrder)
+  const { slots, slotOrder } = useBuildStore(selectCurrentBuild)
   const activePath = useFileStore((s) => s.activePath)
   const isDirty = useFileStore((s) => (activePath ? !!s.dirty[activePath] : false))
   const cursor = useFileStore((s) => s.cursor)
   const lastSavedAt = useFileStore((s) => s.lastSavedAt)
 
-  // 多槽汇总：运行中 / 异常计数 → 一个总览状态点 + 文案
   const live = slotOrder.map((k) => slots[k]).filter(Boolean)
-  const errorCount = live.filter((st) => st.phase === 'error').length
-  const runningCount = live.filter((st) => st.processAlive).length
-  let dot: string
-  let summary: string
-  if (live.length === 0) {
-    dot = 'idle'
-    summary = '未运行'
-  } else if (errorCount > 0) {
-    dot = 'error'
-    summary = `${errorCount} 个服务异常`
-  } else if (runningCount > 0) {
-    dot = 'running'
-    summary = runningCount === 1 ? '1 个服务运行中' : `${runningCount} 个服务运行中`
-  } else {
-    dot = 'idle'
-    summary = `${live.length} 个服务未运行`
-  }
+  const errors = live.filter((st) => st.phase === 'error').length
+  const running = live.filter((st) => st.processAlive).length
+  const dot = errors > 0 ? 'error' : running > 0 ? 'running' : 'idle'
+  const summary = errors > 0 ? `${errors} 个服务异常`
+    : running > 0 ? `${running} 个服务运行中`
+    : live.length > 0 ? `${live.length} 个服务未运行` : '未运行'
 
   return (
     <footer className="statusbar">

@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
-import { useBuildStore, selectSlotState } from '@/store/useBuildStore'
-import { useChatStore } from '@/store/useChatStore'
+import { useBuildStore, selectSlotState, selectCurrentBuild } from '@/store/useBuildStore'
+import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { api, onPreviewConsole } from '@/services/desktop'
 import { BuildPipeline } from './BuildPipeline'
 import { Select } from '@/components/common/Select'
 import type { PreviewConsoleEntry } from '@/types'
-import { IconPlay, IconStop, IconRefresh, IconTerminal, IconLink, IconFolder, IconTarget, IconDesktop, IconTablet, IconMobile, IconExternal, IconClose, IconTrash } from '@/components/common/icons'
+import { IconPlay, IconPlus, IconStop, IconRefresh, IconTerminal, IconLink, IconFolder, IconTarget, IconDesktop, IconTablet, IconMobile, IconExternal, IconClose, IconTrash } from '@/components/common/icons'
 import { EmptyState } from '@/components/common/EmptyState'
 
 const PHASE_LABEL: Record<string, string> = {
@@ -24,7 +24,7 @@ const DEVICES: { mode: DeviceMode; label: string; width: number | null; Icon: ty
   { mode: 'mobile', label: '手机 (375px)', width: 375, Icon: IconMobile },
 ]
 
-/** 服务列表合并视图的一行：存档命令（AI 编译产出）∪ 存活槽（chat 里 run_project 的） */
+/** 服务列表合并视图的一行 */
 interface ServiceRow {
   name: string
   /** 展示用的命令：运行时以实际槽为准，未启动时显示存档命令 */
@@ -37,40 +37,44 @@ interface ServiceRow {
 export function PreviewTab() {
   const projectPath = useAppStore((s) => s.projectPath)
   const openProjectDialog = useAppStore((s) => s.openProjectDialog)
+  const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
   const hasApiKey = useAppStore((s) => s.hasApiKey)
   const showAlert = useAppStore((s) => s.showAlert)
   const startupCommands = useAppStore((s) => s.startupCommands)
 
-  const slots = useBuildStore((s) => s.slots)
-  const slotOrder = useBuildStore((s) => s.slotOrder)
-  const activeSlot = useBuildStore((s) => s.activeSlot)
+  const build = useBuildStore(selectCurrentBuild)
+  const { slots, slotOrder, activeSlot } = build
   const selectSlot = useBuildStore((s) => s.selectSlot)
   const start = useBuildStore((s) => s.start)
   const stop = useBuildStore((s) => s.stop)
   const stopAll = useBuildStore((s) => s.stopAll)
   const selectUrl = useBuildStore((s) => s.selectUrl)
-  const slot = useBuildStore((s) => selectSlotState(s, s.activeSlot))
+  const slot = useBuildStore((s) => selectSlotState(s, selectCurrentBuild(s).activeSlot))
 
-  const chatStatus = useChatStore((s) => s.status)
-  const chatMessages = useChatStore((s) => s.messages)
+  const chat = useChatStore(selectCurrentChat)
+  const chatStatus = chat.status
+  const chatMessages = chat.messages
 
-  /** 当前查看日志的服务节点（key=槽名）：单一日志台展示，避免列表内展开造成多层滚动 */
+  /** 当前查看日志的服务节点 */
   const [logSlot, setLogSlot] = useState<string | null>(null)
   const logSt = logSlot ? slots[logSlot] : undefined
   const [iframeNonce, setIframeNonce] = useState(0)
   const [deviceMode, setDeviceMode] = useState<DeviceMode>('desktop')
 
-  // 预览控制台：被预览页面的 console 输出（主进程按 origin 过滤后转发）
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [consoleLines, setConsoleLines] = useState<PreviewConsoleEntry[]>([])
   const consoleBodyRef = useRef<HTMLDivElement>(null)
   // 端口占用者（EADDRINUSE 时的可视化）
   const [portInfo, setPortInfo] = useState<{ pid: number; name: string; port: number } | null>(null)
 
-  // 预览地址变化 → 更新主进程的采集过滤 origin（变更时主进程清空缓冲）
+  // 预览地址变化 → 更新主进程的采集过滤 origin
   const previewUrl = slot?.detectedUrl || ''
   useEffect(() => {
     void api.previewConsoleAttach(previewUrl || null).catch(() => {})
+    // 卸载时解除过滤
+    return () => {
+      void api.previewConsoleAttach(null).catch(() => {})
+    }
   }, [previewUrl])
 
   useEffect(() => {
@@ -117,7 +121,6 @@ export function PreviewTab() {
   const constrained = activeDevice.width !== null
 
   const chatBusy = chatStatus !== 'idle' && chatStatus !== 'error'
-  // 最近一条用户消息是否为 AI 编译（用于把「AI 编译」按钮置为进行中文案）
   const compiling = (() => {
     if (!chatBusy) return false
     for (let i = chatMessages.length - 1; i >= 0; i--) {
@@ -127,7 +130,7 @@ export function PreviewTab() {
   })()
   const hasCommands = startupCommands.length > 0
 
-  /** 服务列表合并视图：存档命令在前列出（未启动也显示，供核对数量与命令），存活槽补在后面 */
+  /** 服务列表合并视图 */
   const serviceRows: ServiceRow[] = (() => {
     const names: string[] = []
     const push = (n: string): void => { if (!names.includes(n)) names.push(n) }
@@ -149,7 +152,6 @@ export function PreviewTab() {
   const aiCompile = async () => {
     if (!projectPath) return
     const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
-    // CLI 模式无需 API Key（走本机 claude 命令自身的登录态）
     if (!hasApiKey && !cliMode) {
       void showAlert('尚未配置 API Key', '点击右上角对话栏的齿轮图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
       return
@@ -161,13 +163,11 @@ export function PreviewTab() {
       )
       if (confirmed !== true) return
     }
-    const chat = useChatStore.getState()
+    const chat = selectCurrentChat(useChatStore.getState())
     if (chat.status !== 'idle' && chat.status !== 'error') {
       void showAlert('AI 正忙', '上一条消息还在处理中，请稍候，或点击「停止生成」后重试。')
       return
     }
-    // CLI 模式：轻驭工具（run_once/verify_start/report_start_commands）不存在于 CLI，
-    // 话术改为指令式 + [[START_COMMANDS]] 尾行协议（由系统消费登记）
     const prompt = cliMode
       ? '这是 AI 编译阶段：请探测当前项目的技术栈，需要时安装依赖 / 验证编译，' +
         '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
@@ -177,18 +177,18 @@ export function PreviewTab() {
         '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
         '逐个用 verify_start 验证启动命令能真正启动（验证通过会自动停止服务），' +
         '全部通过后用 report_start_commands 提交启动命令清单。不要直接 run_project 启动服务，运行由我来决定。'
-    void chat.send(prompt, { projectStart: true })
+    void useChatStore.getState().send(prompt, { projectStart: true })
   }
 
   /** 工具链缺失：用户点「授权 AI 自动安装」即视为授权，AI 直接安装后重启服务 */
   const requestToolchainInstall = () => {
     if (!slot) return
-    const chat = useChatStore.getState()
+    const chat = selectCurrentChat(useChatStore.getState())
     if (chat.status !== 'idle' && chat.status !== 'error') {
       void showAlert('AI 正忙', '请等待当前任务完成，或点击「停止生成」后再试。')
       return
     }
-    void chat.send(
+    void useChatStore.getState().send(
       `启动服务「${slot.name}」失败：${slot.errorText}` +
       ' 我已授权你自动安装缺失的工具链：请安装缺失的命令（Windows 优先用 winget，注意加非交互参数），' +
       `安装完成后用原命令重新启动服务「${slot.name}」，并用 get_build_status 确认进入运行中状态。`,
@@ -200,9 +200,9 @@ export function PreviewTab() {
     if (!projectPath || !hasCommands) return
     const bs = useBuildStore.getState()
     for (const c of startupCommands) {
-      const st = bs.slots[c.name.toLowerCase()]
+      const st = bs.byProject[projectPath]?.slots[c.name.toLowerCase()]
       if (st?.processAlive) continue
-      await bs.start(c.name, c.run)
+      await bs.start(c.name, c.run, projectPath)
     }
   }
 
@@ -213,7 +213,7 @@ export function PreviewTab() {
 
   return (
     <div className="preview">
-      {/* 启动工具栏：AI 编译（调模型）与 运行（零模型）两个独立操作 */}
+      {/* 启动工具栏 */}
       <div className="preview__bar">
         <button
           className="btn btn--ghost btn--sm"
@@ -231,8 +231,7 @@ export function PreviewTab() {
         >
           <IconPlay size={12} /> 全部运行
         </button>
-        {/* 全部停止紧邻「全部运行」：启停是成对高频操作，弹到最右要跨整条工具栏找 */}
-        <button className="btn btn--danger-ghost btn--sm" disabled={!anyAlive} onClick={() => void stopAll()} title="停止全部服务进程">
+        <button className="btn btn--danger-ghost btn--sm" disabled={!anyAlive} onClick={() => void stopAll(projectPath ?? undefined)} title="停止全部服务进程">
           <IconStop size={12} /> 全部停止
         </button>
         <span className="preview__hint">
@@ -243,7 +242,7 @@ export function PreviewTab() {
         <div className="preview__spacer" />
       </div>
 
-      {/* 服务列表：存档命令 ∪ 存活槽（核对可运行系统数量与命令） */}
+      {/* 服务列表 */}
       {serviceRows.length > 0 && (
         <>
           <div className="slots__count">共 {serviceRows.length} 个服务</div>
@@ -276,11 +275,9 @@ export function PreviewTab() {
                       {st!.detectedUrl}
                     </a>
                   )}
-                  {/* key 含 phase：徽标状态变化时重挂，badge-in 淡入重放 */}
                   <span key={st?.phase ?? 'idle'} className={`slots__phase slots__phase--${st?.phase ?? 'idle'}`}>
                     {PHASE_LABEL[st?.phase ?? 'idle']}
                   </span>
-                  {/* 日志按钮挂进程节点：展示收敛到列表下方的单一日志台 */}
                   {st && (
                     <button
                       className={`btn btn--ghost btn--sm slots__action ${logOn ? 'slots__action--on' : ''}`}
@@ -293,14 +290,14 @@ export function PreviewTab() {
                     </button>
                   )}
                   {alive ? (
-                    <button className="btn btn--ghost btn--sm slots__action" onClick={(e) => { e.stopPropagation(); void stop(row.name) }}>
+                    <button className="btn btn--ghost btn--sm slots__action" onClick={(e) => { e.stopPropagation(); void stop(row.name, projectPath ?? undefined) }}>
                       停止
                     </button>
                   ) : (
                     <button
                       className="btn btn--ghost btn--sm slots__action"
-                      disabled={!row.command}
-                      onClick={(e) => { e.stopPropagation(); void start(row.name, row.command) }}
+                      disabled={!row.command || !projectPath}
+                      onClick={(e) => { e.stopPropagation(); void start(row.name, row.command, projectPath ?? undefined) }}
                       title={`以原命令运行「${row.name}」`}
                     >
                       运行
@@ -313,7 +310,7 @@ export function PreviewTab() {
         </>
       )}
 
-      {/* 节点日志台：服务列表下方单一面板，滚动只有一层；按钮在对应节点行上 */}
+      {/* 节点日志台 */}
       {logSlot && logSt && (
         <div className="consolepane">
           <div className="consolepane__head">
@@ -420,7 +417,6 @@ export function PreviewTab() {
               端口 {portInfo.port} 正被 {portInfo.name}（PID {portInfo.pid}）监听——可「全部停止」后重试，或在对话中让 AI 换端口
             </div>
           )}
-          {/* 工具链缺失（启动预检报「未找到命令」）：一键授权 AI 安装，不用用户自己装 */}
           {slot?.errorText.includes('未找到命令') && (
             <div className="error-box__actions">
               <button className="btn btn--ghost btn--sm" onClick={requestToolchainInstall}>
@@ -468,11 +464,16 @@ export function PreviewTab() {
           <EmptyState
             icon={<IconFolder size={22} />}
             title="尚未打开项目"
-            text="选择一个本地目录后，即可在这里编译并预览应用。"
+            text="创建一个新项目，或选择一个本地目录后，即可在这里编译并预览应用。"
             action={
-              <button className="btn btn--primary" onClick={() => void openProjectDialog()}>
-                <IconFolder size={14} /> 打开项目
-              </button>
+              <div className="btn-row">
+                <button className="btn btn--primary" onClick={() => setCreateProjectOpen(true)}>
+                  <IconPlus size={14} /> 创建项目
+                </button>
+                <button className="btn btn--ghost" onClick={() => void openProjectDialog()}>
+                  <IconFolder size={14} /> 打开项目
+                </button>
+              </div>
             }
           />
         ) : showIframe ? (

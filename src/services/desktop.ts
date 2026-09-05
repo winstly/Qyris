@@ -64,9 +64,10 @@ export const api = {
   portOwner: (port: number) => wrap((d) => d.portOwner(port)) as Promise<{ pid: number; name: string } | null>,
   previewConsoleAttach: (url: string | null) => wrap((d) => d.previewConsoleAttach(url)),
   previewConsoleHistory: () => wrap((d) => d.previewConsoleHistory()) as Promise<PreviewConsoleEntry[]>,
-  stopProject: (name?: string) => wrap((d) => d.stopProject(name)),
+  stopProject: (projectRoot?: string | null, name?: string | null) => wrap((d) => d.stopProject(projectRoot, name)),
   startWatching: (projectRoot: string) => wrap((d) => d.startWatching(projectRoot)),
   stopWatching: () => wrap((d) => d.stopWatching()),
+  stopWatchingProject: (projectRoot: string) => wrap((d) => d.stopWatchingProject(projectRoot)),
 
   // 配置与密钥（无 getSecret：明文 Key 不出主进程）
   getConfig: () => wrap((d) => d.getConfig()),
@@ -118,12 +119,12 @@ export const api = {
 
 // ---------- 事件订阅（main → renderer，同步返回取消函数） ----------
 
-export function onBuildOutput(cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string }) => void): () => void {
+export function onBuildOutput(cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onBuildOutput(cb)
 }
 
-export function onBuildExit(cb: (payload: { name: string; code: number }) => void): () => void {
+export function onBuildExit(cb: (payload: { name: string; code: number; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onBuildExit(cb)
 }
@@ -144,7 +145,7 @@ export function onCliToolEvent(cb: (payload: { requestId: string; id: string; na
 }
 
 
-export function onFsChanged(cb: (payload: { paths: string[] }) => void): () => void {
+export function onFsChanged(cb: (payload: { paths: string[]; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onFsChanged(cb)
 }

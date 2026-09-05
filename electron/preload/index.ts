@@ -55,9 +55,10 @@ const desktopAPI = {
   previewConsoleAttach: (url: string | null) => ipcRenderer.invoke('preview_console_attach', { url: url ?? null }),
   previewConsoleHistory: () =>
     ipcRenderer.invoke('preview_console_history') as Promise<{ level: string; message: string; sourceId: string; ts: number }[]>,
-  stopProject: (name?: string) => ipcRenderer.invoke('stop_project', { name: name ?? null }),
+  stopProject: (projectRoot?: string | null, name?: string | null) => ipcRenderer.invoke('stop_project', { projectRoot: projectRoot ?? null, name: name ?? null }),
   startWatching: (projectRoot: string) => ipcRenderer.invoke('start_watching', { projectRoot }),
   stopWatching: () => ipcRenderer.invoke('stop_watching'),
+  stopWatchingProject: (projectRoot: string) => ipcRenderer.invoke('stop_watching_project', { projectRoot }),
 
   // 配置与密钥
   getConfig: () => ipcRenderer.invoke('get_config'),
@@ -106,16 +107,16 @@ const desktopAPI = {
   openExternal: (url: string) => ipcRenderer.invoke('open_external', { url }),
 
   // 事件（main → renderer），返回取消订阅函数
-  onBuildOutput: (cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string }) => void): Unsubscribe =>
+  onBuildOutput: (cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }) => void): Unsubscribe =>
     subscribe('build-output', cb),
-  onBuildExit: (cb: (payload: { name: string; code: number }) => void): Unsubscribe => subscribe('build-exit', cb),
+  onBuildExit: (cb: (payload: { name: string; code: number; projectRoot?: string }) => void): Unsubscribe => subscribe('build-exit', cb),
   onAiDelta: (cb: (payload: { requestId: string; delta: string }) => void): Unsubscribe =>
     subscribe('ai-delta', cb),
   onAiReasoning: (cb: (payload: { requestId: string; delta: string }) => void): Unsubscribe =>
     subscribe('ai-reasoning', cb),
   onCliToolEvent: (cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }) => void): Unsubscribe =>
     subscribe('cli-tool-event', cb),
-  onFsChanged: (cb: (payload: { paths: string[] }) => void): Unsubscribe => subscribe('fs-changed', cb),
+  onFsChanged: (cb: (payload: { paths: string[]; projectRoot?: string }) => void): Unsubscribe => subscribe('fs-changed', cb),
   onPreviewConsole: (cb: (payload: { level: string; message: string; sourceId: string; ts: number }) => void): Unsubscribe =>
     subscribe('preview-console', cb),
 }

@@ -4,7 +4,7 @@ import { IconClose, IconCheck } from '@/components/common/icons'
 import { Markdown } from './Markdown'
 import { ToolCallCard } from './ToolCallCard'
 import { AskUserCard } from './AskUserCard'
-import { useChatStore } from '@/store/useChatStore'
+import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { useAppStore } from '@/store/useAppStore'
 
 export function MessageBubble({ msg }: { msg: ChatMessage }) {
@@ -14,10 +14,8 @@ export function MessageBubble({ msg }: { msg: ChatMessage }) {
 
   const askCalls = msg.toolCalls?.filter((tc) => tc.name === 'askUserQuestion') ?? []
   const otherCalls = msg.toolCalls?.filter((tc) => tc.name !== 'askUserQuestion') ?? []
-  // 纯空白文本不算内容；思考过程也算内容（纯思考回复时也不出空壳）
   const hasText = msg.content.trim() !== ''
   const hasReasoning = (msg.reasoning ?? '').trim() !== ''
-  // 光标只在纯正文流式输出时显示：有工具调用时不闪（进度由 ToolCallCard 展示）
   const showCursor = msg.pending && hasText && (msg.toolCalls?.length ?? 0) === 0
 
   return (
@@ -38,10 +36,7 @@ export function MessageBubble({ msg }: { msg: ChatMessage }) {
 
 function ReasoningBlock({ content }: { content: string }) {
   const [open, setOpen] = useState(false)
-  // 追踪 thinking 是否还在流式增长：内容变化时标记活跃，2s 无变化视为结束
   const [thinking, setThinking] = useState(false)
-  // 以挂载时的长度为基线：历史消息重挂载（切页签/重开项目）不再误闪「正在思考…」，
-  // 只有挂载后内容真正增长才视为思考中
   const prevLen = useRef(content.length)
   const timer = useRef<ReturnType<typeof setTimeout>>()
   useEffect(() => {
@@ -80,25 +75,25 @@ function extractUserText(content: string): string {
 
 /** 用户消息：hover 出「编辑」，编辑态可改后重发；编辑非末条时有回退提醒 */
 function UserMessage({ msg }: { msg: ChatMessage }) {
-  // 有 meta 时渲染卡片 + 只显示用户文字；无 meta 兼容旧消息
   const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart)
   const userText = hasMeta ? (msg.meta?.projectStart ? null : extractUserText(msg.content) || null) : null
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(msg.content)
   const [editSkills, setEditSkills] = useState(msg.meta?.skills ?? [])
   const skillMetas = useAppStore((s) => s.skillMetas)
-  // Slash 命令菜单（编辑态支持 / 选 skill，与 ChatInput 一致）
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
-  // 该消息之后是否还有内容（决定是否要给「回退」提醒）
   const hasLater = useChatStore((s) => {
-    const i = s.messages.findIndex((m) => m.id === msg.id)
-    return i !== -1 && i < s.messages.length - 1
+    const msgs = selectCurrentChat(s).messages
+    const i = msgs.findIndex((m) => m.id === msg.id)
+    return i !== -1 && i < msgs.length - 1
   })
-  const busy = useChatStore((s) => s.status !== 'idle' && s.status !== 'error')
+  const busy = useChatStore((s) => {
+    const st = selectCurrentChat(s).status
+    return st !== 'idle' && st !== 'error'
+  })
 
-  // 编辑时只提取用户文字，隐藏系统指令（纯系统消息没有可编辑文字）
   const editableText = msg.meta?.projectStart ? '' : extractUserText(msg.content)
   const originalSkills = msg.meta?.skills ?? []
 
@@ -113,7 +108,6 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
 
   const closeSlash = () => { setSlashOpen(false); setSlashFilter(''); setSlashIndex(0) }
 
-  // 方向键导航时自动滚动到可见区域（与 ChatInput 一致）
   useEffect(() => {
     if (!slashOpen) return
     const el = document.querySelector('.slash-menu--edit .slash-menu__item--active')

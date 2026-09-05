@@ -6,7 +6,7 @@ import { api } from './desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useBuildStore } from '@/store/useBuildStore'
-import { useChatStore } from '@/store/useChatStore'
+import { useChatStore, selectCurrentChat, patchSlice } from '@/store/useChatStore'
 import { useAgentStore } from '@/store/useAgentStore'
 import type { SlotState } from '@/store/useBuildStore'
 import type { SubTask } from './subagent'
@@ -29,18 +29,19 @@ export interface ToolOutcome {
 }
 
 /** AI 启动的服务命令沉淀：upsert 进当前项目存档（「全部运行」按钮直接复用，零模型） */
-function persistStartCommand(name: string, command: string): void {
+function persistStartCommand(name: string, command: string, project?: string): void {
   const app = useAppStore.getState()
-  if (!app.projectPath) return
-  const cur = app.startupCommands
+  const p = project ?? app.projectPath
+  if (!p) return
+  const cur = app.startupCommandsMap[p] ?? []
   const next = cur.some((c) => c.name === name)
     ? cur.map((c) => (c.name === name ? { ...c, run: command } : c))
     : [...cur, { name, run: command }]
-  void app.setStartupCommands(next)
+  void app.setStartupCommands(next, p)
 }
 
-export async function executeTool(name: string, args: Record<string, unknown>, cardId = ''): Promise<ToolOutcome> {
-  const root = useAppStore.getState().projectPath
+export async function executeTool(name: string, args: Record<string, unknown>, cardId = '', project = ''): Promise<ToolOutcome> {
+  const root = project || useAppStore.getState().projectPath
   if (!root) {
     return { result: '错误：当前没有打开的项目，请让用户先点击「打开项目」再进行文件操作。', summary: '未打开项目' }
   }
@@ -95,7 +96,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         const display = String(args.path ?? '')
         const path = resolve(root, display)
         const content = String(args.content ?? '')
-        const sessionId = useChatStore.getState().sessionId
+        const sessionId = (project ? useChatStore.getState().byProject[project]?.sessionId : selectCurrentChat(useChatStore.getState()).sessionId) ?? ''
         // 写前快照：绑定当前会话，保留会话开始前的原始内容，可整会话回退
         await api.snapshotFile(root, sessionId, path).catch(() => {})
         await api.writeTextFile(root, path, content)
@@ -133,7 +134,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         if (services.length === 0) {
           return { result: '错误：services 不能为空，每项需包含 name（服务名）与 run（启动命令）。', summary: '启动清单为空' }
         }
-        await useAppStore.getState().setStartupCommands(services)
+        await useAppStore.getState().setStartupCommands(services, root)
         const list = services.map((s) => `- ${s.name}：${s.run}`).join('\n')
         return {
           result: `已保存 ${services.length} 个服务的启动命令：\n${list}\n用户可在预览面板点击「全部运行」直接启动（无需再次识别）。`,
@@ -148,9 +149,9 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
           return { result: '错误：command 不能为空。', summary: '命令为空' }
         }
         // 每个服务名独立成槽：同名重启只替换该槽，不影响其他已运行的服务
-        await useBuildStore.getState().start(name, command)
+        await useBuildStore.getState().start(name, command, root)
         // 启动命令沉淀进存档（fire-and-forget）：AI 直接启动的服务也会被「全部运行」按钮记住
-        persistStartCommand(name, command)
+        persistStartCommand(name, command, root)
         return {
           result: `已启动服务「${name}」：${command}。输出实时流入预览面板，稍等片刻后用 get_build_status 查看「${name}」的编译/启动状态（首次编译可能需要几秒到几十秒）。`,
           summary: `已启动 ${name}`,
@@ -158,7 +159,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
       }
 
       case 'get_build_status': {
-        const s = useBuildStore.getState()
+        const s = useBuildStore.getState().byProject[root] ?? { slots: {}, slotOrder: [], activeSlot: null }
         const nameArg = String(args.name ?? '').trim()
         // 指定服务名 → 单个服务的三阶段详情 + 日志尾部
         if (nameArg) {
@@ -187,10 +188,10 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
       case 'stop_project': {
         const nameArg = String(args.name ?? '').trim()
         if (nameArg) {
-          await useBuildStore.getState().stop(nameArg)
+          await useBuildStore.getState().stop(nameArg, root)
           return { result: `已停止服务「${nameArg}」。`, summary: `已停止 ${nameArg}` }
         }
-        await useBuildStore.getState().stopAll()
+        await useBuildStore.getState().stopAll(root)
         return { result: '已停止全部服务进程。', summary: '已停止全部进程' }
       }
 
@@ -200,15 +201,15 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         if (!command) {
           return { result: '错误：command 不能为空。', summary: '命令为空' }
         }
-        const existing = useBuildStore.getState().slots[name.toLowerCase()]
+        const existing = useBuildStore.getState().byProject[root]?.slots[name.toLowerCase()]
         if (existing?.processAlive) {
           return {
             result: `错误：服务「${name}」已在运行中，无法重复验证。请先 stop_project 停止该服务再验证。`,
             summary: `${name} 运行中`,
           }
         }
-        const outcome = await verifyStartup(name, command)
-        persistStartCommand(name, command)
+        const outcome = await verifyStartup(name, command, root)
+        persistStartCommand(name, command, root)
         return outcome
       }
 
@@ -236,18 +237,22 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         const threadIds = useAgentStore.getState().createBatch(
           cardId,
           tasks.map((t) => ({ title: t.title, tier: t.tier ?? 'main', model: sub.modelForTier(t.tier) })),
+          root,
         )
-        const { results, total } = await sub.runSubtasks(tasks, threadIds)
-        // 子 agent 独立记账的 token 总账，汇总进主对话用量展示
-        useChatStore.setState((s) => ({
-          usage: {
-            ...s.usage,
-            agents: {
-              input: (s.usage.agents?.input ?? 0) + total.input,
-              output: (s.usage.agents?.output ?? 0) + total.output,
+        const { results, total } = await sub.runSubtasks(tasks, threadIds, root)
+        // 子 agent 独立记账的 token 总账，汇总进所属工程对话用量展示
+        const slice = useChatStore.getState().byProject[root]
+        if (slice) {
+          patchSlice(root, {
+            usage: {
+              ...slice.usage,
+              agents: {
+                input: (slice.usage.agents?.input ?? 0) + total.input,
+                output: (slice.usage.agents?.output ?? 0) + total.output,
+              },
             },
-          },
-        }))
+          })
+        }
         // 结果经 agent state 传递：主上下文只收摘要（单条截断），全文留在各 agent 线程可查
         const RESULT_CAP = 1500
         const body = results
@@ -296,23 +301,23 @@ const VERIFY_PROBE_INTERVAL = 2000
 
 /** 启动冒烟验证：启动服务 → 轮询状态（异常退出即失败）→ 解析到地址后 HTTP 探测确认 → 自动停止。
  *  无 HTTP 地址但出现监听信号的服务（如 Java 后端）按启动信号判通过（无法探测是客观限制，如实标注）。 */
-async function verifyStartup(name: string, command: string): Promise<ToolOutcome> {
+async function verifyStartup(name: string, command: string, project: string): Promise<ToolOutcome> {
   const key = name.trim().toLowerCase() || 'default'
-  await useBuildStore.getState().start(name, command)
+  await useBuildStore.getState().start(name, command, project)
   const deadline = Date.now() + VERIFY_TIMEOUT
   let tail: string[] = []
   let lastProbeAt = 0
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, VERIFY_POLL))
-    if (useChatStore.getState().cancelled) {
-      await useBuildStore.getState().stop(name)
+    if (useChatStore.getState().byProject[project]?.cancelled) {
+      await useBuildStore.getState().stop(name, project)
       return { result: '启动验证已取消（用户停止生成），验证进程已停止。', summary: '验证取消' }
     }
-    const st = useBuildStore.getState().slots[key]
+    const st = useBuildStore.getState().byProject[project]?.slots[key]
     if (!st) break
     tail = st.logs.slice(-15).map((l) => `${l.stream === 'stderr' ? '[err]' : '[out]'} ${l.line}`)
     if (st.phase === 'error') {
-      await useBuildStore.getState().stop(name)
+      await useBuildStore.getState().stop(name, project)
       return {
         result: `启动验证失败：进程异常退出（编译通过但启动失败，常见原因：端口被占用、配置缺失、依赖不完整）。\n错误输出：\n${st.errorText || tail.join('\n')}`,
         summary: `${key} 启动失败`,
@@ -325,7 +330,7 @@ async function verifyStartup(name: string, command: string): Promise<ToolOutcome
           lastProbeAt = Date.now()
           const ok = await api.checkUrl(st.detectedUrl).catch(() => false)
           if (ok) {
-            await useBuildStore.getState().stop(name)
+            await useBuildStore.getState().stop(name, project)
             return {
               result: `启动验证通过：服务已监听 ${st.detectedUrl}，HTTP 探测成功。验证进程已自动停止，服务命令已沉淀，用户可在预览面板一键启动。`,
               summary: `${key} 启动验证通过`,
@@ -334,7 +339,7 @@ async function verifyStartup(name: string, command: string): Promise<ToolOutcome
         }
       } else {
         // 无可探测地址但有监听信号：按信号判通过，如实标注探测限制
-        await useBuildStore.getState().stop(name)
+        await useBuildStore.getState().stop(name, project)
         return {
           result: `启动验证通过（按输出中的启动信号判定）：服务已进入运行阶段但未解析到 HTTP 地址，未能做探测确认。验证进程已自动停止。`,
           summary: `${key} 启动验证通过`,
@@ -342,7 +347,7 @@ async function verifyStartup(name: string, command: string): Promise<ToolOutcome
       }
     }
   }
-  await useBuildStore.getState().stop(name)
+  await useBuildStore.getState().stop(name, project)
   return {
     result: `启动验证失败：${VERIFY_TIMEOUT / 1000}s 内未确认服务可用（未解析到可探测的服务地址，或 HTTP 探测始终失败）。\n最近输出：\n${tail.join('\n') || '（无输出）'}`,
     summary: `${key} 启动验证失败`,

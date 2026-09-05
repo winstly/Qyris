@@ -32,6 +32,7 @@ export function focusFileSearch(): void {
 export function FileTree() {
   const rootPath = useFileStore((s) => s.rootPath)
   const openProjectDialog = useAppStore((s) => s.openProjectDialog)
+  const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<{ files: string[]; truncated: boolean } | null>(null)
   const [searching, setSearching] = useState(false)
@@ -57,7 +58,7 @@ export function FileTree() {
     }
   }, [])
 
-  // 防抖 200ms；seq 防竞态（连续输入时旧请求晚到覆盖新结果）
+  // 防抖 200ms；seq 防竞态
   useEffect(() => {
     if (!rootPath) return
     const q = query.trim()
@@ -90,9 +91,14 @@ export function FileTree() {
       <div className="filetree-wrap filetree-wrap--empty">
         <IconFolder size={20} />
         <p>未打开项目</p>
-        <button className="btn btn--primary btn--sm" onClick={() => void openProjectDialog()}>
-          打开项目
-        </button>
+        <div className="btn-col">
+          <button className="btn btn--primary btn--sm" onClick={() => setCreateProjectOpen(true)}>
+            <IconPlus size={13} /> 创建项目
+          </button>
+          <button className="btn btn--ghost btn--sm" onClick={() => void openProjectDialog()}>
+            <IconFolder size={13} /> 打开项目
+          </button>
+        </div>
       </div>
     )
   }
@@ -266,7 +272,7 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
 
 // ---------- 右键菜单 ----------
 
-/** 文件树节点菜单项（逻辑与旧 TreeContextMenu 一致，渲染交给通用 ContextMenu） */
+/** 文件树节点菜单项 */
 function buildTreeMenuItems(
   target: TreeNode,
   rootPath: string | null,
@@ -348,7 +354,7 @@ function buildTreeMenuItems(
     }
   }
 
-  /** Git 操作：走共享操作反馈（GitPanel 状态条就地反馈，成功不弹窗）；完成后刷新树 */
+  /** Git 操作：完成后刷新树 */
   const gitSync = (op: 'pull' | 'fetch' | 'push') => {
     const label = op === 'pull' ? '拉取' : op === 'push' ? '推送' : '获取'
     void useGitStore.getState().runOp(label, async () => {
@@ -416,8 +422,7 @@ function buildTreeMenuItems(
 
 // ---------- 切换分支对话框 ----------
 
-/** 目录级 Git 分支切换：可搜索选择分支 → checkout → 刷新文件树（watcher 亦会兜底推送变更）。
- *  导出供 GitPanel 复用；onSwitched 在 checkout 成功后回调（调用方刷新自己的状态） */
+/** 目录级 Git 分支切换：选择分支 → checkout → 刷新文件树 */
 export function BranchSwitchDialog({ target, onClose, onSwitched }: {
   target: BranchTarget
   onClose: () => void
@@ -434,7 +439,6 @@ export function BranchSwitchDialog({ target, onClose, onSwitched }: {
     setSwitching(true)
     try {
       await api.gitCheckout(target.dir, branch)
-      // 分支切换会改变文件内容：刷新已展开目录 + 重新加载该目录，保证树与编辑器内容同步
       const fs = useFileStore.getState()
       await fs.loadChildren(target.dir)
       await fs.refreshExpanded()

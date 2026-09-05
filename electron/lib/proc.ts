@@ -5,7 +5,7 @@ import { promises as fsp, readFileSync, writeFileSync, mkdirSync } from 'node:fs
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 import { app, net } from 'electron'
-import { emitToRenderer } from './emitter'
+import { emitToRenderer, emitToWindow } from './emitter'
 import { errorMessage } from './util'
 
 interface ProcSlot {
@@ -13,12 +13,18 @@ interface ProcSlot {
   proc: ChildProcess
 }
 
-/** 服务名 → 槽。名字统一 trim + 小写归一，避免 'Web' 与 'web' 出现两个槽 */
+/** 服务名 → 槽键 */
 const slots = new Map<string, ProcSlot>()
 
 function normName(name: unknown): string {
   const n = typeof name === 'string' ? name.trim().toLowerCase() : ''
   return n || 'default'
+}
+
+/** 进程槽键：工程根 × 服务名 */
+function slotKey(projectRoot: string, name: unknown): string {
+  const root = projectRoot.replace(/[\\/]+$/, '')
+  return `${root}\x00${normName(name)}`
 }
 
 /** 去掉 ANSI 颜色/控制序列：vite/npm 等即便在管道下也可能强制带色，会污染 URL 解析与日志 */
@@ -38,7 +44,6 @@ function killTree(pid: number): void {
     }
   } else {
     try {
-      // unix 侧 spawn 时 detached:true → 子进程为进程组长，负 PID 杀整组
       process.kill(-pid, 'SIGKILL')
     } catch {
       /* 进程已不在 */
@@ -54,12 +59,7 @@ function takeAndKillOne(key: string): void {
   if (slot.proc.pid) killTree(slot.proc.pid)
 }
 
-// ---------- 子进程环境构建：修复打包后 PATH 丢失 ----------
-// 打包后从 Finder/Explorer 启动时，process.env.PATH 是 GUI 会话的极简快照：
-// macOS 只有 /usr/bin:/bin:/usr/sbin:/sbin，Windows 是登录时的注册表快照——
-// 用户 shell profile 里的增量（.zprofile 的 homebrew/nvm、注册表用户 PATH 等）全部丢失。
-// Windows：从注册表 HKCU + HKLM 重读 PATH 合并（短 TTL，装新工具无需重启应用）；
-// unix：登录 shell 探测 profile PATH（结果永久缓存，失败短间隔重试）。
+// ---------- 子进程环境构建 ----------
 
 const ENV_CACHE_TTL = 10_000
 const UNIX_PROBE_RETRY_MS = 60_000
@@ -155,7 +155,6 @@ export function buildChildEnv(): NodeJS.ProcessEnv {
     if (process.platform === 'win32') {
       const now = Date.now()
       if (envCache && now - envCacheAt < ENV_CACHE_TTL) return envCache
-      // 顺序：系统 PATH 在前、用户 PATH 在后（与 Windows 正常解析顺序一致），进程现有 PATH 兜底
       const regPath = [
         ...readRegistryPath('HKLM', 'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'),
         ...readRegistryPath('HKCU', 'Environment'),
@@ -207,10 +206,17 @@ export function registerOnceProc(token: string, child: ChildProcess): () => void
   }
 }
 
-/** 停止单个服务；name 省略 = 停止全部槽 */
-export async function stopProject(name?: unknown): Promise<void> {
-  if (typeof name === 'string' && name.trim()) {
-    takeAndKillOne(normName(name))
+/** 停止服务。projectRoot+name 停单个；仅 projectRoot 停该工程全部；都缺省停全部（退出/兜底） */
+export async function stopProject(projectRoot?: string | null, name?: string | null): Promise<void> {
+  const root = typeof projectRoot === 'string' && projectRoot ? projectRoot : null
+  const svc = typeof name === 'string' && name.trim() ? normName(name) : null
+  if (root && svc) {
+    takeAndKillOne(slotKey(root, svc))
+    return
+  }
+  if (root) {
+    const prefix = `${root.replace(/[\\/]+$/, '')}\x00`
+    for (const key of [...slots.keys()]) if (key.startsWith(prefix)) takeAndKillOne(key)
     return
   }
   for (const key of [...slots.keys()]) takeAndKillOne(key)
@@ -221,7 +227,7 @@ export function killRunningForCleanup(): void {
   for (const key of [...slots.keys()]) takeAndKillOne(key)
 }
 
-export async function runProject(projectRoot: string, name: unknown, command: string): Promise<number> {
+export async function runProject(projectRoot: string, name: unknown, command: string, windowId: number | null = null): Promise<number> {
   try {
     const st = await fsp.stat(projectRoot)
     if (!st.isDirectory()) throw new Error(`项目目录不存在：${projectRoot}`)
@@ -230,11 +236,10 @@ export async function runProject(projectRoot: string, name: unknown, command: st
     throw new Error(`项目目录不存在：${projectRoot}`)
   }
 
-  const key = normName(name)
-  // 同名槽 = 重启语义：先杀旧再启动；其他槽不受影响
+  const svcName = normName(name)
+  const key = slotKey(projectRoot, svcName)
   takeAndKillOne(key)
 
-  // 工具链预检：命令找不到时秒失败并给出可行动的错误，而不是让 cmd 的 stderr 让用户猜
   const avail = detectCommand(command)
   if (avail === false) {
     throw new Error(
@@ -248,13 +253,11 @@ export async function runProject(projectRoot: string, name: unknown, command: st
   try {
     proc = spawn(isWin ? 'cmd.exe' : 'sh', isWin ? ['/C', command] : ['-c', command], {
       cwd: projectRoot,
-      // stdin null + 双管 piped：Windows 下不分配控制台，windowsHide 双保险
       stdio: ['ignore', 'pipe', 'pipe'],
       windowsHide: true,
-      detached: !isWin, // unix 进程组，便于整组 SIGKILL
+      detached: !isWin,
       env: {
         ...buildChildEnv(),
-        // 源头禁色：掐掉 ANSI 码，保证 URL 解析与日志干净
         NO_COLOR: '1',
         FORCE_COLOR: '0',
       },
@@ -264,7 +267,9 @@ export async function runProject(projectRoot: string, name: unknown, command: st
   }
 
   const emit = (channel: string, payload: Record<string, unknown>): void => {
-    emitToRenderer(channel, { name: key, ...payload })
+    const msg = { name: svcName, projectRoot, ...payload }
+    if (windowId != null) emitToWindow(windowId, channel, msg)
+    else emitToRenderer(channel, msg)
   }
 
   const pipe = (stream: Readable | null, streamName: 'stdout' | 'stderr'): void => {
@@ -275,8 +280,7 @@ export async function runProject(projectRoot: string, name: unknown, command: st
   pipe(proc.stdout, 'stdout')
   pipe(proc.stderr, 'stderr')
 
-  // spawn 本身失败（如 shell 不存在，极罕见）：Node 异步抛 error 事件而非同步 throw；
-  // 以 build-exit{code:-1} 收口，避免前端永远停在"运行中"
+  // spawn 异步失败：以 build-exit{-1} 收口
   const isCurrent = (): boolean => slots.get(key)?.proc === proc
   proc.on('error', () => {
     if (isCurrent()) {
@@ -287,21 +291,19 @@ export async function runProject(projectRoot: string, name: unknown, command: st
   })
   proc.on('exit', (code) => {
     if (proc.pid) unregisterServiceProc(proc.pid)
-    // 已被同名槽重启替换的旧进程，其退出不再下发——否则旧 exit 会把新槽从 building 打回 error
     if (!isCurrent()) return
     slots.delete(key)
     emit('build-exit', { code: code ?? -1 })
   })
 
   slots.set(key, { name: key, proc })
-  // 登记进 pending-kill：Qyris 被强杀/崩溃时，下次启动能按记录清理孤儿进程树
   if (proc.pid) registerServiceProc(proc.pid, projectRoot)
   return proc.pid ?? -1
 }
 
 // ---------- 工具链预检 + HTTP 健康探测 ----------
 
-/** Windows cmd 内建命令不在 where.exe 搜索范围：直接放行交由 cmd.exe 执行 */
+/** Windows cmd 内建命令集合 */
 const CMD_BUILTINS = new Set([
   'dir', 'cd', 'md', 'mkdir', 'rd', 'rmdir', 'del', 'erase', 'copy', 'xcopy', 'robocopy',
   'move', 'ren', 'rename', 'echo', 'type', 'set', 'call', 'exit', 'for', 'if', 'rem', 'cls', 'start',
@@ -317,8 +319,7 @@ export function firstToken(command: string): string {
   return t.split(/\s+/)[0] ?? ''
 }
 
-/** 检测命令的可执行文件是否可找到（PATH 已由 buildChildEnv 重建）：
- *  Windows 用 where.exe、unix 用 command -v。返回 null 表示检测自身失败（不阻塞，交由 spawn 兜底报错） */
+/** 检测命令是否可找到。null=检测失败 */
 export function detectCommand(command: string): boolean | null {
   const token = firstToken(command)
   if (!token) return null
@@ -415,9 +416,6 @@ export function portOwner(port: number): { pid: number; name: string } | null {
 }
 
 // ---------- 孤儿服务进程清理 ----------
-// 强杀 Qyris / 崩溃时 will-quit 清理不执行，被预览的服务进程带着端口继续存活，
-// 下次启动必撞端口。策略：spawn 时登记 {pid, 项目根}，正常退出摘除；
-// 启动时扫描残留 → 校验进程命令行确含项目根（防 PID 复用误杀）→ 整树强杀。
 
 interface OrphanRecord {
   pid: number
@@ -516,7 +514,6 @@ export async function runOnce(projectRoot: string, command: string, cancelToken?
   const cmd = command.trim()
   if (!cmd) throw new Error('命令不能为空')
 
-  // 工具链预检：错误文案面向 AI（结果会回传模型自判），给出下一步行动指引
   const avail = detectCommand(cmd)
   if (avail === false) {
     throw new Error(`工具链缺失：未找到命令「${firstToken(cmd)}」（可能未安装或不在 PATH）。`)
@@ -555,7 +552,6 @@ export async function runOnce(projectRoot: string, command: string, cancelToken?
     collect(child.stdout, 'stdout')
     collect(child.stderr, 'stderr')
 
-    // 超时兜底：install 卡死时强杀整棵进程树，避免循环永久挂起
     const timer = setTimeout(() => {
       if (child.pid) killTree(child.pid)
     }, RUN_ONCE_TIMEOUT)

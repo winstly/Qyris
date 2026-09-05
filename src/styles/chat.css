@@ -403,22 +403,22 @@
   color: var(--fg);
 }
 
-/* 覆盖 highlight.js 主题，使用设计系统颜色 */
-.hljs-keyword { color: #c678dd; }
-.hljs-string, .hljs-addition { color: #98c379; }
-.hljs-number, .hljs-literal { color: #d19a66; }
-.hljs-comment, .hljs-deletion { color: var(--muted); font-style: italic; }
-.hljs-built_in, .hljs-bullet { color: #e5c07b; }
-.hljs-attr, .hljs-attribute { color: #d19a66; }
-.hljs-selector-tag, .hljs-selector-class { color: #e06c75; }
-.hljs-type, .hljs-title { color: #e5c07b; }
-.hljs-symbol, .hljs-regexp { color: #56b6c2; }
-.hljs-variable, .hljs-template-variable { color: #e06c75; }
-.hljs-doctag { color: #c678dd; }
-.hljs-meta, .hljs-meta .hljs-keyword { color: #61afef; }
-.hljs-section { color: #61afef; font-weight: bold; }
-.hljs-name { color: #e06c75; }
-.hljs-link { color: #61afef; text-decoration: underline; }
+/* 覆盖 highlight.js 主题，收敛到 tokens.css 的 muted 语法色（与 Monaco 共用一套 --syn-*） */
+.hljs-keyword { color: var(--syn-keyword); }
+.hljs-string, .hljs-addition { color: var(--syn-string); }
+.hljs-number, .hljs-literal { color: var(--syn-number); }
+.hljs-comment, .hljs-deletion { color: var(--syn-comment); font-style: italic; }
+.hljs-built_in, .hljs-bullet { color: var(--syn-type); }
+.hljs-attr, .hljs-attribute { color: var(--syn-number); }
+.hljs-selector-tag, .hljs-selector-class { color: var(--syn-variable); }
+.hljs-type, .hljs-title { color: var(--syn-type); }
+.hljs-symbol, .hljs-regexp { color: var(--syn-operator); }
+.hljs-variable, .hljs-template-variable { color: var(--syn-variable); }
+.hljs-doctag { color: var(--syn-keyword); }
+.hljs-meta, .hljs-meta .hljs-keyword { color: var(--syn-function); }
+.hljs-section { color: var(--syn-function); font-weight: bold; }
+.hljs-name { color: var(--syn-variable); }
+.hljs-link { color: var(--syn-function); text-decoration: underline; }
 
 /* ============ 工具调用卡片 ============ */
 

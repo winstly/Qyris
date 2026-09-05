@@ -1,6 +1,5 @@
-/** 轻量唯一 id（避免仅为 nanoid 增加依赖） */
 export function uid(): string {
-  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36)
+  return crypto.randomUUID()
 }
 
 export function safeParseObject(raw: string): Record<string, unknown> {

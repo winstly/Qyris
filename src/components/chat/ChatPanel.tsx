@@ -1,8 +1,8 @@
 import { useMemo } from 'react'
 import { useAppStore } from '@/store/useAppStore'
-import { useChatStore, type ChatStatus } from '@/store/useChatStore'
+import { useChatStore, selectCurrentChat, type ChatStatus } from '@/store/useChatStore'
 import { useFileStore } from '@/store/useFileStore'
-import { useAgentStore } from '@/store/useAgentStore'
+import { useAgentStore, selectCurrentAgent } from '@/store/useAgentStore'
 import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
 import { AgentView } from './AgentPanel'
@@ -19,18 +19,14 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 }
 
 export function ChatPanel() {
-  const status = useChatStore((s) => s.status)
-  const hasMessages = useChatStore((s) => s.messages.length > 0)
+  const { status, sessionId } = useChatStore(selectCurrentChat)
+  const hasMessages = useChatStore((s) => selectCurrentChat(s).messages.length > 0)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
-  const sessionId = useChatStore((s) => s.sessionId)
   const hasSessionChanges = useFileStore((s) => Object.values(s.snapshots).some((v) => v.sessionId === sessionId))
-  const agentOrder = useAgentStore((s) => s.order)
-  const agentThreads = useAgentStore((s) => s.threads)
-  const activeThreadId = useAgentStore((s) => s.activeThreadId)
+  const { order: agentOrder, threads: agentThreads, activeThreadId } = useAgentStore(selectCurrentAgent)
   const selectThread = useAgentStore((s) => s.selectThread)
 
-  // 切换器只列「活」的 agent（待执行/运行中）：完成/取消的从列表清理，
-  // 避免无效条目越积越多；结果回查走派发卡片的面板展开。
+  // 切换器只列活跃的 agent
   const liveAgentIds = useMemo(
     () =>
       agentOrder.filter((id) => {

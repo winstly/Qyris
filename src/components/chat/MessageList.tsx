@@ -1,12 +1,11 @@
 import { useEffect, useRef } from 'react'
-import { useChatStore } from '@/store/useChatStore'
+import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import type { ChatMessage } from '@/types'
 import { MessageBubble } from './MessageBubble'
 
 /** 消息列表：自动滚动到最新（用户上翻时暂停跟随，回到底部恢复）。 */
 export function MessageList() {
-  const messages = useChatStore((s) => s.messages)
-  const status = useChatStore((s) => s.status)
+  const { messages, status } = useChatStore(selectCurrentChat)
   const ref = useRef<HTMLDivElement>(null)
   const stickRef = useRef(true)
 

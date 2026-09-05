@@ -36,9 +36,10 @@ declare global {
     portOwner: (port: number) => Promise<{ pid: number; name: string } | null>
     previewConsoleAttach: (url: string | null) => Promise<void>
     previewConsoleHistory: () => Promise<PreviewConsoleEntry[]>
-    stopProject: (name?: string) => Promise<void>
+    stopProject: (projectRoot?: string | null, name?: string | null) => Promise<void>
     startWatching: (projectRoot: string) => Promise<void>
     stopWatching: () => Promise<void>
+    stopWatchingProject: (projectRoot: string) => Promise<void>
 
     // 配置与密钥（无 getSecret）
     getConfig: () => Promise<AppConfig>
@@ -82,12 +83,12 @@ declare global {
     openExternal: (url: string) => Promise<void>
 
     // 事件订阅（返回取消函数）
-    onBuildOutput: DesktopEventSub<{ name: string; stream: 'stdout' | 'stderr'; line: string }>
-    onBuildExit: DesktopEventSub<{ name: string; code: number }>
+    onBuildOutput: DesktopEventSub<{ name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }>
+    onBuildExit: DesktopEventSub<{ name: string; code: number; projectRoot?: string }>
     onAiDelta: DesktopEventSub<{ requestId: string; delta: string }>
     onAiReasoning: DesktopEventSub<{ requestId: string; delta: string }>
     onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }>
-    onFsChanged: DesktopEventSub<{ paths: string[] }>
+    onFsChanged: DesktopEventSub<{ paths: string[]; projectRoot?: string }>
     onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>
   }
 

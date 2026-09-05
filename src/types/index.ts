@@ -53,19 +53,6 @@ export interface PreviewConsoleEntry {
 /** idle=未运行 building=编译中 deploying=部署中 running=运行中 error=异常 */
 export type BuildPhase = 'idle' | 'building' | 'deploying' | 'running' | 'error'
 
-export interface BuildOutputEvent {
-  stream: 'stdout' | 'stderr'
-  line: string
-}
-
-export interface BuildExitEvent {
-  code: number
-}
-
-export interface FsChangedEvent {
-  paths: string[]
-}
-
 // ---------- AI / 对话 ----------
 
 /** 任务档位模型配置：空缺的档位回退主模型 */
