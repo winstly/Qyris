@@ -53,6 +53,13 @@ const desktopAPI = {
   portOwner: (port: number) =>
     ipcRenderer.invoke('port_owner', { port }) as Promise<{ pid: number; name: string } | null>,
   previewConsoleAttach: (url: string | null) => ipcRenderer.invoke('preview_console_attach', { url: url ?? null }),
+  previewSetUrl: (url: string) => ipcRenderer.invoke('preview_set_url', { url }) as Promise<void>,
+  previewBounds: (rect: { x: number; y: number; width: number; height: number }) => ipcRenderer.invoke('preview_bounds', rect) as Promise<void>,
+  previewReload: () => ipcRenderer.invoke('preview_reload') as Promise<void>,
+  previewClearCache: () => ipcRenderer.invoke('preview_clear_cache') as Promise<void>,
+  previewDevtools: () => ipcRenderer.invoke('preview_devtools') as Promise<void>,
+  previewExecuteJs: (code: string) => ipcRenderer.invoke('preview_execute_js', { code }) as Promise<unknown>,
+  previewSetVisible: (visible: boolean) => ipcRenderer.invoke('preview_visible', { visible }) as Promise<void>,
   previewConsoleHistory: () =>
     ipcRenderer.invoke('preview_console_history') as Promise<{ level: string; message: string; sourceId: string; ts: number }[]>,
   stopProject: (projectRoot?: string | null, name?: string | null) => ipcRenderer.invoke('stop_project', { projectRoot: projectRoot ?? null, name: name ?? null }),
@@ -116,7 +123,13 @@ const desktopAPI = {
     subscribe('ai-reasoning', cb),
   onCliToolEvent: (cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }) => void): Unsubscribe =>
     subscribe('cli-tool-event', cb),
+  onCliToolResult: (cb: (payload: { requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }) => void): Unsubscribe =>
+    subscribe('cli-tool-result', cb),
+  // 载荷结构与 src/types 的 CliAgentEventPayload 保持一致（electron tsconfig 不含 src，故此处内联）
+  onCliAgentEvent: (cb: (payload: { requestId: string; parentId: string; kind: 'text' | 'tool' | 'tool-result'; id?: string; name?: string; arguments?: string; text?: string; content?: string; isError?: boolean }) => void): Unsubscribe =>
+    subscribe('cli-agent-event', cb),
   onFsChanged: (cb: (payload: { paths: string[]; projectRoot?: string }) => void): Unsubscribe => subscribe('fs-changed', cb),
+  onElementPicked: (cb: (payload: { selector: string; tag: string; id: string; text: string }) => void): Unsubscribe => subscribe('element-picked', cb),
   onPreviewConsole: (cb: (payload: { level: string; message: string; sourceId: string; ts: number }) => void): Unsubscribe =>
     subscribe('preview-console', cb),
 }

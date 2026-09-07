@@ -103,3 +103,15 @@ export function setConsoleFilter(url: string | null): void {
 export function consoleHistory(): PreviewConsoleEntry[] {
   return [...buffer]
 }
+
+/** 归一化 console-message 事件参数（Electron 各版本签名不同：位置参数 vs 事件对象） */
+export function normalizeConsoleMessage(...args: unknown[]): PreviewConsoleEntry | null {
+  return normalize(args[1] ?? args[0], args[2] ?? (args[0] as { message?: unknown })?.message, args[4] ?? (args[0] as { sourceId?: unknown })?.sourceId)
+}
+
+/** 外部来源（WebContentsView）的 console 条目直接入缓冲并广播（已归一化） */
+export function pushConsoleEntry(entry: PreviewConsoleEntry): void {
+  buffer.push(entry)
+  if (buffer.length > BUFFER_CAP) buffer.splice(0, buffer.length - BUFFER_CAP)
+  emitToRenderer('preview-console', entry)
+}

@@ -3,7 +3,9 @@
  * 并联动左侧文件树 / 编辑器刷新。
  */
 import { api } from './desktop'
-import { useAppStore } from '@/store/useAppStore'
+import { useProjectStore } from '@/store/useProjectStore'
+import { useSettingsStore } from '@/store/useSettingsStore'
+import { useStartupStore } from '@/store/useStartupStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useChatStore, selectCurrentChat, patchSlice } from '@/store/useChatStore'
@@ -30,18 +32,17 @@ export interface ToolOutcome {
 
 /** AI 启动的服务命令沉淀：upsert 进当前项目存档（「全部运行」按钮直接复用，零模型） */
 function persistStartCommand(name: string, command: string, project?: string): void {
-  const app = useAppStore.getState()
-  const p = project ?? app.projectPath
+  const p = project ?? useProjectStore.getState().projectPath
   if (!p) return
-  const cur = app.startupCommandsMap[p] ?? []
+  const cur = useStartupStore.getState().startupCommandsMap[p] ?? []
   const next = cur.some((c) => c.name === name)
     ? cur.map((c) => (c.name === name ? { ...c, run: command } : c))
     : [...cur, { name, run: command }]
-  void app.setStartupCommands(next, p)
+  void useStartupStore.getState().setStartupCommands(next, p)
 }
 
 export async function executeTool(name: string, args: Record<string, unknown>, cardId = '', project = ''): Promise<ToolOutcome> {
-  const root = project || useAppStore.getState().projectPath
+  const root = project || useProjectStore.getState().projectPath
   if (!root) {
     return { result: '错误：当前没有打开的项目，请让用户先点击「打开项目」再进行文件操作。', summary: '未打开项目' }
   }
@@ -134,7 +135,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         if (services.length === 0) {
           return { result: '错误：services 不能为空，每项需包含 name（服务名）与 run（启动命令）。', summary: '启动清单为空' }
         }
-        await useAppStore.getState().setStartupCommands(services, root)
+        await useStartupStore.getState().setStartupCommands(services, root)
         const list = services.map((s) => `- ${s.name}：${s.run}`).join('\n')
         return {
           result: `已保存 ${services.length} 个服务的启动命令：\n${list}\n用户可在预览面板点击「全部运行」直接启动（无需再次识别）。`,
@@ -272,7 +273,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         if (!skillId) {
           return { result: '错误：skill_id 不能为空。', summary: 'skill_id 为空' }
         }
-        const { skillsDirs, skillMetas } = useAppStore.getState()
+        const { skillMetas, skillsDirs } = useSettingsStore.getState()
         if (!skillsDirs.length) {
           return { result: '错误：未配置 Skills 目录。请在设置 → 系统设置中配置。', summary: '未配置 Skills 目录' }
         }

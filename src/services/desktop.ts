@@ -2,7 +2,7 @@
  * Electron preload 暴露面（window.desktopAPI）的类型化封装层。
  * 前端所有文件操作都经由这里走主进程，绝不在渲染层直接碰文件系统。
  */
-import type { AppConfig, GitStatus, PreviewConsoleEntry } from '@/types'
+import type { AppConfig, CliAgentEventPayload, GitStatus, PreviewConsoleEntry } from '@/types'
 
 /** 是否运行在 Electron 桌面壳内（浏览器直接跑 vite 时为 false，界面会给出提示） */
 export const isDesktop = typeof window !== 'undefined' && !!window.desktopAPI
@@ -144,10 +144,60 @@ export function onCliToolEvent(cb: (payload: { requestId: string; id: string; na
   return window.desktopAPI.onCliToolEvent(cb)
 }
 
+export function onCliToolResult(cb: (payload: { requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onCliToolResult(cb)
+}
+
+export function onCliAgentEvent(cb: (payload: CliAgentEventPayload) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onCliAgentEvent(cb)
+}
+
+
+export function onElementPicked(cb: (payload: { selector: string; tag: string; id: string; text: string }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onElementPicked(cb)
+}
 
 export function onFsChanged(cb: (payload: { paths: string[]; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onFsChanged(cb)
+}
+
+export function previewSetUrl(url: string): Promise<void> {
+  if (!isDesktop || !window.desktopAPI) return Promise.resolve()
+  return window.desktopAPI.previewSetUrl(url)
+}
+
+export function previewBounds(rect: { x: number; y: number; width: number; height: number }): Promise<void> {
+  if (!isDesktop || !window.desktopAPI) return Promise.resolve()
+  return window.desktopAPI.previewBounds(rect)
+}
+
+export function previewReload(): Promise<void> {
+  if (!isDesktop || !window.desktopAPI) return Promise.resolve()
+  return window.desktopAPI.previewReload()
+}
+
+export function previewClearCache(): Promise<void> {
+  if (!isDesktop || !window.desktopAPI) return Promise.resolve()
+  return window.desktopAPI.previewClearCache()
+}
+
+export function previewDevtools(): Promise<void> {
+  if (!isDesktop || !window.desktopAPI) return Promise.resolve()
+  return window.desktopAPI.previewDevtools()
+}
+
+export function previewExecuteJs(code: string): Promise<unknown> {
+  if (!isDesktop || !window.desktopAPI) return Promise.resolve(undefined)
+  return window.desktopAPI.previewExecuteJs(code)
+}
+
+export function previewSetVisible(visible: boolean): Promise<void> {
+  if (!isDesktop || !window.desktopAPI) return Promise.resolve()
+  return window.desktopAPI.previewSetVisible(visible)
 }
 
 export function onPreviewConsole(cb: (payload: PreviewConsoleEntry) => void): () => void {

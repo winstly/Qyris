@@ -1,14 +1,15 @@
 /**
  * Claude CLI adapter 冒烟测试：对话序列化（system 丢弃 / 工具痕迹截断 / 工具名回查 / 总量掐头留尾）、
  * CLI 启动参数组装（flag 白名单 / 模型名净化 / 权限档位）、
- * 假 claude 子进程罐装 NDJSON 全链路（增量事件序列 / 工具活动行 / result 权威收口）。
+ * 假 claude 子进程罐装 NDJSON 全链路（增量事件序列 / 工具活动行 / 工具结果回填 /
+ * 子 agent 转录（parent_tool_use_id 路由）/ result 权威收口）。
  * 运行：npm run smoke:cli
  */
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { serializeConversation, buildCliSystemPrompt, buildCliArgs, claudeCliChatStream, setCliCommandForTest, extractNextModel, extractNextSkill, extractStartCommands, extractSkillIds, resolveSkillBlock, buildSkillIndex, buildModelMenu } from '../electron/lib/ai-cli'
-import { setMainWindow } from '../electron/lib/emitter'
+import { serializeConversation, buildCliSystemPrompt, buildCliArgs, claudeCliChatStream, setCliCommandForTest, extractNextSkill, extractStartCommands, extractSkillIds, resolveSkillBlock, buildSkillIndex } from '../electron/lib/ai-cli'
+import { registerWindow } from '../electron/lib/emitter'
 
 let failures = 0
 function assert(cond: boolean, label: string): void {
@@ -20,10 +21,12 @@ function assert(cond: boolean, label: string): void {
 }
 
 async function main(): Promise<void> {
-  // emitter 假窗口：捕获 emitToRenderer 广播（真实渲染进程外 mainWindow 恒 null，事件会被静默丢弃）
+  // emitter 假窗口：注册后捕获 emitToRenderer 广播（多窗口路由改造后的接线方式）
   const events: { channel: string; payload: Record<string, unknown> }[] = []
-  setMainWindow({
+  registerWindow({
+    id: 1,
     isDestroyed: () => false,
+    on: () => {},
     webContents: {
       send: (channel: string, payload: unknown) => {
         events.push({ channel, payload: payload as Record<string, unknown> })
@@ -75,16 +78,9 @@ async function main(): Promise<void> {
   assert(autoArgs.includes('--verbose'), '--verbose 完整事件')
   assert(autoArgs.includes('--include-partial-messages'), '--include-partial-messages 增量分片')
   assert(autoArgs.includes('--max-turns') && autoArgs.includes('60'), 'max-turns=60 防失控')
-  const mi = autoArgs.indexOf('--model')
-  assert(mi >= 0 && autoArgs[mi + 1] === 'sonnet', '--model 透传')
+  assert(!autoArgs.includes('--model'), '不传 --model（CLI 自带模型配置）')
   assert(autoArgs.includes('--dangerously-skip-permissions'), 'auto 档跳过权限确认')
   assert(autoArgs.every((a) => !a.includes(' ')), 'argv 全部无空格（cmd.exe /C 拼接零引号风险）')
-  assert(!buildCliArgs('', 'readonly').includes('--model'), '空模型省略 --model')
-  assert(!buildCliArgs('-dash', 'auto').includes('--model'), '以 - 开头的模型名丢弃（防 flag 注入）')
-  const cleanArgs = buildCliArgs('gpt-4o mini!', 'auto')
-  assert(cleanArgs[cleanArgs.indexOf('--model') + 1] === 'gpt-4omini', '模型名净化（去空格与非法字符）')
-  const colonArgs = buildCliArgs('anthropic:claude-x', 'auto')
-  assert(colonArgs[colonArgs.indexOf('--model') + 1] === 'anthropic:claude-x', '模型名净化保留冒号（网关限定名）')
   const roArgs = buildCliArgs('sonnet', 'readonly')
   const ai = roArgs.indexOf('--allowedTools')
   assert(ai >= 0 && roArgs[ai + 1] === 'Read,Glob,Grep,LS,TodoWrite,WebSearch,WebFetch', 'readonly 档白名单逗号单参数')
@@ -94,16 +90,15 @@ async function main(): Promise<void> {
   assert(buildCliSystemPrompt('E:/proj').includes('E:/proj'), '包含项目目录')
   assert(buildCliSystemPrompt(null).includes('未打开项目'), '无项目提示')
   assert(buildCliSystemPrompt('E:/proj').includes('不存在于你这里'), '声明轻驭工具痕迹不可用')
-  assert(buildCliSystemPrompt('E:/proj', 'MENU_LINES').includes('MENU_LINES'), '模型菜单注入系统提示')
-  assert(!buildCliSystemPrompt('E:/proj').includes('NEXT_MODEL'), '无菜单时不出现选模规则')
+  assert(!buildCliSystemPrompt('E:/proj').includes('NEXT_MODEL'), '系统提示不含选模指令')
   assert(
-    buildCliSystemPrompt('E:/proj', '', 'SKILL_BLOCK_HERE').includes('SKILL_BLOCK_HERE')
-      && buildCliSystemPrompt('E:/proj', '', 'X').includes('唯一的例外是 load_skill'),
+    buildCliSystemPrompt('E:/proj', 'SKILL_BLOCK_HERE').includes('SKILL_BLOCK_HERE')
+      && buildCliSystemPrompt('E:/proj', 'X').includes('唯一的例外是 load_skill'),
     'Skill 内容注入 + load_skill 例外声明',
   )
   assert(buildCliSystemPrompt('E:/proj').includes('忽略它并按任务字面继续'), '无 Skill 时声明忽略加载要求')
 
-  console.log('extractSkillIds / buildModelMenu / resolveSkillBlock：')
+  console.log('extractSkillIds / resolveSkillBlock：')
   const skillMsgs = [
     { role: 'system', content: 'sys' },
     { role: 'user', content: '请先用 load_skill 依次加载以下 2 个 Skill，全部加载后再执行：ding, frontend-design\n\n任务正文' },
@@ -133,14 +128,6 @@ async function main(): Promise<void> {
   assert(extractStartCommands('[[START_COMMANDS: [{\"name\":\"a\",\"run\":\"b\"}]]]\n尾随文本').commands.length === 0, '非末尾不提取')
   assert(extractStartCommands('普通正文').commands.length === 0, '无指令返回空')
   assert(buildCliSystemPrompt('E:/proj').includes('[[START_COMMANDS:'), '系统提示含启动命令协议')
-  assert(buildModelMenu(null) === '', 'config 为 null 时菜单为空')
-  const menu = buildModelMenu({
-    lastProjectPath: null, aiBaseUrl: null, aiModel: 'claude-sonnet-4-6', aiProvider: 'anthropic',
-    aiDispatchMode: 'claude-cli', aiCliPermission: 'auto',
-    aiTiers: { fast: 'claude-haiku-4-5', heavy: 'claude-opus-4-6' },
-  })
-  assert(menu.includes('主模型（默认）：claude-sonnet-4-6') && menu.includes('档位 fast：claude-haiku-4-5'), '菜单含主模型与档位')
-  assert(menu.includes('[[NEXT_MODEL:'), '菜单含选模规则')
 
   const skillDir = mkdtempSync(path.join(os.tmpdir(), 'qyris-cli-skill-'))
   try {
@@ -174,19 +161,10 @@ async function main(): Promise<void> {
     assert(!idx.includes('钉味'), '已内联的 id 从索引排除')
     assert(idx.includes('[[NEXT_SKILL:'), '索引含请求通道说明')
     assert(await buildSkillIndex([], []) === '', '无目录索引为空')
-    assert(buildCliSystemPrompt('E:/proj', '', '', idx).includes(idx), '索引注入系统提示')
+    assert(buildCliSystemPrompt('E:/proj', '', idx).includes(idx), '索引注入系统提示')
   } finally {
     rmSync(skillDir, { recursive: true, force: true })
   }
-
-  console.log('extractNextModel：')
-  assert(extractNextModel('正文\n[[NEXT_MODEL: claude-haiku-4-5]]').nextModel === 'claude-haiku-4-5', '末行指令提取')
-  assert(extractNextModel('正文\n[[NEXT_MODEL: claude-haiku-4-5]]').text === '正文', '指令行从正文剥离')
-  assert(extractNextModel('正文没有指令') === null || extractNextModel('正文没有指令').nextModel === null, '无指令返回 null')
-  assert(extractNextModel('[[NEXT_MODEL: m1]]\n后续文本').nextModel === null, '非末尾指令不提取')
-  assert(extractNextModel('正文\n[[next_model: Sonnet-4.6]]').nextModel === 'Sonnet-4.6', '大小写不敏感且允许点号')
-  assert(extractNextModel('正文\n[[NEXT_MODEL: anthropic:claude-haiku]]').nextModel === 'anthropic:claude-haiku', '网关限定名含冒号可提取')
-  assert(extractNextModel('正文\n[[NEXT_MODEL: rm -rf x]]').nextModel === null, '含空格的非法模型名不提取')
 
   console.log('假 claude 全链路（罐装 NDJSON）：')
   const dir = mkdtempSync(path.join(os.tmpdir(), 'qyris-cli-smoke-'))
@@ -203,7 +181,22 @@ async function main(): Promise<void> {
       JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start', index: 2, content_block: { type: 'tool_use', id: 'tu2', name: 'Write' } } }),
       JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 2, delta: { type: 'input_json_delta', partial_json: '{"file_path":"src/a.ts","content":"x"}' } } }),
       JSON.stringify({ type: 'stream_event', event: { type: 'content_block_stop', index: 2 } }),
-      JSON.stringify({ type: 'result', subtype: 'success', result: 'FINAL TEXT\n[[START_COMMANDS: [{"name":"portal","run":"npm run dev"}]]]\n[[NEXT_SKILL: ding, 钉味2]]\n[[NEXT_MODEL: claude-haiku-4-5]]', total_cost_usd: 0.0042, num_turns: 3, session_id: 'sess-test-1' }),
+      // 完整 assistant 事件（主线程）：stream_event 已流式覆盖，不得重复入卡
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'echo hi' } }] }, parent_tool_use_id: null }),
+      // 主线程 tool_result（user 事件）：string content 与块数组 content 两种形态
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ tool_use_id: 'tu1', type: 'tool_result', content: 'probe-step-1', is_error: false }] }, parent_tool_use_id: null }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ tool_use_id: 'tu2', type: 'tool_result', content: [{ type: 'text', text: 'line1' }, { type: 'text', text: 'line2' }], is_error: true }] }, parent_tool_use_id: null }),
+      // 子 agent 派发（Agent）流式组装
+      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_start', index: 3, content_block: { type: 'tool_use', id: 'tu3', name: 'Agent' } } }),
+      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 3, delta: { type: 'input_json_delta', partial_json: '{"description":"Run probe","prompt":"p","subagent_type":"general-purpose"}' } } }),
+      JSON.stringify({ type: 'stream_event', event: { type: 'content_block_stop', index: 3 } }),
+      // 子 agent 事件（parent_tool_use_id=tu3）：工具调用 → 工具结果（任务指令 user 文本事件不入转录）
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ type: 'text', text: '运行 echo' }] }, parent_tool_use_id: 'tu3' }),
+      JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: '子代理说明' }, { type: 'tool_use', id: 'tu-sub', name: 'PowerShell', input: { command: 'echo subagent-ok' } }] }, parent_tool_use_id: 'tu3' }),
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ tool_use_id: 'tu-sub', type: 'tool_result', content: 'subagent-ok', is_error: false }] }, parent_tool_use_id: 'tu3' }),
+      // Agent 派发卡结果收口（主线程 user 事件 + 子 agent token 账目）
+      JSON.stringify({ type: 'user', message: { role: 'user', content: [{ tool_use_id: 'tu3', type: 'tool_result', content: [{ type: 'text', text: '子代理报告' }], is_error: false }] }, parent_tool_use_id: null, tool_use_result: { status: 'completed', usage: { input_tokens: 11949, output_tokens: 22 } } }),
+      JSON.stringify({ type: 'result', subtype: 'success', result: 'FINAL TEXT\n[[START_COMMANDS: [{"name":"portal","run":"npm run dev"}]]]\n[[NEXT_SKILL: ding, 钉味2]]', total_cost_usd: 0.0042, num_turns: 3, session_id: 'sess-test-1' }),
     ].join('\n')
     const cannedPath = path.join(dir, 'canned.ndjson')
     writeFileSync(cannedPath, canned, 'utf8')
@@ -225,23 +218,48 @@ async function main(): Promise<void> {
       { role: 'user', content: 'hi' },
     ], dir, 'auto')
 
-    assert(completion.content === 'FINAL TEXT', 'result 全文为权威 content（三条指令行均剥离）')
-    assert(completion.nextModel === 'claude-haiku-4-5', '下一轮模型指令透传 nextModel')
+    assert(completion.content === 'FINAL TEXT', 'result 全文为权威 content（两条指令行均剥离）')
     assert(completion.nextSkill?.join('|') === 'ding|钉味2', '下一轮 Skill 请求透传 nextSkill')
     assert(completion.startCommands?.length === 1 && completion.startCommands[0].name === 'portal', '启动命令清单透传 startCommands')
     const rsn = completion.reasoning ?? ''
     assert(
-      rsn.includes('下一轮对话将使用模型：claude-haiku-4-5')
-      && rsn.includes('下一轮将附带 Skill：ding、钉味2')
+      rsn.includes('下一轮将附带 Skill：ding、钉味2')
       && rsn.includes('启动命令清单已提交（1 项：portal）'),
-      '三项决策进 reasoning 透明展示',
+      '两项决策进 reasoning 透明展示',
     )
     assert(completion.finishReason === 'stop', 'finishReason=stop')
     // CLI 工具活动通过 cli-tool-event 实时写入消息，不进 completion.toolCalls（避免触发 executeTool）
     assert(completion.toolCalls.length === 0, `toolCalls 数=${completion.toolCalls.length}（CLI 模式不进 completion.toolCalls）`)
     assert((completion.reasoning ?? '').includes('step1 '), 'thinking 增量进 reasoning')
-    // 工具活动行已分离到 cli-activity 事件（不再进 reasoning），见下方 acts 断言
+    // 工具指令/结果与子 agent 转录经 cli-tool-event / cli-tool-result / cli-agent-event 分离，见下方断言
     assert((completion.reasoning ?? '').includes('3 轮') && (completion.reasoning ?? '').includes('$0.0042'), '完成元信息（轮数/费用）')
+
+    console.log('cli-tool-event / cli-tool-result / cli-agent-event：')
+    const toolEvents = events.filter((e) => e.channel === 'cli-tool-event' && e.payload.requestId === 'req-smoke-1')
+    const starts = toolEvents.filter((e) => e.payload.phase === 'start')
+    assert(starts.length === 3, `cli-tool-event start 数=3（主线程完整 assistant 事件不重复入卡，实际 ${starts.length}）`)
+    const agentStart = starts.find((e) => e.payload.name === 'Agent')
+    assert(!!agentStart && agentStart.payload.id === 'tu3', 'Agent 派发卡 start 事件')
+
+    const toolResults = events.filter((e) => e.channel === 'cli-tool-result' && e.payload.requestId === 'req-smoke-1')
+    assert(toolResults.length === 3, `cli-tool-result 数=3（实际 ${toolResults.length}）`)
+    const r1 = toolResults.find((e) => e.payload.id === 'tu1')!
+    assert(r1.payload.content === 'probe-step-1' && r1.payload.isError === false && r1.payload.tokens === undefined, '主线程工具结果（string content）回填')
+    const r2 = toolResults.find((e) => e.payload.id === 'tu2')!
+    assert(r2.payload.content === 'line1\nline2' && r2.payload.isError === true, '工具结果块数组拼接 + is_error 透传')
+    const r3 = toolResults.find((e) => e.payload.id === 'tu3')!
+    assert(r3.payload.content === '子代理报告' && r3.payload.isError === false, 'Agent 派发结果收口')
+    const r3t = r3.payload.tokens as { input: number; output: number } | undefined
+    assert(r3t?.input === 11949 && r3t?.output === 22, '子 agent token 账目透传')
+
+    const agentEvents = events.filter((e) => e.channel === 'cli-agent-event' && e.payload.requestId === 'req-smoke-1')
+    assert(agentEvents.every((e) => e.payload.parentId === 'tu3'), 'cli-agent-event 全部归属 Agent 派发卡')
+    const kinds = agentEvents.map((e) => e.payload.kind)
+    assert(JSON.stringify(kinds) === JSON.stringify(['text', 'tool', 'tool-result']), `子 agent 转录事件序列（实际 ${JSON.stringify(kinds)}）`)
+    const subTool = agentEvents.find((e) => e.payload.kind === 'tool')!
+    assert(subTool.payload.name === 'PowerShell' && String(subTool.payload.arguments).includes('echo subagent-ok'), '子 agent 工具调用入卡（名字+参数）')
+    const subResult = agentEvents.find((e) => e.payload.kind === 'tool-result')!
+    assert(subResult.payload.id === 'tu-sub' && subResult.payload.content === 'subagent-ok' && subResult.payload.isError === false, '子 agent 工具结果回填')
 
     const deltas = events.filter((e) => e.channel === 'ai-delta' && e.payload.requestId === 'req-smoke-1')
     assert(deltas.map((e) => e.payload.delta).join('') === 'Hello world', 'ai-delta 增量序列拼出正文')

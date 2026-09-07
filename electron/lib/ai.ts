@@ -23,8 +23,6 @@ export interface AiCompletion {
   reasoning: string | null
   toolCalls: AiToolCall[]
   finishReason: string | null
-  /** 仅 CLI 模式：模型为下一轮对话指定的模型（已从正文剥离指令行；渲染层白名单校验后采用） */
-  nextModel?: string | null
   /** 仅 CLI 模式：模型请求下一轮附带的 Skill id 列表（渲染层按已扫描索引校验后采用） */
   nextSkill?: string[]
   /** 仅 CLI 模式：模型提交的启动命令清单（AI 编译场景，已按 name/run 归一；渲染层负责落盘） */

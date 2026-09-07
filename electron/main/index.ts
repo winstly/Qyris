@@ -16,6 +16,7 @@ import * as skills from '../lib/skills'
 import * as projectCreate from '../lib/project-create'
 import * as git from '../lib/git'
 import * as consolebridge from '../lib/consolebridge'
+import * as preview from '../lib/preview'
 
 interface WindowState {
   x?: number
@@ -97,6 +98,13 @@ function registerIpc(): void {
   handle('check_url', (_e, p) => proc.checkUrlHealthy(String(p?.url ?? '')))
   // 预览控制台
   handle('preview_console_attach', (_e, p) => consolebridge.setConsoleFilter(p?.url ? String(p.url) : null))
+  handle('preview_set_url', async (_e, p) => preview.setPreviewUrl(String(p?.url ?? '')))
+  handle('preview_bounds', async (_e, p) => preview.setPreviewBounds(p as { x: number; y: number; width: number; height: number }))
+  handle('preview_reload', async () => preview.reloadPreview())
+  handle('preview_clear_cache', async () => preview.clearPreviewCache())
+  handle('preview_devtools', async () => preview.previewOpenDevTools())
+  handle('preview_execute_js', async (_e, p) => preview.previewExecuteJs(String(p?.code ?? '')))
+  handle('preview_visible', async (_e, p) => preview.setPreviewVisible(p?.visible !== false))
   handle('preview_console_history', () => consolebridge.consoleHistory())
   // 端口占用查询
   handle('port_owner', (_e, p) => proc.portOwner(Number(p?.port)))
@@ -185,11 +193,8 @@ function registerIpc(): void {
     }
     return shell.openExternal(url)
   })
-  handle('start_element_pick', (e, p) => {
-    const win = BrowserWindow.fromWebContents(e.sender)
-    if (win && !win.isDestroyed()) {
-      void inspect.startElementPick(win.webContents, String(p.url ?? ''))
-    }
+  handle('start_element_pick', () => {
+    void inspect.startElementPick(preview.getPreviewWebContents())
   })
 }
 
@@ -230,6 +235,7 @@ function createWindow(): void {
 
   if (state.maximized && getAllWindows().length === 0) win.maximize()
   registerWindow(win)
+  preview.setPreviewHost(win)
 
   win.once('ready-to-show', () => win.show())
   consolebridge.attachConsoleCapture(win)

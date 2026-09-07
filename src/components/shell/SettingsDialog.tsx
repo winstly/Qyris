@@ -148,7 +148,7 @@ export function SettingsDialog() {
               />
               <span className="field__hint">
                 {dispatchMode === 'claude-cli'
-                  ? '经由本机 claude 命令自主执行，自带文件/命令工具，无需 API Key；首轮用主模型，后续 CLI 按任务轻重在每轮末尾为下一轮挑选模型（任务档位即候选菜单）；需已安装并登录 Claude Code'
+                  ? '经由本机 claude 命令自主执行，自带文件/命令工具与模型配置，无需 API Key；需已安装并登录 Claude Code'
                   : '主进程直连模型服务；需要调度本机工具时切换到 Claude CLI'}
               </span>
             </label>
@@ -213,39 +213,43 @@ export function SettingsDialog() {
               </>
             )}
 
-            <label className="field">
-              <span className="field__label">主模型</span>
-              <input
-                className="field__input mono"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                placeholder="gpt-4o-mini"
-              />
-              <span className="field__hint">规划 + 复杂任务 + 未配置档位的兜底模型</span>
-            </label>
+            {dispatchMode === 'api' && (
+              <>
+                <label className="field">
+                  <span className="field__label">主模型</span>
+                  <input
+                    className="field__input mono"
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
+                    placeholder="gpt-4o-mini"
+                  />
+                  <span className="field__hint">规划 + 复杂任务 + 未配置档位的兜底模型</span>
+                </label>
 
-            <div className="field">
-              <span className="field__label">任务档位模型（可选，留空用主模型）</span>
-              <div className="settings-tiers">
-                {([
-                  { key: 'thinking', label: 'Thinking · 深度推理', hint: '疑难调试 / 架构分析' },
-                  { key: 'fast', label: 'Haiku 级 · 轻量快速', hint: '查找 / 统计 / 总结' },
-                  { key: 'middle', label: 'Sonnet 级 · 中等', hint: '常规代码修改' },
-                  { key: 'heavy', label: 'Opus 级 · 最重', hint: '复杂重构 / 跨模块改动' },
-                ] as const).map(({ key, label, hint }) => (
-                  <label key={key} className="settings-tiers__row" title={hint}>
-                    <span className="settings-tiers__label">{label}</span>
-                    <input
-                      className="field__input mono"
-                      value={tiers[key] ?? ''}
-                      onChange={(e) => setTiers((prev) => ({ ...prev, [key]: e.target.value }))}
-                      placeholder="留空用主模型"
-                    />
-                  </label>
-                ))}
-              </div>
-              <span className="field__hint">API 模式：按子任务难度自动选档，未配置回退主模型；CLI 模式：作为模型菜单，CLI 在每轮末尾为下一轮挑选</span>
-            </div>
+                <div className="field">
+                  <span className="field__label">任务档位模型（可选，留空用主模型）</span>
+                  <div className="settings-tiers">
+                    {([
+                      { key: 'thinking', label: 'Thinking · 深度推理', hint: '疑难调试 / 架构分析' },
+                      { key: 'fast', label: 'Haiku 级 · 轻量快速', hint: '查找 / 统计 / 总结' },
+                      { key: 'middle', label: 'Sonnet 级 · 中等', hint: '常规代码修改' },
+                      { key: 'heavy', label: 'Opus 级 · 最重', hint: '复杂重构 / 跨模块改动' },
+                    ] as const).map(({ key, label, hint }) => (
+                      <label key={key} className="settings-tiers__row" title={hint}>
+                        <span className="settings-tiers__label">{label}</span>
+                        <input
+                          className="field__input mono"
+                          value={tiers[key] ?? ''}
+                          onChange={(e) => setTiers((prev) => ({ ...prev, [key]: e.target.value }))}
+                          placeholder="留空用主模型"
+                        />
+                      </label>
+                    ))}
+                  </div>
+                  <span className="field__hint">按子任务难度自动选档，未配置回退主模型</span>
+                </div>
+              </>
+            )}
 
             <div className="field">
               <span className="field__label">Skills 目录（可多个，按序扫描，同名取首个；失焦后生效）</span>
@@ -322,7 +326,7 @@ export function SettingsDialog() {
                   {testing ? '测试中…' : '测试连接'}
                 </button>
                 <button className="btn btn--ghost" onClick={() => setOpen(false)}>取消</button>
-                <button className="btn btn--primary" onClick={onSave} disabled={!model.trim() || (dispatchMode === 'api' && !baseUrl.trim())}>
+                <button className="btn btn--primary" onClick={onSave} disabled={(dispatchMode === 'api' && (!model.trim() || !baseUrl.trim()))}>
                   保存
                 </button>
               </div>

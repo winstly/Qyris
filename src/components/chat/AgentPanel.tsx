@@ -5,12 +5,49 @@
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ToolCall } from '@/types'
-import { useAgentStore, selectCurrentAgent, type AgentThread } from '@/store/useAgentStore'
+import { useAgentStore, selectCurrentAgent, type AgentThread, type AgentEntryTool } from '@/store/useAgentStore'
 import { fmtTok } from '@/utils/tokens'
-import { IconAlert, IconBranch, IconCheck } from '@/components/common/icons'
+import { IconAlert, IconBranch, IconCheck, IconTerminal } from '@/components/common/icons'
+import { TOOL_META } from './ToolCallCard'
 
 export const AGENT_STATUS_LABEL: Record<string, string> = {
   pending: '待执行', running: '运行中', done: '完成', error: '异常', cancelled: '已取消',
+}
+
+/** 子 agent 转录中的工具条目：复用 ToolCallCard 风格的折叠卡片 */
+function AgentToolEntry({ entry }: { entry: AgentEntryTool }) {
+  const [open, setOpen] = useState(false)
+  const meta = TOOL_META[entry.name] ?? { label: entry.name, icon: <IconTerminal size={13} /> }
+  const args = entry.args ?? {}
+  const target = String(
+    args.file_path ?? args.path ?? args.dir ?? args.command
+      ?? args.pattern ?? args.url ?? args.query ?? '',
+  ).slice(0, 120)
+
+  return (
+    <button
+      className={`toolcard toolcard--${entry.status}`}
+      onClick={() => entry.result && setOpen((v) => !v)}
+      aria-expanded={open}
+    >
+      <span className="toolcard__row">
+        <span className="toolcard__icon">{meta.icon}</span>
+        <span className="toolcard__text">
+          {meta.label}
+          {target && <code className="toolcard__target"> {target}</code>}
+        </span>
+        <span className="toolcard__state">
+          {entry.summary && entry.summary !== meta.label && <span className="toolcard__summary">{entry.summary}</span>}
+          {entry.status === 'running' && <span className="spinner" aria-label="执行中" />}
+          {entry.status === 'done' && <IconCheck size={12} />}
+          {entry.status === 'error' && <IconAlert size={12} />}
+        </span>
+      </span>
+      {open && entry.result && (
+        <pre className="toolcard__detail mono">{entry.result}</pre>
+      )}
+    </button>
+  )
 }
 
 /** 实时转录：文本轮次 + 工具调用入账。embedded=true 不限高；全屏模式撑满面板高度 */
@@ -32,11 +69,7 @@ export function AgentTranscript({ thread, embedded = false }: { thread: AgentThr
         e.kind === 'text' ? (
           <div key={i} className="agentview__text">{e.content}</div>
         ) : (
-          <div key={i} className="agentview__tool" data-status={e.status}>
-            <code>{e.name}</code>
-            <span>{e.summary}</span>
-            {e.status === 'running' && <span className="spinner" aria-label="执行中" />}
-          </div>
+          <AgentToolEntry key={i} entry={e} />
         ),
       )}
     </div>
@@ -93,15 +126,16 @@ export function AgentPanel({ cardId }: { cardId: string }) {
   )
 }
 
-/** dispatch_subtasks 的工具卡片 */
+/** 子任务编排（dispatch_subtasks）/ CLI 子 agent 派发（Agent/Task）的工具卡片 */
 export function AgentToolCard({ call }: { call: ToolCall }) {
   const [open, setOpen] = useState(() => call.status === 'running')
+  const cliDispatch = call.name === 'Agent' || call.name === 'Task'
 
   return (
     <div className={`toolcard toolcard--${call.status} agentcard`}>
       <button className="toolcard__row agentcard__head" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
         <span className="toolcard__icon"><IconBranch size={13} /></span>
-        <span className="toolcard__text">子任务编排</span>
+        <span className="toolcard__text">{cliDispatch ? '子 agent' : '子任务编排'}</span>
         <span className="toolcard__state">
           {call.resultSummary && <span className="toolcard__summary">{call.resultSummary}</span>}
           {call.status === 'running' && <span className="spinner" aria-label="执行中" />}

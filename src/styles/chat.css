@@ -158,6 +158,22 @@
 .msg__meta-card-name {
   color: var(--fg);
 }
+.msg__meta-card-hint {
+  font-size: 11px;
+  color: var(--muted);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 元素卡片：待发态轻柔上下浮动，已发送静止 */
+.msg__meta-card--element.msg__meta-card--pending {
+  animation: meta-float 2.4s ease-in-out infinite;
+}
+@keyframes meta-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
 .msg__meta-card-remove {
   display: inline-flex;
   padding: 1px;
@@ -565,31 +581,6 @@
   border-top: 1px solid var(--border-soft);
 }
 
-/* 已选预览元素 chip */
-.chat__picked {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: var(--space-2);
-  padding: 5px 8px;
-  background: color-mix(in oklab, var(--accent), transparent 90%);
-  border: 1px solid color-mix(in oklab, var(--accent), transparent 70%);
-  border-radius: var(--radius-sm);
-  font-size: 11px;
-  color: var(--fg-2);
-}
-.chat__picked-label { flex-shrink: 0; color: var(--muted); }
-.chat__picked-sel { font-size: 11px; color: var(--accent); }
-.chat__picked-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
-.chat__picked-clear {
-  margin-left: auto;
-  display: inline-flex;
-  padding: 2px;
-  border-radius: 4px;
-  color: var(--muted);
-}
-.chat__picked-clear:hover { color: var(--fg); background: var(--row-hover); }
-
 .chat__inputbox {
   display: flex;
   align-items: center;
@@ -892,18 +883,6 @@
   border-radius: 8px;
   padding: 8px 10px;
 }
-.agentview__tool {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-micro);
-  color: var(--muted);
-  padding: 4px 8px;
-  border: 1px dashed var(--edge-hair);
-  border-radius: 6px;
-}
-.agentview__tool[data-status='error'] { color: var(--danger); }
-.agentview__tool code { color: var(--fg-2); }
 .agentview__empty { color: var(--muted); font-size: var(--text-sm); text-align: center; padding: 12px; }
 
 @keyframes agent-pulse {

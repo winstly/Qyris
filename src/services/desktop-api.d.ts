@@ -35,6 +35,13 @@ declare global {
     checkUrl: (url: string) => Promise<boolean>
     portOwner: (port: number) => Promise<{ pid: number; name: string } | null>
     previewConsoleAttach: (url: string | null) => Promise<void>
+    previewSetUrl: (url: string) => Promise<void>
+    previewBounds: (rect: { x: number; y: number; width: number; height: number }) => Promise<void>
+    previewReload: () => Promise<void>
+    previewClearCache: () => Promise<void>
+    previewDevtools: () => Promise<void>
+    previewExecuteJs: (code: string) => Promise<unknown>
+    previewSetVisible: (visible: boolean) => Promise<void>
     previewConsoleHistory: () => Promise<PreviewConsoleEntry[]>
     stopProject: (projectRoot?: string | null, name?: string | null) => Promise<void>
     startWatching: (projectRoot: string) => Promise<void>
@@ -88,7 +95,10 @@ declare global {
     onAiDelta: DesktopEventSub<{ requestId: string; delta: string }>
     onAiReasoning: DesktopEventSub<{ requestId: string; delta: string }>
     onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }>
+    onCliToolResult: DesktopEventSub<{ requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }>
+    onCliAgentEvent: DesktopEventSub<CliAgentEventPayload>
     onFsChanged: DesktopEventSub<{ paths: string[]; projectRoot?: string }>
+    onElementPicked: DesktopEventSub<{ selector: string; tag: string; id: string; text: string }>
     onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>
   }
 

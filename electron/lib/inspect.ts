@@ -1,13 +1,24 @@
 /**
- * 预览 iframe 元素选取器：向预览应用（不同源的 localhost 前端）注入 overlay 脚本，
- * 悬停高亮、点击选中，选中后经 window.parent.postMessage 把元素信息带回工作台主窗口。
- * 跨域 DOM 无法从渲染层访问，故由主进程对 iframe frame 执行 executeJavaScript 绕开。
+ * 预览元素选取器：向预览 WebContentsView 注入 overlay 脚本，
+ * 悬停高亮、点击选中，选中后经 Promise（executeJavaScript 返回值）带回主进程。
+ * WebContentsView 是独立进程，不走 postMessage——picker 返回 Promise，
+ * 主进程 await 后直接 emitToRenderer 转发渲染层。
  */
 import type { WebContents } from 'electron'
+import { emitToRenderer } from './emitter'
 
-/** 注入到预览 iframe 的一段独立自脚脚本（无外部依赖，跑在预览应用自己的上下文里） */
+export interface PickedElement {
+  selector: string
+  tag: string
+  id: string
+  text: string
+}
+
+/** 注入到预览页的选取器脚本（无外部依赖，跑在预览应用自己的上下文里）。
+ *  返回 Promise<string|null>：选中返回 JSON.stringify(info)，Esc 返回 null。
+ *  executeJavaScript 会 await 该 Promise 直到用户操作完成。 */
 const PICKER_SCRIPT = String.raw`(function () {
-  if (window.__wbPicker) return
+  if (window.__wbPicker) return Promise.resolve(null)
   window.__wbPicker = true
 
   var box = document.createElement('div')
@@ -21,72 +32,70 @@ const PICKER_SCRIPT = String.raw`(function () {
 
   var prevCursor = document.body.style.cursor
 
-  function describe(el) {
-    var tag = (el.tagName || '').toLowerCase()
-    var id = el.id ? '#' + el.id : ''
-    var cls = ''
-    if (typeof el.className === 'string' && el.className.trim()) {
-      cls = '.' + el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6).join('.')
+  return new Promise(function (resolve) {
+    function describe(el) {
+      var tag = (el.tagName || '').toLowerCase()
+      var id = el.id ? '#' + el.id : ''
+      var cls = ''
+      if (typeof el.className === 'string' && el.className.trim()) {
+        cls = '.' + el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6).join('.')
+      }
+      var text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 120)
+      return { selector: tag + id + cls, tag: tag, id: el.id || '', text: text }
     }
-    var text = (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 300)
-    return { selector: tag + id + cls, tag: tag, id: el.id || '', text: text }
-  }
 
-  function move(e) {
-    var el = e.target
-    if (el === box || el === hint) return
-    var r = el.getBoundingClientRect()
-    box.style.left = r.left + 'px'
-    box.style.top = r.top + 'px'
-    box.style.width = r.width + 'px'
-    box.style.height = r.height + 'px'
-  }
+    function move(e) {
+      var el = e.target
+      if (el === box || el === hint) return
+      var r = el.getBoundingClientRect()
+      box.style.left = r.left + 'px'
+      box.style.top = r.top + 'px'
+      box.style.width = r.width + 'px'
+      box.style.height = r.height + 'px'
+    }
 
-  function done(info) {
-    window.__wbPicker = false
-    box.remove()
-    hint.remove()
-    document.removeEventListener('mousemove', move, true)
-    document.removeEventListener('click', pick, true)
-    document.removeEventListener('keydown', esc, true)
-    document.body.style.cursor = prevCursor
-    if (info) window.parent.postMessage({ type: 'workbench-element-picked', payload: info }, '*')
-  }
+    function done(info) {
+      window.__wbPicker = false
+      box.remove()
+      hint.remove()
+      document.removeEventListener('mousemove', move, true)
+      document.removeEventListener('click', pick, true)
+      document.removeEventListener('keydown', esc, true)
+      document.body.style.cursor = prevCursor
+      resolve(info ? JSON.stringify(info) : null)
+    }
 
-  function pick(e) {
-    e.preventDefault()
-    e.stopPropagation()
-    var el = e.target
-    if (el === box || el === hint) return
-    done(describe(el))
-  }
+    function pick(e) {
+      e.preventDefault()
+      e.stopPropagation()
+      var el = e.target
+      if (el === box || el === hint) return
+      done(describe(el))
+    }
 
-  function esc(e) {
-    if (e.key === 'Escape') done(null)
-  }
+    function esc(e) {
+      if (e.key === 'Escape') done(null)
+    }
 
-  document.body.style.cursor = 'crosshair'
-  document.addEventListener('mousemove', move, true)
-  document.addEventListener('click', pick, true)
-  document.addEventListener('keydown', esc, true)
+    document.body.style.cursor = 'crosshair'
+    document.addEventListener('mousemove', move, true)
+    document.addEventListener('click', pick, true)
+    document.addEventListener('keydown', esc, true)
+  })
 })()`
 
-/** 在预览 iframe 的 frame 里注入选取器；找不到匹配 frame（如未加载）时静默返回 */
-export async function startElementPick(wc: WebContents, previewUrl: string): Promise<void> {
-  let origin = ''
+/** 在预览 webContents 里注入选取器；完成后把结果 emitToRenderer 给渲染层。
+ *  30s 超时保底：页面导航/SPA 路由跳转可能销毁注入上下文致 Promise 永不 resolve。 */
+export async function startElementPick(previewWc: WebContents | null): Promise<void> {
+  if (!previewWc || previewWc.isDestroyed()) return
   try {
-    origin = new URL(previewUrl).origin
-  } catch {
-    return
-  }
-  const frame = wc.mainFrame.frames.find((f) => {
-    if (f === wc.mainFrame) return false
-    try {
-      return new URL(f.url).origin === origin
-    } catch {
-      return false
+    const result = await Promise.race([
+      previewWc.executeJavaScript(PICKER_SCRIPT) as Promise<string | null>,
+      new Promise<null>((r) => setTimeout(() => r(null), 30_000)),
+    ])
+    if (result) {
+      const picked = JSON.parse(result) as PickedElement
+      emitToRenderer('element-picked', picked)
     }
-  })
-  if (!frame) return
-  await frame.executeJavaScript(PICKER_SCRIPT)
+  } catch { /* 页面导航/销毁时静默 */ }
 }

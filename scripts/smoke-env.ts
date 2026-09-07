@@ -2,7 +2,8 @@
  * 子进程环境构建冒烟测试：PATH 重建（注册表/登录 shell 探测解析）、命令检测、首 token 提取。
  * 运行：npm run smoke:env
  */
-import { buildChildEnv, detectCommand, firstToken, parseProbedPath } from '../electron/lib/proc'
+import { detectCommand, firstToken } from '../electron/lib/proc'
+import { buildChildEnv, parseProbedPath } from '../electron/lib/proc-env'
 
 let failures = 0
 function assert(cond: boolean, label: string): void {

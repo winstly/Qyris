@@ -135,8 +135,6 @@ export interface AiCompletion {
   reasoning: string | null
   toolCalls: AiToolCall[]
   finishReason: string | null
-  /** 仅 CLI 模式：模型为下一轮对话指定的模型（指令行已从正文剥离；消费方白名单校验后采用） */
-  nextModel?: string | null
   /** 仅 CLI 模式：模型请求下一轮附带的 Skill id 列表（消费方按已扫描索引校验后采用） */
   nextSkill?: string[]
   /** 仅 CLI 模式：模型提交的启动命令清单（AI 编译场景；消费方落盘 startupCommands） */
@@ -158,12 +156,34 @@ export interface ToolResultEntry {
   content: string
 }
 
+/** CLI 子 agent 事件（electron ai-cli 转发，载荷结构与 preload 内联版保持一致） */
+export interface CliAgentEventPayload {
+  requestId: string
+  /** 所属子 agent 派发卡的 tool_use id（Agent/Task） */
+  parentId: string
+  kind: 'text' | 'tool' | 'tool-result'
+  /** kind=tool / tool-result：工具调用 id */
+  id?: string
+  /** kind=tool：工具名 */
+  name?: string
+  /** kind=tool：参数 JSON */
+  arguments?: string
+  /** kind=text：文本内容 */
+  text?: string
+  /** kind=tool-result：结果文本 */
+  content?: string
+  /** kind=tool-result：是否错误结果 */
+  isError?: boolean
+}
+
 /** 用户消息的系统级元数据（UI 渲染卡片用，不影响 AI 收到的内容） */
 export interface MessageMeta {
   /** 引用的 Skills（显示卡片用） */
   skills?: { id: string; name: string }[]
   /** AI 启动项目（显示卡片用） */
   projectStart?: boolean
+  /** 预览页选中的元素（显示卡片用） */
+  element?: { selector: string; tag: string; id: string; text: string }
 }
 
 export interface ChatMessage {

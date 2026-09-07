@@ -1,12 +1,94 @@
 /** 子进程管理 —— 多槽版本：每个命名服务一个槽，互不干扰；同名槽重启 = 先杀旧再启 */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
-import { createInterface } from 'node:readline'
 import { promises as fsp, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 import { app, net } from 'electron'
 import { emitToRenderer, emitToWindow } from './emitter'
 import { errorMessage } from './util'
+import { buildChildEnv } from './proc-env'
+
+/** Windows 子进程输出解码器：cmd.exe 输出系统 OEM 代码页（中文=GBK 936、日文=Shift_JIS 932 等）。
+ *  首次使用时懒初始化（chcp.com spawnSync ~50ms，不阻塞模块加载）。非 Windows 恒 UTF-8。 */
+const IS_WIN = process.platform === 'win32'
+
+const CP_TO_ENCODING: Record<number, string> = {
+  936: 'gbk',      // 简体中文
+  950: 'big5',     // 繁体中文
+  932: 'shift_jis', // 日文
+  949: 'euc-kr',   // 韩文
+  1252: 'windows-1252', // 西欧
+  1250: 'windows-1250', // 中欧
+  1251: 'windows-1251', // 西里尔
+  1253: 'windows-1253', // 希腊
+  1254: 'windows-1254', // 土耳其
+  1255: 'windows-1255', // 希伯来
+  1256: 'windows-1256', // 阿拉伯
+  1257: 'windows-1257', // 波罗的海
+  1258: 'windows-1258', // 越南
+  874: 'windows-874',   // 泰文
+  65001: 'utf-8',       // UTF-8
+}
+
+let _streamEncoding: string | null = null
+/** 启动时探测一次 OEM 代码页，缓存编码名 */
+function getStreamEncoding(): string {
+  if (_streamEncoding) return _streamEncoding
+  _streamEncoding = 'utf-8'
+  if (IS_WIN) {
+    try {
+      const res = spawnSync('chcp.com', { encoding: 'utf8', windowsHide: true, timeout: 2000 })
+      const m = (res.stdout ?? '').match(/(\d+)/)
+      if (m) _streamEncoding = CP_TO_ENCODING[Number(m[1])] ?? 'utf-8'
+    } catch { /* 探测失败回退 UTF-8 */ }
+  }
+  return _streamEncoding
+}
+
+/** 每个流独立 TextDecoder——并发流共享单例会导致 GBK/Shift_JIS 多字节状态交叉污染 */
+function newStreamDecoder(): InstanceType<typeof TextDecoder> {
+  return new TextDecoder(getStreamEncoding())
+}
+
+/** 从流中按行回调：实时场景（runProject 日志）。Windows 用 OEM 代码页解码原始字节 */
+function pipeLines(stream: Readable | null, onLine: (line: string) => void): void {
+  if (!stream) return
+  const dec = newStreamDecoder()
+  let tail = ''
+  stream.on('data', (chunk: Buffer) => {
+    tail += dec.decode(chunk, { stream: true })
+    let nl: number
+    while ((nl = tail.indexOf('\n')) >= 0) {
+      onLine(tail.slice(0, nl).replace(/\r$/, ''))
+      tail = tail.slice(nl + 1)
+    }
+  })
+  stream.on('end', () => {
+    tail += dec.decode() // flush TextDecoder 内部多字节缓存
+    if (tail.trim()) onLine(tail.replace(/\r$/, ''))
+  })
+}
+
+/** 从流中收集全部行：一次性命令场景（runOnce 输出）。tag 非空时每行加 `[tag]` 前缀 */
+function collectLines(stream: Readable | null, lines: string[], cap: number, tag?: string): void {
+  if (!stream) return
+  const dec = newStreamDecoder()
+  const prefix = tag ? `[${tag}] ` : ''
+  let tail = ''
+  stream.on('data', (chunk: Buffer) => {
+    tail += dec.decode(chunk, { stream: true })
+    let nl: number
+    while ((nl = tail.indexOf('\n')) >= 0) {
+      lines.push(prefix + tail.slice(0, nl).replace(/\r$/, ''))
+      if (lines.length > cap) lines.splice(0, lines.length - cap)
+      tail = tail.slice(nl + 1)
+    }
+  })
+  stream.on('end', () => {
+    tail += dec.decode() // flush
+    if (tail.trim()) lines.push(prefix + tail.replace(/\r$/, ''))
+  })
+}
 
 interface ProcSlot {
   name: string
@@ -57,129 +139,6 @@ function takeAndKillOne(key: string): void {
   if (!slot) return
   slots.delete(key)
   if (slot.proc.pid) killTree(slot.proc.pid)
-}
-
-// ---------- 子进程环境构建 ----------
-
-const ENV_CACHE_TTL = 10_000
-const UNIX_PROBE_RETRY_MS = 60_000
-let envCache: NodeJS.ProcessEnv | null = null
-let envCacheAt = 0
-/** undefined=未探测过；null=探测失败（60s 后允许重试）；string=探测到的 PATH（永久缓存） */
-let unixProbeResult: string | null | undefined
-let unixProbeFailedAt = 0
-
-/** 展开注册表 REG_EXPAND_SZ 值里的 %VAR%（reg query 输出的是未展开原文） */
-function expandEnvVars(s: string): string {
-  return s.replace(/%([^%]+)%/g, (raw, name: string) => process.env[name] ?? raw)
-}
-
-function mergePaths(lists: string[][]): string {
-  const sep = process.platform === 'win32' ? ';' : ':'
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const list of lists) {
-    for (const raw of list) {
-      const p = raw.trim()
-      if (!p) continue
-      const key = process.platform === 'win32' ? p.toLowerCase() : p
-      if (seen.has(key)) continue
-      seen.add(key)
-      out.push(p)
-    }
-  }
-  return out.join(sep)
-}
-
-/** 读注册表某键的 Path 值，拆分为目录数组；失败返回空（reg.exe 在 System32，任何进程都能找到） */
-function readRegistryPath(hive: string, key: string): string[] {
-  const res = spawnSync('reg.exe', ['query', `${hive}\\${key}`, '/v', 'Path'], {
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 3000,
-  })
-  if (res.status !== 0 || !res.stdout) return []
-  const m = res.stdout.match(/Path\s+REG_(?:EXPAND_)?SZ\s+(.*)/i)
-  if (!m) return []
-  return m[1].trim().split(';')
-}
-
-/** 从探测输出提取 PATH：profile 里的 echo/工具打印会污染 stdout，用标记定位；
- *  PATH 不含换行，取标记后到行尾（导出仅为 smoke 测试） */
-export function parseProbedPath(raw: string | undefined): string | null {
-  if (!raw) return null
-  const MARK = '__QYRIS_PATH__'
-  const i = raw.indexOf(MARK)
-  if (i === -1) return null
-  const rest = raw.slice(i + MARK.length)
-  const lineEnd = rest.indexOf('\n')
-  const p = (lineEnd === -1 ? rest : rest.slice(0, lineEnd)).trim()
-  return p || null
-}
-
-/** unix：登录 shell 探测 profile PATH（macOS Finder 启动的 GUI 进程 PATH 极简）。
- *  两档尝试：①登录+交互——覆盖 .zprofile 与 .zshrc（nvm 等惯常配在 .zshrc）；
- *  ②仅登录——确定性更强，覆盖 .zprofile/.bash_profile。任一成功即永久缓存 */
-function probeUnixPath(): string | null {
-  if (unixProbeResult !== undefined) {
-    if (unixProbeResult !== null) return unixProbeResult
-    if (Date.now() - unixProbeFailedAt < UNIX_PROBE_RETRY_MS) return null
-  }
-  const shell = process.env.SHELL || (process.platform === 'darwin' ? '/bin/zsh' : '/bin/bash')
-  const PRINT = 'printf "__QYRIS_PATH__%s" "$PATH"'
-  const attempts: string[][] = [
-    ['-l', '-i', '-c', PRINT],
-    ['-l', '-c', PRINT],
-  ]
-  for (const args of attempts) {
-    try {
-      const res = spawnSync(shell, args, { encoding: 'utf8', timeout: 3000 })
-      const p = res.status === 0 ? parseProbedPath(res.stdout) : null
-      if (p) {
-        unixProbeResult = p
-        return p
-      }
-    } catch {
-      /* 尝试下一档 */
-    }
-  }
-  unixProbeResult = null
-  unixProbeFailedAt = Date.now()
-  return null
-}
-
-/** 构建子进程环境：在 Electron 主进程环境之上重建 PATH */
-export function buildChildEnv(): NodeJS.ProcessEnv {
-  const env = { ...process.env }
-  try {
-    if (process.platform === 'win32') {
-      const now = Date.now()
-      if (envCache && now - envCacheAt < ENV_CACHE_TTL) return envCache
-      const regPath = [
-        ...readRegistryPath('HKLM', 'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'),
-        ...readRegistryPath('HKCU', 'Environment'),
-      ].map(expandEnvVars)
-      if (regPath.length > 0) {
-        env.PATH = mergePaths([regPath, (process.env.PATH ?? '').split(';')])
-      }
-      envCache = env
-      envCacheAt = now
-    } else {
-      const probed = probeUnixPath()
-      const fallback = [
-        '/usr/local/bin', '/usr/local/sbin',
-        '/opt/homebrew/bin', '/opt/homebrew/sbin',
-        `${process.env.HOME ?? ''}/.local/bin`,
-      ]
-      const current = (process.env.PATH ?? '').split(':')
-      env.PATH = probed
-        ? mergePaths([probed.split(':'), current])
-        : mergePaths([current, fallback])
-    }
-  } catch {
-    /* 任何异常都回退当前进程 env，不阻塞 spawn */
-  }
-  return env
 }
 
 // ---------- 一次性命令取消：在途 run_once 子进程登记，供「停止生成」硬中断 ----------
@@ -272,13 +231,8 @@ export async function runProject(projectRoot: string, name: unknown, command: st
     else emitToRenderer(channel, msg)
   }
 
-  const pipe = (stream: Readable | null, streamName: 'stdout' | 'stderr'): void => {
-    if (!stream) return
-    const rl = createInterface({ input: stream }) // readline 自动剥 \n 与 \r\n
-    rl.on('line', (line) => emit('build-output', { stream: streamName, line: stripAnsi(line) }))
-  }
-  pipe(proc.stdout, 'stdout')
-  pipe(proc.stderr, 'stderr')
+  pipeLines(proc.stdout, (line) => emit('build-output', { stream: 'stdout', line: stripAnsi(line) }))
+  pipeLines(proc.stderr, (line) => emit('build-output', { stream: 'stderr', line: stripAnsi(line) }))
 
   // spawn 异步失败：以 build-exit{-1} 收口
   const isCurrent = (): boolean => slots.get(key)?.proc === proc
@@ -309,7 +263,7 @@ const CMD_BUILTINS = new Set([
   'move', 'ren', 'rename', 'echo', 'type', 'set', 'call', 'exit', 'for', 'if', 'rem', 'cls', 'start',
 ])
 
-/** 提取命令首 token（支持带引号的可执行文件路径，如 "C:\Program Files\..\mvn.cmd"） */
+/** @internal 提取命令首 token（支持带引号的可执行文件路径，如 "C:\Program Files\..\mvn.cmd"） */
 export function firstToken(command: string): string {
   const t = command.trim()
   if (t.startsWith('"')) {
@@ -541,16 +495,8 @@ export async function runOnce(projectRoot: string, command: string, cancelToken?
     }
 
     const lines: string[] = []
-    const collect = (stream: Readable | null, streamName: 'stdout' | 'stderr'): void => {
-      if (!stream) return
-      const rl = createInterface({ input: stream })
-      rl.on('line', (line) => {
-        lines.push(`[${streamName}] ${stripAnsi(line)}`)
-        if (lines.length > RUN_ONCE_TAIL_LINES) lines.splice(0, lines.length - RUN_ONCE_TAIL_LINES)
-      })
-    }
-    collect(child.stdout, 'stdout')
-    collect(child.stderr, 'stderr')
+    collectLines(child.stdout, lines, RUN_ONCE_TAIL_LINES, 'stdout')
+    collectLines(child.stderr, lines, RUN_ONCE_TAIL_LINES, 'stderr')
 
     const timer = setTimeout(() => {
       if (child.pid) killTree(child.pid)

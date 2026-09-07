@@ -11,6 +11,9 @@ import { useFileStore } from './useFileStore'
 import { useBuildStore } from './useBuildStore'
 import { useChatStore } from './useChatStore'
 import { useAgentStore } from './useAgentStore'
+import { useProjectStore } from './useProjectStore'
+import { useSettingsStore } from './useSettingsStore'
+import { useStartupStore } from './useStartupStore'
 import type { AiSettings, ChatMessage, RecentProject, SkillMeta, StartCommand, TreeNode } from '@/types'
 
 // ---------- 文件 store 快照（多工程常驻：切换时 checkpoint/restore 当前工程的打开文件/展开态） ----------
@@ -75,13 +78,8 @@ export interface DialogRequest {
   resolve: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
 }
 
-export const DEFAULT_SETTINGS: AiSettings = {
-  baseUrl: 'https://api.openai.com/v1',
-  model: 'gpt-4o-mini',
-  provider: 'openai',
-  dispatchMode: 'api',
-  cliPermission: 'auto',
-}
+import { DEFAULT_SETTINGS } from './defaults'
+export { DEFAULT_SETTINGS }
 
 export type Theme = 'system' | 'light' | 'dark'
 
@@ -183,6 +181,7 @@ export const useAppStore = create<AppState>()(
 
       saveSettings: async (s) => {
         set({ settings: s })
+        useSettingsStore.getState().setSettings(s)
         if (!isDesktop) return
         try {
           await api.mergeConfig({
@@ -206,19 +205,20 @@ export const useAppStore = create<AppState>()(
         }
         try {
           const cfg = await api.getConfig()
-          set({
-            settings: {
-              baseUrl: cfg.aiBaseUrl || DEFAULT_SETTINGS.baseUrl,
-              model: cfg.aiModel || DEFAULT_SETTINGS.model,
-              provider: cfg.aiProvider || DEFAULT_SETTINGS.provider,
-              dispatchMode: cfg.aiDispatchMode ?? DEFAULT_SETTINGS.dispatchMode,
-              cliPermission: cfg.aiCliPermission ?? DEFAULT_SETTINGS.cliPermission,
-              tiers: cfg.aiTiers,
-            },
-            recentProjects: cfg.recentProjects ?? [],
-            skillsDirs: cfg.skillsDirs ?? [],
-            startupCommandsMap: cfg.startupCommands ?? {},
-          })
+          const s: AiSettings = {
+            baseUrl: cfg.aiBaseUrl || DEFAULT_SETTINGS.baseUrl,
+            model: cfg.aiModel || DEFAULT_SETTINGS.model,
+            provider: cfg.aiProvider || DEFAULT_SETTINGS.provider,
+            dispatchMode: cfg.aiDispatchMode ?? DEFAULT_SETTINGS.dispatchMode,
+            cliPermission: cfg.aiCliPermission ?? DEFAULT_SETTINGS.cliPermission,
+            tiers: cfg.aiTiers,
+          }
+          const scm = cfg.startupCommands ?? {}
+          const sd = cfg.skillsDirs ?? []
+          set({ settings: s, recentProjects: cfg.recentProjects ?? [], skillsDirs: sd, startupCommandsMap: scm })
+          useSettingsStore.getState().setSettings(s)
+          useSettingsStore.getState().setSkillsDirs(sd)
+          useStartupStore.getState().loadFromMap(scm)
           // 扫描 skills 目录（异步，不阻塞启动）
           if ((cfg.skillsDirs ?? []).length > 0) {
             void get().loadSkills()
@@ -270,7 +270,10 @@ export const useAppStore = create<AppState>()(
         useChatStore.getState().ensureProject(projectPath)
         useAgentStore.getState().ensureProject(projectPath)
         useAgentStore.getState().setCurrent(projectPath)
-        set({ projectPath: projectPath, projectName: basename(projectPath), startupCommands: get().startupCommandsMap[projectPath] ?? [] })
+        const scm = get().startupCommandsMap[projectPath] ?? []
+        set({ projectPath: projectPath, projectName: basename(projectPath), startupCommands: scm })
+        useProjectStore.getState().setProjectPath(projectPath)
+        useStartupStore.getState().setCurrentProject(projectPath)
 
         // 文件态：有快照则恢复，否则全新初始化
         const snap = fileSnapshots.get(projectPath)
@@ -369,6 +372,8 @@ export const useAppStore = create<AppState>()(
             useFileStore.getState().reset()
             useAgentStore.getState().clear()
             set({ projectPath: null, projectName: '', startupCommands: [] })
+            useProjectStore.getState().setProjectPath(null)
+            useStartupStore.getState().setCurrentProject(null)
             api.setWindowTitle('轻驭').catch(() => {})
           }
         }
@@ -386,35 +391,35 @@ export const useAppStore = create<AppState>()(
       setStartupCommands: async (cmds, projectPath) => {
         const p = projectPath ?? get().projectPath
         if (!p) return
-        const map = { ...get().startupCommandsMap, [p]: cmds }
+        await useStartupStore.getState().setStartupCommands(cmds, p)
+        // 同步回 useAppStore 供 UI 选择器读取
+        const map = useStartupStore.getState().startupCommandsMap
         const isCurrent = get().projectPath === p
         set(isCurrent ? { startupCommands: cmds, startupCommandsMap: map } : { startupCommandsMap: map })
-        try {
-          await api.mergeConfig({ startupCommands: map })
-        } catch { /* 落盘失败不阻塞界面（内存态已更新，下次操作会再写） */ }
       },
 
       clearStartupCommands: async (projectPath) => {
-        const map = { ...get().startupCommandsMap }
-        delete map[projectPath]
+        await useStartupStore.getState().clearStartupCommands(projectPath)
+        const map = useStartupStore.getState().startupCommandsMap
         const isActive = get().projectPath === projectPath
         set(isActive ? { startupCommandsMap: map, startupCommands: [] } : { startupCommandsMap: map })
-        try {
-          await api.mergeConfig({ startupCommands: map })
-        } catch { /* 落盘失败不阻塞界面 */ }
       },
 
       loadSkills: async () => {
         const dirs = get().skillsDirs
         if (!isDesktop || dirs.length === 0) {
           set({ skillMetas: [] })
+          useSettingsStore.getState().setSkillMetas([])
           return
         }
         try {
           // 多目录按序扫描：同名 id 首个命中者优先（去重规则统一在主进程 skills.ts）
-          set({ skillMetas: await api.scanSkills(dirs) })
+          const metas = await api.scanSkills(dirs)
+          set({ skillMetas: metas })
+          useSettingsStore.getState().setSkillMetas(metas)
         } catch {
           set({ skillMetas: [] })
+          useSettingsStore.getState().setSkillMetas([])
         }
       },
 

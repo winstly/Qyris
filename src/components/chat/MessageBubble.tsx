@@ -64,18 +64,25 @@ function ReasoningBlock({ content }: { content: string }) {
   )
 }
 
-/** 从消息 content 提取用户文字：仅当内容以 Skill 系统指令开头时剥掉首段（指令与用户文字以空行分隔）。
- *  不含指令前缀的消息整段都是用户文字，原样返回。 */
+/** 从消息 content 提取用户文字：剥掉 Skill 指令前缀和元素注入前缀（这两段对 AI 可见但用户只看卡片）。
+ *  不含前缀的消息整段都是用户文字，原样返回。 */
 function extractUserText(content: string): string {
-  if (content.startsWith('请先用 load_skill')) {
-    return content.split('\n\n').slice(1).join('\n\n').trim()
+  let rest = content
+  // 剥 Skill 指令前缀
+  if (rest.startsWith('请先用 load_skill')) {
+    rest = rest.split('\n\n').slice(1).join('\n\n')
   }
-  return content.trim()
+  // 剥元素注入前缀
+  if (rest.startsWith('[用户选中的预览页元素]')) {
+    const idx = rest.indexOf('\n\n', rest.indexOf(']'))
+    rest = idx >= 0 ? rest.slice(idx + 2) : ''
+  }
+  return rest.trim()
 }
 
 /** 用户消息：hover 出「编辑」，编辑态可改后重发；编辑非末条时有回退提醒 */
 function UserMessage({ msg }: { msg: ChatMessage }) {
-  const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart)
+  const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart || msg.meta?.element)
   const userText = hasMeta ? (msg.meta?.projectStart ? null : extractUserText(msg.content) || null) : null
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(msg.content)
@@ -269,6 +276,13 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
               <span className="msg__meta-card-name">{s.name}</span>
             </div>
           ))}
+          {msg.meta!.element && (
+            <div className="msg__meta-card msg__meta-card--element">
+              <span className="msg__meta-card-label">元素</span>
+              <span className="msg__meta-card-name mono">{msg.meta!.element.tag}{msg.meta!.element.id ? `#${msg.meta!.element.id}` : ''}</span>
+              {msg.meta!.element.text && <span className="msg__meta-card-hint">{msg.meta!.element.text.slice(0, 60)}</span>}
+            </div>
+          )}
         </div>
       )}
       {/* 用户文字（有 meta 时只显示用户部分，纯系统指令不显示 bubble） */}

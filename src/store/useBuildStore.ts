@@ -11,7 +11,7 @@
  */
 import { create } from 'zustand'
 import { api } from '@/services/desktop'
-import { useAppStore } from './useAppStore'
+import { useProjectStore } from './useProjectStore'
 import type { BuildPhase } from '@/types'
 
 const MAX_LOG_LINES = 500
@@ -150,7 +150,7 @@ export const useBuildStore = create<BuildState>()((set, get) => ({
   },
 
   start: async (name, command, projectPath) => {
-    const p = projectPath ?? useAppStore.getState().projectPath
+    const p = projectPath ?? useProjectStore.getState().projectPath
     if (!p) return
     const cmd = command.trim()
     if (!cmd) return
@@ -182,7 +182,7 @@ export const useBuildStore = create<BuildState>()((set, get) => ({
   },
 
   stop: async (name, projectPath) => {
-    const p = projectPath ?? get().current ?? useAppStore.getState().projectPath
+    const p = projectPath ?? get().current ?? useProjectStore.getState().projectPath
     if (!p) return
     const key = normName(name)
     try {
@@ -196,7 +196,7 @@ export const useBuildStore = create<BuildState>()((set, get) => ({
   },
 
   stopAll: async (projectPath) => {
-    const p = projectPath ?? get().current ?? useAppStore.getState().projectPath
+    const p = projectPath ?? get().current ?? useProjectStore.getState().projectPath
     if (!p) return
     try {
       await api.stopProject(p)

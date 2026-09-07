@@ -10,17 +10,19 @@
  * aiChatStream 随即以「已取消」reject，循环按取消路径收尾。
  *
  * 多工程常驻：状态按工程（projectPath）隔离。切到别的工程时，本工程的流式循环照常跑，
- * ai-delta/ai-reasoning/cli-tool-event 事件按 requestId → 工程路由回对应切片，切回即最新。
+ * ai-delta/ai-reasoning/cli-tool-event/cli-tool-result/cli-agent-event 事件按 requestId → 工程路由回对应切片，切回即最新。
  */
 import { create } from 'zustand'
 import { api } from '@/services/desktop'
 import { buildSystemPrompt, TOOL_DEFS } from '@/services/ai'
 import { executeTool } from '@/services/tools'
-import { useAppStore } from './useAppStore'
+import { useSettingsStore } from './useSettingsStore'
+import { useStartupStore } from './useStartupStore'
+import { useAgentStore } from './useAgentStore'
 import { uid, safeParseObject } from '@/utils/id'
 import { estimateTokens } from '@/utils/tokens'
 import type {
-  AiCompletion, ChatMessage, OAIMessage, ToolCall,
+  AiCompletion, ChatMessage, CliAgentEventPayload, OAIMessage, ToolCall,
 } from '@/types'
 
 export type ChatStatus = 'idle' | 'streaming' | 'tools' | 'awaiting-user' | 'error' | 'retrying'
@@ -56,8 +58,6 @@ export interface ChatSlice {
   usage: { input: number; output: number; agents?: { input: number; output: number } }
   /** 当前对话会话 id：AI 写文件的快照按会话分组，重置对话时换新 */
   sessionId: string
-  /** CLI 模式：上一轮模型为下一轮指定的模型（null=用主模型；白名单校验后写入） */
-  cliModel: string | null
   /** CLI 模式：模型请求下一轮附带的 Skill id（按已扫描索引校验后写入） */
   cliSkills: string[]
 }
@@ -74,13 +74,12 @@ function emptyChatSlice(): ChatSlice {
     pendingElement: null,
     usage: { input: 0, output: 0 },
     sessionId: uid(),
-    cliModel: null,
     cliSkills: [],
   }
 }
 
 interface ChatState {
-  /** 当前工程（useAppStore.projectPath 的镜像） */
+  /** 当前工程（useProjectStore.projectPath 的镜像） */
   current: string | null
   byProject: Record<string, ChatSlice>
 
@@ -89,6 +88,8 @@ interface ChatState {
   appendDelta: (requestId: string, delta: string) => void
   appendReasoning: (requestId: string, delta: string) => void
   handleCliToolEvent: (requestId: string, id: string, name: string, phase: 'start' | 'stop', argumentsStr: string) => void
+  handleCliToolResult: (requestId: string, id: string, content: string, isError: boolean, tokens?: { input: number; output: number }) => void
+  handleCliAgentEvent: (p: CliAgentEventPayload) => void
   answerAsk: (answer: string) => void
   cancelProject: (project: string) => void
   cancel: () => void
@@ -147,10 +148,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const cur = getSlice(project)
     if (!cur || (cur.status !== 'idle' && cur.status !== 'error')) return
     const trimmed = text.trim()
-    if (!trimmed) return
-    const el = cur.pendingElement
+    if (!trimmed && !meta?.element) return
+    const el = meta?.element
     const content = el
-      ? `[已选中预览元素]\n选择器: ${el.selector}\n标签: ${el.tag}${el.id ? `\nID: ${el.id}` : ''}${el.text ? `\n文本: ${el.text}` : ''}\n\n${trimmed}`
+      ? `[用户选中的预览页元素]\n选择器: ${el.selector}\n标签: ${el.tag}${el.id ? `\nID: ${el.id}` : ''}${el.text ? `\n文本: ${el.text}` : ''}${trimmed ? `\n\n${trimmed}` : ''}`
       : trimmed
     const userMsg: ChatMessage = { id: uid(), role: 'user', content, meta }
     patchSlice(project, { messages: [...cur.messages, userMsg], status: 'streaming', cancelled: false, pendingElement: null })
@@ -223,17 +224,91 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         const tc: ToolCall = { id, name, args: safeParseObject(argumentsStr), status: 'running' }
         messages = [...cur.messages, { id: uid(), role: 'assistant', content: '', toolCalls: [tc] }]
       } else {
+        // stop 仅代表指令输入组装完成、工具尚未执行完：只回填参数，状态由 handleCliToolResult 收口
         messages = [...cur.messages]
         for (let i = messages.length - 1; i >= 0; i--) {
           const tcs = messages[i].toolCalls
           if (tcs?.some((tc) => tc.id === id)) {
-            messages[i] = { ...messages[i], toolCalls: tcs.map((tc) => tc.id === id ? { ...tc, status: 'done' as const, args: safeParseObject(argumentsStr) } : tc) }
+            messages[i] = { ...messages[i], toolCalls: tcs.map((tc) => tc.id === id ? { ...tc, args: safeParseObject(argumentsStr) } : tc) }
             break
           }
         }
       }
       return { byProject: { ...s.byProject, [project]: { ...cur, messages } } }
     })
+    // CLI 子 agent 派发卡（Agent/Task）：在 agent 面板建档，列表与实时转录随后由 cli-agent-event 驱动
+    if (phase === 'start' && (name === 'Agent' || name === 'Task') && !getSlice(project)?.cancelled) {
+      const args = safeParseObject(argumentsStr)
+      const stype = String(args.subagent_type ?? 'general-purpose')
+      const [threadId] = useAgentStore.getState().createBatch(
+        id,
+        [{ title: String(args.description ?? '').trim() || stype, tier: 'CLI', model: stype }],
+        project,
+      )
+      if (threadId) useAgentStore.getState().beginThread(threadId, project)
+    }
+  },
+
+  /** CLI 工具结果回填：状态收口 + 结果/摘要入卡并记录 toolResults（供历史重建）；
+   *  若是子 agent 派发卡则同步收口面板线程（tokens 为该子 agent 的 token 账目） */
+  handleCliToolResult: (requestId, id, content, isError, tokens) => {
+    const project = findProjectByRequest(requestId)
+    if (!project) return
+    if (getSlice(project)?.cancelled) return
+    const result = content.length > 2000 ? content.slice(0, 2000) + '…' : content
+    const agentSlice = useAgentStore.getState().byProject[project]
+    const thread = agentSlice && Object.values(agentSlice.threads).find((t) => t.cardId === id)
+    if (thread) {
+      useAgentStore.getState().finishThread(thread.id, isError ? 'error' : 'done', result, tokens, project)
+    }
+    useChatStore.setState((s) => {
+      const cur = s.byProject[project]
+      if (!cur || cur.cancelled) return s
+      let hit = false
+      const messages = cur.messages.map((m) => {
+        if (!m.toolCalls?.some((tc) => tc.id === id)) return m
+        hit = true
+        return {
+          ...m,
+          toolCalls: m.toolCalls.map((tc) =>
+            tc.id === id
+              ? { ...tc, status: isError ? ('error' as const) : ('done' as const), resultSummary: firstLine(content, 80), result }
+              : tc,
+          ),
+          toolResults: [...(m.toolResults ?? []), { toolCallId: id, content: result }],
+        }
+      })
+      if (!hit) return s
+      return { byProject: { ...s.byProject, [project]: { ...cur, messages } } }
+    })
+  },
+
+  /** CLI 子 agent 实时转录：按 parentId 找到派发卡对应线程，文本/工具/结果分别入账 */
+  handleCliAgentEvent: (p) => {
+    const project = findProjectByRequest(p.requestId)
+    if (!project) return
+    if (getSlice(project)?.cancelled) return
+    const agentSlice = useAgentStore.getState().byProject[project]
+    const thread = agentSlice && Object.values(agentSlice.threads).find((t) => t.cardId === p.parentId)
+    if (!thread) return
+    const store = useAgentStore.getState()
+    if (p.kind === 'text') {
+      const text = (p.text ?? '').trim()
+      if (text) store.appendText(thread.id, text, project)
+    } else if (p.kind === 'tool') {
+      const args = safeParseObject(p.arguments ?? '{}')
+      store.appendTool(thread.id, {
+        id: p.id || uid(),
+        name: p.name ?? 'tool',
+        summary: cliToolSummary(p.name ?? '', args),
+        status: 'running',
+        args,
+      }, project)
+    } else {
+      const content = p.content ?? ''
+      const detail = content.length > 2000 ? content.slice(0, 2000) + '…' : content
+      store.patchTool(thread.id, p.id ?? '', { status: p.isError ? 'error' : 'done', summary: firstLine(content, 80), result: detail }, project)
+    }
   },
 
   answerAsk: (answer) => {
@@ -291,7 +366,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (cur.status !== 'idle') get().cancel()
     patchSlice(project, {
       messages: [], status: 'idle', pendingAsk: null, activeRequestId: null,
-      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: uid(), cliModel: null, cliSkills: [], epoch: cur.epoch + 1,
+      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: uid(), cliSkills: [], epoch: cur.epoch + 1,
     })
   },
 
@@ -316,7 +391,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       pendingAsk: null,
       activeRequestId: null,
       answers: {},
-      cliModel: null,
       cliSkills: [],
       epoch: cur.epoch + 1,
     })
@@ -334,7 +408,6 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       cancelled: false,
       pendingElement: null,
       usage: { input: 0, output: 0 },
-      cliModel: null,
       cliSkills: [],
     })
   },
@@ -377,13 +450,14 @@ function sleepInterruptible(project: string, ms: number): Promise<boolean> {
 const askResolvers = new Map<string, (v: string) => void>()
 
 async function runAgentLoop(project: string) {
-  const epoch = getSlice(project)?.epoch ?? 0
-  const messages = getSlice(project)?.messages ?? []
+  const slice0 = getSlice(project)
+  const epoch = slice0?.epoch ?? 0
+  const messages = slice0?.messages ?? []
   const history = buildHistory(messages)
+  const appState = useSettingsStore.getState()
 
   // CLI 模式：把上一轮模型请求附带的 Skill 以标记注入本轮首条 user 历史
-  const slice0 = getSlice(project)
-  if (useAppStore.getState().settings.dispatchMode === 'claude-cli' && slice0 && slice0.cliSkills.length > 0) {
+  if (appState.settings.dispatchMode === 'claude-cli' && slice0 && slice0.cliSkills.length > 0) {
     const pending = slice0.cliSkills
     for (let i = 0; i < history.length; i++) {
       if (history[i].role === 'user') {
@@ -420,18 +494,13 @@ async function runAgentLoop(project: string) {
       const requestId = uid()
       patchSlice(project, { status: 'streaming', activeRequestId: requestId })
       try {
-        const { settings, skillMetas } = useAppStore.getState()
+        const { settings, skillMetas } = useSettingsStore.getState()
         const payload: OAIMessage[] = [
           { role: 'system', content: buildSystemPrompt(project, skillMetas) },
           ...history,
         ]
-        const prevCliModel = getSlice(project)?.cliModel
-        const requestModel =
-          settings.dispatchMode === 'claude-cli' && prevCliModel && cliAllowedModels(settings).has(prevCliModel)
-            ? prevCliModel
-            : settings.model
         completion = await api.aiChatStream(
-          requestId, settings.provider, settings.baseUrl, requestModel, payload, TOOL_DEFS,
+          requestId, settings.provider, settings.baseUrl, settings.model, payload, TOOL_DEFS,
           settings.dispatchMode, project,
         )
         break
@@ -461,21 +530,22 @@ async function runAgentLoop(project: string) {
     const assistantId = finalizeAssistant(project, completion, epoch)
     history.push(toHistoryEntry(completion))
 
-    if (useAppStore.getState().settings.dispatchMode === 'claude-cli') {
-      const s2 = useAppStore.getState().settings
-      const allowed = cliAllowedModels(s2)
-      const pick = completion.nextModel?.trim()
-      const next = pick && allowed.has(pick) ? pick : null
-      const knownSkills = new Set(useAppStore.getState().skillMetas.map((m) => m.id))
+    if (appState.settings.dispatchMode === 'claude-cli') {
+      const knownSkills = new Set(appState.skillMetas.map((m) => m.id))
       const skillReq = (completion.nextSkill ?? []).map((s) => s.trim()).filter((s) => s && knownSkills.has(s))
       const cmds = (completion.startCommands ?? [])
         .map((s) => ({ name: String(s?.name ?? '').trim(), run: String(s?.run ?? '').trim() }))
         .filter((s) => s.name && s.run)
-      const lastUserMeta = [...(getSlice(project)?.messages ?? [])].reverse().find((m) => m.role === 'user')?.meta
-      if (cmds.length > 0 && lastUserMeta?.projectStart) {
-        void useAppStore.getState().setStartupCommands(cmds, project)
+      // 反向查找最后一条 user 消息的 meta（避免 [...messages].reverse() 全量拷贝）
+      const curMsgs = getSlice(project)?.messages ?? []
+      let lastUserMeta: import('@/types').MessageMeta | undefined
+      for (let i = curMsgs.length - 1; i >= 0; i--) {
+        if (curMsgs[i].role === 'user') { lastUserMeta = curMsgs[i].meta; break }
       }
-      if (getSlice(project)?.epoch === epoch) patchSlice(project, { cliModel: next, cliSkills: skillReq })
+      if (cmds.length > 0 && lastUserMeta?.projectStart) {
+        void useStartupStore.getState().setStartupCommands(cmds, project)
+      }
+      if (getSlice(project)?.epoch === epoch) patchSlice(project, { cliSkills: skillReq })
     }
 
     if (completion.toolCalls.length === 0) {
@@ -517,12 +587,17 @@ async function runAgentLoop(project: string) {
 
 // ---------- 组装 OpenAI 历史 ----------
 
-function cliAllowedModels(settings: import('@/types').AiSettings): Set<string> {
-  return new Set(
-    [settings.model, ...Object.values(settings.tiers ?? {})]
-      .filter((v): v is string => typeof v === 'string' && !!v.trim())
-      .map((v) => v.trim()),
-  )
+/** 结果摘要：首个非空行截断 */
+function firstLine(s: string, cap: number): string {
+  const line = s.split('\n').map((l) => l.trim()).find((l) => l.length > 0) ?? ''
+  return line.length > cap ? line.slice(0, cap) + '…' : line
+}
+
+/** CLI 子 agent 工具行摘要：优先代表性参数（与 ToolCallCard 的 target 提取同构），无名参回退工具名 */
+function cliToolSummary(name: string, args: Record<string, unknown>): string {
+  const raw = String(args.command ?? args.file_path ?? args.path ?? args.pattern ?? args.url ?? args.query ?? '')
+  const line = raw.split('\n')[0].trim()
+  return (line || name).slice(0, 80)
 }
 
 function buildHistory(messages: ChatMessage[]): OAIMessage[] {

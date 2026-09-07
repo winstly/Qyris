@@ -3,7 +3,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useChatStore } from '@/store/useChatStore'
-import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onFsChanged, isDesktop, api } from '@/services/desktop'
+import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onCliToolResult, onCliAgentEvent, onFsChanged, onElementPicked, previewSetVisible, isDesktop, api } from '@/services/desktop'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useIsWide } from '@/hooks/useMediaQuery'
 import { Workspace } from '@/components/workspace/Workspace'
@@ -39,17 +39,11 @@ export default function App() {
     return () => mq.removeEventListener('change', apply)
   }, [theme])
 
-  // 预览 iframe 选取的元素 → 带入聊天下轮上下文
+  // 弹窗打开时隐藏 WebContentsView（native overlay 遮不住 DOM 弹窗）
+  const hasDialog = useAppStore((s) => !!s.dialog || s.settingsOpen || s.createProjectOpen)
   useEffect(() => {
-    const onMsg = (e: MessageEvent) => {
-      const d = e.data as { type?: string; payload?: { selector: string; tag: string; id: string; text: string } }
-      if (d?.type === 'workbench-element-picked' && d.payload?.selector) {
-        useChatStore.getState().setPendingElement(d.payload)
-      }
-    }
-    window.addEventListener('message', onMsg)
-    return () => window.removeEventListener('message', onMsg)
-  }, [])
+    void previewSetVisible(!hasDialog)
+  }, [hasDialog])
 
   // 会话历史持久化：messages 变化时（防抖 400ms）写入 ~/.qyris/sessions/
   useEffect(() => {
@@ -84,7 +78,10 @@ export default function App() {
       onAiDelta((p) => useChatStore.getState().appendDelta(p.requestId, p.delta)),
       onAiReasoning((p) => useChatStore.getState().appendReasoning(p.requestId, p.delta)),
       onCliToolEvent((p) => useChatStore.getState().handleCliToolEvent(p.requestId, p.id, p.name, p.phase, p.arguments)),
+      onCliToolResult((p) => useChatStore.getState().handleCliToolResult(p.requestId, p.id, p.content, p.isError, p.tokens)),
+      onCliAgentEvent((p) => useChatStore.getState().handleCliAgentEvent(p)),
       onFsChanged((p) => { scheduleFsRefresh(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.paths) }),
+      onElementPicked((p) => useChatStore.getState().setPendingElement(p)),
     ]
     return () => { offs.forEach((f) => f()) }
   }, [])

@@ -1,9 +1,9 @@
-import { useRef, useState, useCallback, useEffect } from 'react'
+import { useRef, useState, useCallback, useEffect, useMemo } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { isDesktop } from '@/services/desktop'
 import { fmtTok } from '@/utils/tokens'
-import { IconSend, IconStop, IconClose, IconTarget, IconCheck } from '@/components/common/icons'
+import { IconSend, IconStop, IconClose, IconCheck } from '@/components/common/icons'
 import type { SkillMeta } from '@/types'
 
 /** 多行输入：Enter 发送 / Shift+Enter 换行，自动增高；生成中可点「停止」。
@@ -33,7 +33,7 @@ export function ChatInput() {
       ? '请先在设置中配置 API Key'
       : undefined
 
-  const filteredSkills = slashOpen
+  const filteredSkills = useMemo(() => slashOpen
     ? skillMetas.filter((s) => {
         if (!slashFilter) return true
         const q = slashFilter.toLowerCase()
@@ -42,7 +42,7 @@ export function ChatInput() {
           || s.description.toLowerCase().includes(q)
           || s.triggers.some((t) => t.toLowerCase().includes(q))
       })
-    : []
+    : [], [slashOpen, slashFilter, skillMetas])
 
   useEffect(() => { setSlashIndex(0) }, [slashFilter])
 
@@ -96,9 +96,12 @@ export function ChatInput() {
       return
     }
     const userText = text.trim()
-    if ((!userText && selectedSkills.length === 0) || busy || disabledHint) return
-    let aiMsg = ''
+    if ((!userText && selectedSkills.length === 0 && !pendingElement) || busy || disabledHint) return
     const meta: import('@/types').MessageMeta = {}
+    if (pendingElement) {
+      meta.element = { selector: pendingElement.selector, tag: pendingElement.tag, id: pendingElement.id, text: pendingElement.text }
+    }
+    let aiMsg = ''
     if (selectedSkills.length > 0) {
       meta.skills = selectedSkills.map((s) => ({ id: s.id, name: s.name }))
       const ids = selectedSkills.map((s) => s.id).join(', ')
@@ -112,6 +115,7 @@ export function ChatInput() {
     setText('')
     prevTextRef.current = ''
     setSelectedSkills([])
+    setPendingElement(null)
     requestAnimationFrame(resize)
     void send(aiMsg, meta)
   }
@@ -224,14 +228,20 @@ export function ChatInput() {
       )}
 
       {pendingElement && (
-        <div className="chat__picked">
-          <IconTarget size={12} />
-          <span className="chat__picked-label">已选元素</span>
-          <code className="chat__picked-sel mono">{pendingElement.selector}</code>
-          {pendingElement.text && <span className="chat__picked-text">{pendingElement.text.slice(0, 40)}</span>}
-          <button className="chat__picked-clear" onClick={() => setPendingElement(null)} aria-label="清除选中元素" title="清除选中元素">
-            <IconClose size={11} />
-          </button>
+        <div className="msg__meta-cards">
+          <div className="msg__meta-card msg__meta-card--element msg__meta-card--pending">
+            <span className="msg__meta-card-label">元素</span>
+            <span className="msg__meta-card-name mono">{pendingElement.tag}{pendingElement.id ? `#${pendingElement.id}` : ''}</span>
+            {pendingElement.text && <span className="msg__meta-card-hint">{pendingElement.text.slice(0, 60)}</span>}
+            <button
+              className="msg__meta-card-remove"
+              onClick={() => setPendingElement(null)}
+              aria-label="清除选中元素"
+              title="清除选中元素"
+            >
+              <IconClose size={10} />
+            </button>
+          </div>
         </div>
       )}
       <div className={`chat__inputbox ${disabledHint ? 'chat__inputbox--disabled' : ''}`}>

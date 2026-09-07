@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
+import { useStartupStore } from '@/store/useStartupStore'
 import { useBuildStore, selectSlotState, selectCurrentBuild } from '@/store/useBuildStore'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
-import { api, onPreviewConsole } from '@/services/desktop'
+import { api, onPreviewConsole, previewSetUrl, previewBounds, previewReload, previewDevtools } from '@/services/desktop'
 import { BuildPipeline } from './BuildPipeline'
 import { Select } from '@/components/common/Select'
 import type { PreviewConsoleEntry } from '@/types'
@@ -40,7 +41,7 @@ export function PreviewTab() {
   const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
   const hasApiKey = useAppStore((s) => s.hasApiKey)
   const showAlert = useAppStore((s) => s.showAlert)
-  const startupCommands = useAppStore((s) => s.startupCommands)
+  const startupCommands = useStartupStore((s) => s.startupCommands)
 
   const build = useBuildStore(selectCurrentBuild)
   const { slots, slotOrder, activeSlot } = build
@@ -58,8 +59,8 @@ export function PreviewTab() {
   /** 当前查看日志的服务节点 */
   const [logSlot, setLogSlot] = useState<string | null>(null)
   const logSt = logSlot ? slots[logSlot] : undefined
-  const [iframeNonce, setIframeNonce] = useState(0)
   const [deviceMode, setDeviceMode] = useState<DeviceMode>('desktop')
+  const placeholderRef = useRef<HTMLDivElement>(null)
 
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [consoleLines, setConsoleLines] = useState<PreviewConsoleEntry[]>([])
@@ -67,14 +68,11 @@ export function PreviewTab() {
   // 端口占用者（EADDRINUSE 时的可视化）
   const [portInfo, setPortInfo] = useState<{ pid: number; name: string; port: number } | null>(null)
 
-  // 预览地址变化 → 更新主进程的采集过滤 origin
   const previewUrl = slot?.detectedUrl || ''
+
+  // 预览地址变化 → 主进程创建/销毁 WebContentsView
   useEffect(() => {
-    void api.previewConsoleAttach(previewUrl || null).catch(() => {})
-    // 卸载时解除过滤
-    return () => {
-      void api.previewConsoleAttach(null).catch(() => {})
-    }
+    void previewSetUrl(previewUrl || '')
   }, [previewUrl])
 
   useEffect(() => {
@@ -120,14 +118,37 @@ export function PreviewTab() {
   const activeDevice = DEVICES.find((d) => d.mode === deviceMode) ?? DEVICES[0]
   const constrained = activeDevice.width !== null
 
+  // placeholder 坐标同步（ResizeObserver + window resize → 主进程 setBounds）
+  useEffect(() => {
+    if (!showIframe) {
+      void previewBounds({ x: 0, y: 0, width: 0, height: 0 })
+      return
+    }
+    const el = placeholderRef.current
+    if (!el) return
+    let raf = 0
+    const report = (): void => {
+      cancelAnimationFrame(raf)
+      raf = requestAnimationFrame(() => {
+        const r = el.getBoundingClientRect()
+        void previewBounds({ x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) })
+      })
+    }
+    report()
+    const ro = new ResizeObserver(report)
+    ro.observe(el)
+    window.addEventListener('resize', report)
+    return () => { cancelAnimationFrame(raf); ro.disconnect(); window.removeEventListener('resize', report) }
+  }, [showIframe, deviceMode])
+
   const chatBusy = chatStatus !== 'idle' && chatStatus !== 'error'
-  const compiling = (() => {
+  const compiling = useMemo(() => {
     if (!chatBusy) return false
     for (let i = chatMessages.length - 1; i >= 0; i--) {
       if (chatMessages[i].role === 'user') return chatMessages[i].meta?.projectStart === true
     }
     return false
-  })()
+  }, [chatBusy, chatMessages])
   const hasCommands = startupCommands.length > 0
 
   /** 服务列表合并视图 */
@@ -391,8 +412,17 @@ export function PreviewTab() {
         <button className="icon-btn" onClick={startPick} disabled={!showIframe} aria-label="选取元素" title="选取预览页元素，带入 AI 对话">
           <IconTarget size={13} />
         </button>
-        <button className="icon-btn" onClick={() => setIframeNonce((n) => n + 1)} disabled={!showIframe} aria-label="刷新预览" title="刷新预览">
+        <button
+          className="icon-btn"
+          disabled={!showIframe}
+          onClick={() => void previewReload()}
+          aria-label="刷新预览"
+          title="清缓存并刷新预览"
+        >
           <IconRefresh size={13} />
+        </button>
+        <button className="icon-btn" disabled={!showIframe} onClick={() => void previewDevtools()} aria-label="DevTools" title="打开预览页 DevTools">
+          <IconTerminal size={13} />
         </button>
         <button
           className={`icon-btn ${consoleOpen ? 'icon-btn--active' : ''}`}
@@ -417,14 +447,27 @@ export function PreviewTab() {
               端口 {portInfo.port} 正被 {portInfo.name}（PID {portInfo.pid}）监听——可「全部停止」后重试，或在对话中让 AI 换端口
             </div>
           )}
-          {slot?.errorText.includes('未找到命令') && (
-            <div className="error-box__actions">
+          <div className="error-box__actions">
+            <button
+              className="btn btn--primary btn--sm"
+              disabled={chatBusy || !slot?.errorText}
+              onClick={() => {
+                const chat = selectCurrentChat(useChatStore.getState())
+                if (chat.status !== 'idle' && chat.status !== 'error') return
+                void useChatStore.getState().send(
+                  `启动服务「${slot!.name}」失败，报错信息如下：\n\`\`\`\n${slot!.errorText}\n\`\`\`\n请诊断原因并修复。`,
+                )
+              }}
+            >
+              发给 AI 修复
+            </button>
+            {slot?.errorText.includes('未找到命令') && (
               <button className="btn btn--ghost btn--sm" onClick={requestToolchainInstall}>
                 授权 AI 自动安装
               </button>
-              <span className="error-box__hint">点击后 AI 会安装缺失工具并重启该服务</span>
-            </div>
-          )}
+            )}
+            <span className="error-box__hint">将错误信息发到对话，由 AI 诊断并修复</span>
+          </div>
         </div>
       )}
 
@@ -478,16 +521,11 @@ export function PreviewTab() {
           />
         ) : showIframe ? (
           <div
+            ref={placeholderRef}
             className={`preview__frame-wrap ${constrained ? 'preview__frame-wrap--constrained' : ''}`}
             style={constrained ? { maxWidth: activeDevice.width! } : undefined}
           >
-            <iframe
-              key={iframeNonce}
-              className="preview__frame"
-              src={url}
-              title="应用预览"
-              sandbox="allow-scripts allow-same-origin allow-forms allow-modals allow-popups"
-            />
+            {/* WebContentsView 由主进程叠在此 div 上方，bounds 由 ResizeObserver 同步 */}
           </div>
         ) : !slot || phase === 'idle' ? (
           <EmptyState

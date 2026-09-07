@@ -21,6 +21,10 @@ export interface AgentEntryTool {
   name: string
   summary: string
   status: 'running' | 'done' | 'error'
+  /** 工具参数对象（子 agent 转录卡片用） */
+  args?: Record<string, unknown>
+  /** 工具执行结果全文（点击展开详情） */
+  result?: string
 }
 
 export type AgentEntry = AgentEntryText | AgentEntryTool

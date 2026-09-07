@@ -7,7 +7,7 @@
 import { api } from './desktop'
 import { executeTool } from './tools'
 import { TOOL_DEFS } from './ai'
-import { useAppStore } from '@/store/useAppStore'
+import { useSettingsStore } from '@/store/useSettingsStore'
 import { useChatStore } from '@/store/useChatStore'
 import { useAgentStore } from '@/store/useAgentStore'
 import { uid, safeParseObject } from '@/utils/id'
@@ -37,7 +37,7 @@ export function cancelActiveAgentRequests(): void {
 
 /** 档位 → 模型名：未配置的档位回退主模型 */
 export function modelForTier(tier?: string): string {
-  const { settings } = useAppStore.getState()
+  const { settings } = useSettingsStore.getState()
   if (tier && tier !== 'main') {
     const t = settings.tiers
     const m =
@@ -83,7 +83,7 @@ function toHistoryEntry(c: AiCompletion): OAIMessage {
 type RunOutcome = { text: string; kind: 'done' | 'cancelled' | 'model-error' | 'rounds' }
 
 async function runOne(task: SubTask, threadId: string, project: string): Promise<RunOutcome> {
-  const { settings } = useAppStore.getState()
+  const { settings } = useSettingsStore.getState()
   const agents = useAgentStore.getState()
   agents.beginThread(threadId, project)
   const model = modelForTier(task.tier)

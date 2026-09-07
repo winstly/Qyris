@@ -1,7 +1,12 @@
 /**
  * AI Adapter · Claude CLI —— 经本机 claude 命令（Claude Code）调度自主 agent。
  * CLI 自带文件/命令工具与执行循环：本适配器不传轻驭工具集，也不解析 tool_use 交渲染层执行，
- * 只消费 stream-json（stdout NDJSON，非 SSE）的 text/thinking 增量与最终 result。
+ * 消费 stream-json（stdout NDJSON，非 SSE）的：
+ *   - stream_event：主对话 text/thinking 增量与工具流式组装（工具活动 → cli-tool-event）
+ *   - user 完整事件：tool_result 结果块（主线程 → cli-tool-result；子 agent → cli-agent-event）
+ *   - assistant 完整事件：仅子 agent（带 parent_tool_use_id）转录入卡
+ *   - result：权威收口
+ * 子 agent 派发工具为 Agent（旧版 Task），其事件带 parent_tool_use_id 指回派发卡的 tool_use id。
  * 会话为无状态重放：每轮把轻驭历史序列化进 prompt（编辑重发/分叉天然正确）。
  * Windows：claude 通常是 .cmd，直连 spawn 会被 Node ≥18 的 EINVAL 拦截 —— 与 proc.ts 同惯性走 cmd.exe /C。
  */
@@ -12,7 +17,8 @@ import { homedir } from 'node:os'
 import { emitToRenderer, emitToWindow, registerRequestWindow, unregisterRequestWindow } from './emitter'
 import { getConfig, type AppConfig } from './config'
 import { readSkillFromDirs, scanSkillsDirs } from './skills'
-import { buildChildEnv, cancelRunOnce, detectCommand, registerOnceProc } from './proc'
+import { cancelRunOnce, detectCommand, registerOnceProc } from './proc'
+import { buildChildEnv } from './proc-env'
 import { errorMessage } from './util'
 import type { AiCompletion, AiToolCall } from './ai'
 
@@ -20,7 +26,6 @@ type Json = Record<string, any>
 
 const CLI_MAX_TURNS = 60
 const CLI_TIMEOUT_MS = 30 * 60_000
-const CLI_HEARTBEAT_MS = 30_000
 /** stream-json 必配：verbose 才有完整事件；include-partial-messages 才有逐 token 增量 */
 const CLI_ARGS_BASE = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages']
 /** 受限只读档白名单（--allowedTools，逗号拼接单参数） */
@@ -46,9 +51,22 @@ export function cliCancel(requestId: string): void {
 const TOOL_ARG_CAP = 300 // 单条工具参数展示上限（write_file 的 arguments 可能含整文件内容）
 const TOOL_RESULT_CAP = 1500 // 单条工具结果展示上限
 const PROMPT_TOTAL_CAP = 160_000 // 整段对话序列化总上限，超限掐头留尾
+const CLI_EVENT_TEXT_CAP = 4000 // 单条 cli-tool-result / cli-agent-event 文本上限（渲染层再截展示口径）
 
 function clip(s: string, cap: number): string {
   return s.length > cap ? s.slice(0, cap) + '…' : s
+}
+
+/** tool_result.content 归一：string 直接用；块数组取 text 块拼接（image 块忽略） */
+function toolResultText(content: unknown): string {
+  if (typeof content === 'string') return clip(content, CLI_EVENT_TEXT_CAP)
+  if (Array.isArray(content)) {
+    const parts = (content as Json[])
+      .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+      .map((b) => b.text as string)
+    return clip(parts.join('\n'), CLI_EVENT_TEXT_CAP)
+  }
+  return ''
 }
 
 /** 工具名回查：tool 消息只有 tool_call_id，从历史 assistant.tool_calls 里补回工具名 */
@@ -56,7 +74,7 @@ function toolNameOf(callId: string, namesById: Map<string, string>): string {
   return namesById.get(callId) ?? callId.slice(0, 8)
 }
 
-/** 把轻驭历史（OpenAI 格式）扁平成 CLI 友好的对话文本。
+/** @internal 把轻驭历史（OpenAI 格式）扁平成 CLI 友好的对话文本。
  *  system 全部丢弃（CLI 系统提示由 adapter 注入，CLI 还会自动加载 cwd 下 CLAUDE.md）；
  *  轻驭工具痕迹以「本环境不存在」声明 + 截断参数保留，供 CLI 理解此前轮次发生了什么 */
 export function serializeConversation(messages: unknown): string {
@@ -108,18 +126,7 @@ export function serializeConversation(messages: unknown): string {
   return joined
 }
 
-/** 下一轮模型指令：回复末行 [[NEXT_MODEL: <模型名>]] */
-const NEXT_MODEL_RE = /\[\[NEXT_MODEL:\s*([A-Za-z0-9._:/-]+)\s*\]\]\s*$/i
-
-/** 从回复尾部提取下一轮模型指令并剥离；无指令/不在末尾/含非法字符时原样返回 */
-export function extractNextModel(text: string): { text: string; nextModel: string | null } {
-  if (!text) return { text, nextModel: null }
-  const m = text.match(NEXT_MODEL_RE)
-  if (!m || m.index === undefined) return { text, nextModel: null }
-  return { text: text.slice(0, m.index).trimEnd(), nextModel: m[1] }
-}
-
-/** 下一轮 Skill 请求指令（与 NEXT_MODEL 同款尾行协议；id 允许中文目录名） */
+/** @internal 下一轮 Skill 请求指令（尾行协议；id 允许中文目录名） */
 const NEXT_SKILL_RE = /\[\[NEXT_SKILL:\s*([^\]\n]+?)\s*\]\]\s*$/i
 
 /** 从回复尾部提取 [[NEXT_SKILL: id1, id2]] 并剥离 */
@@ -131,7 +138,7 @@ export function extractNextSkill(text: string): { text: string; ids: string[] } 
   return { text: text.slice(0, m.index).trimEnd(), ids }
 }
 
-/** 从回复尾部提取 [[START_COMMANDS: ...]] 并剥离 */
+/** @internal 从回复尾部提取 [[START_COMMANDS: ...]] 并剥离 */
 export function extractStartCommands(text: string): { text: string; commands: { name: string; run: string }[] } {
   if (!text) return { text, commands: [] }
   const m = text.match(/\[\[START_COMMANDS:\s*(\[.*\])\s*\]\]\s*$/is)
@@ -151,26 +158,6 @@ export function extractStartCommands(text: string): { text: string; commands: { 
   return { text: text.slice(0, m.index).trimEnd(), commands }
 }
 
-/** 可用模型菜单（config 主模型 + 已配置档位）：注入系统提示，供 CLI 逐轮指定下一轮模型 */
-export function buildModelMenu(cfg: AppConfig | null): string {
-  if (!cfg) return ''
-  const main = (cfg.aiModel ?? '').trim()
-  const tiers: string[] = []
-  for (const [k, v] of Object.entries(cfg.aiTiers ?? {})) {
-    const m = typeof v === 'string' ? v.trim() : ''
-    if (m) tiers.push(`${k}：${m}`)
-  }
-  if (!main && tiers.length === 0) return ''
-  const lines = ['可用模型清单（你可为下一轮对话指定模型）：']
-  if (main) lines.push(`- 主模型（默认）：${main}`)
-  for (const t of tiers) lines.push(`- 档位 ${t}`)
-  lines.push(
-    '逐轮选模规则：预期下一轮任务较轻（问答/小改动）就在回复最后一行输出 [[NEXT_MODEL: <模型名>]] 选用更轻的模型，'
-    + '任务较重或不确定时省略该行（下一轮用主模型）。该行由系统消费、不会展示给用户；除该行外不要输出任何机器指令。',
-  )
-  return lines.join('\n')
-}
-
 // ---------------- Skill 内联（CLI 没有 load_skill 工具，内容必须直接注入） ----------------
 
 /** buildHistory 注入的两种加载指令形态 + 渲染层 NEXT_SKILL 附带标记（均为同仓代码，格式钉死） */
@@ -178,7 +165,7 @@ const SKILL_MULTI_RE = /请先用 load_skill 依次加载以下 \d+ 个 Skill，
 const SKILL_SINGLE_RE = /请先用 load_skill 加载 Skill「([^」]+)」/g
 const SKILL_ATTACH_RE = /\[附带 Skill：([^\]\n]+)\]/g
 
-/** 从历史消息中提取被引用的 Skill id（子目录名，去重保序） */
+/** @internal 从历史消息中提取被引用的 Skill id（子目录名，去重保序） */
 export function extractSkillIds(messages: unknown): string[] {
   const msgs = (Array.isArray(messages) ? messages : []) as Json[]
   const found: string[] = []
@@ -200,7 +187,7 @@ export function extractSkillIds(messages: unknown): string[] {
 
 const SKILL_CONTENT_CAP = 20_000 // 单个 Skill 内容上限（指令文件通常远小于此）
 
-/** 读取被引用 Skill 的完整内容，组装注入块；目录未配置/全部读取失败返回空串。
+/** @internal 读取被引用 Skill 的完整内容，组装注入块；目录未配置/全部读取失败返回空串。
  *  多目录按序查找首个命中（skills.ts 统一入口）；readSkill 自带路径穿越守卫，id 为子目录名 */
 export async function resolveSkillBlock(dirs: string[], ids: string[]): Promise<string> {
   if (dirs.length === 0 || ids.length === 0) return ''
@@ -216,7 +203,7 @@ export async function resolveSkillBlock(dirs: string[], ids: string[]): Promise<
   ].join('\n\n')
 }
 
-/** 可用 Skill 索引（名称+描述，排除已内联全文的）：CLI 无按需加载工具，
+/** @internal 可用 Skill 索引（名称+描述，排除已内联全文的）：CLI 无按需加载工具，
  *  索引让它感知可用域，并给出 [[NEXT_SKILL]] 请求通道（下一轮附带全文） */
 export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Promise<string> {
   if (dirs.length === 0) return ''
@@ -233,7 +220,7 @@ export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Pro
   ].join('\n')
 }
 
-export function buildCliSystemPrompt(projectRoot: string | null, modelMenu = '', skillBlock = '', skillIndex = ''): string {
+/** @internal */ export function buildCliSystemPrompt(projectRoot: string | null, skillBlock = '', skillIndex = ''): string {
   const lines = [
     '你是「轻驭」工作台调度的编码 agent，通过本机 Claude Code CLI 在项目目录内自主工作。',
     '你拥有自己的文件读写与命令执行工具——直接使用它们完成任务，不要把操作写成建议。',
@@ -246,16 +233,13 @@ export function buildCliSystemPrompt(projectRoot: string | null, modelMenu = '',
   ]
   lines.push(projectRoot ? `当前项目目录：${projectRoot}，请在该目录内工作。` : '当前未打开项目。')
   if (skillBlock) lines.push('', skillBlock)
-  if (modelMenu) lines.push('', modelMenu)
   if (skillIndex) lines.push('', skillIndex)
   return lines.join('\n')
 }
 
-/** CLI 启动参数（prompt 走 stdin） */
-export function buildCliArgs(model: string, permissionMode: 'auto' | 'readonly'): string[] {
+/** @internal CLI 启动参数（prompt 走 stdin）。不传 --model：CLI 自带模型配置，指定不在白名单的模型反而报错 */
+export function buildCliArgs(_model: string, permissionMode: 'auto' | 'readonly'): string[] {
   const args = [...CLI_ARGS_BASE, '--max-turns', String(CLI_MAX_TURNS)]
-  const m = model.replace(/[^A-Za-z0-9._\-/:]/g, '')
-  if (m && !m.startsWith('-')) args.push('--model', m)
   if (permissionMode === 'readonly') args.push('--allowedTools', READONLY_TOOLS)
   else args.push('--dangerously-skip-permissions')
   return args
@@ -282,13 +266,12 @@ export async function claudeCliChatStream(
 
   const cfg = cfgIn ?? await getConfig().catch(() => null)
   const skillDirs = cfg?.skillsDirs ?? []
-  const modelMenu = buildModelMenu(cfg)
   const referencedIds = extractSkillIds(messages)
   const [skillBlock, skillIndex] = await Promise.all([
     resolveSkillBlock(skillDirs, referencedIds),
     buildSkillIndex(skillDirs, referencedIds),
   ])
-  const prompt = `${buildCliSystemPrompt(projectRoot, modelMenu, skillBlock, skillIndex)}\n\n<conversation>\n${serializeConversation(messages)}\n</conversation>`
+  const prompt = `${buildCliSystemPrompt(projectRoot, skillBlock, skillIndex)}\n\n<conversation>\n${serializeConversation(messages)}\n</conversation>`
   const args = buildCliArgs(model, permissionMode)
   const isWin = process.platform === 'win32'
 
@@ -327,28 +310,10 @@ export async function claudeCliChatStream(
       cancelRunOnce(requestId)
     }, CLI_TIMEOUT_MS)
 
-    const startedAt = Date.now()
-    let lastActiveAt = startedAt
-    let lastActivity = ''
-    const touch = (desc?: string): void => {
-      lastActiveAt = Date.now()
-      if (desc) lastActivity = desc
-    }
-    const heartbeat = setInterval(() => {
-      if (settled) return
-      const total = Math.round((Date.now() - startedAt) / 1000)
-      const idle = Math.round((Date.now() - lastActiveAt) / 1000)
-      const line =
-        `（运行中 · 累计 ${Math.floor(total / 60)}m${total % 60}s · 距上次活动 ${idle}s` +
-        `${lastActivity ? ` · 最近：${lastActivity}` : ''}）`
-      emit('ai-reasoning', { requestId, delta: `\n${line}\n` })
-    }, CLI_HEARTBEAT_MS)
-
     const settle = (fn: () => void): void => {
       if (settled) return
       settled = true
       clearTimeout(timer)
-      clearInterval(heartbeat)
       unregister()
       unregisterRequestWindow(requestId)
       fn()
@@ -357,7 +322,6 @@ export async function claudeCliChatStream(
     const onLine = (raw: string): void => {
       const line = raw.trim()
       if (!line) return
-      touch()
       let json: Json
       try {
         json = JSON.parse(line) as Json
@@ -372,30 +336,82 @@ export async function claudeCliChatStream(
         return
       }
 
+      // 事件归属：子 agent 的事件带 parent_tool_use_id（主线程为 null 或缺省）
+      const parentId = typeof json.parent_tool_use_id === 'string' && json.parent_tool_use_id ? json.parent_tool_use_id : null
+
       if (type === 'stream_event') {
+        if (parentId) return // 子 agent 不走流式增量（实测完整 assistant/user 事件直达），防御未来版本流式化时污染主对话
         const evt = json.event as Json | undefined
         const delta = evt?.delta as Json | undefined
         if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text) {
-          touch('生成正文')
           content += delta.text
           emit('ai-delta', { requestId, delta: delta.text })
         } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking) {
-          touch('思考中')
           reasoning += delta.thinking
           emit('ai-reasoning', { requestId, delta: delta.thinking })
         } else if (evt?.type === 'content_block_start') {
           const block = evt.content_block as Json | undefined
           if (block?.type === 'tool_use') {
             currentTool = { id: String(block.id ?? `cli-${toolCalls.length}`), name: String(block.name ?? 'tool'), arguments: '' }
-            touch(`[cli] ${currentTool.name}`)
             emit('cli-tool-event', { requestId, id: currentTool.id, name: currentTool.name, phase: 'start', arguments: '' })
           }
         } else if (delta?.type === 'input_json_delta' && currentTool && typeof delta.partial_json === 'string') {
           currentTool.arguments += delta.partial_json
         } else if (evt?.type === 'content_block_stop' && currentTool) {
           toolCalls.push(currentTool)
+          // stop 仅代表指令输入组装完成，工具尚未执行完——状态收口由 cli-tool-result 驱动
           emit('cli-tool-event', { requestId, id: currentTool.id, name: currentTool.name, phase: 'stop', arguments: currentTool.arguments })
           currentTool = null
+        }
+        return
+      }
+
+      if (type === 'assistant') {
+        // 主线程完整消息已由 stream_event 流式覆盖，跳过防重复；子 agent 只有完整事件，这里转发转录
+        if (!parentId) return
+        const contentArr = (json.message as Json | undefined)?.content
+        for (const block of Array.isArray(contentArr) ? (contentArr as Json[]) : []) {
+          if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
+            emit('cli-agent-event', { requestId, parentId, kind: 'text', text: clip(block.text, CLI_EVENT_TEXT_CAP) })
+          } else if (block?.type === 'tool_use') {
+            const toolId = typeof block.id === 'string' && block.id ? block.id : ''
+            if (!toolId) continue // tool_use 协议保证有 id，无 id 为坏数据不传播（防 fallback uid 导致 tool-result 匹配失败）
+            const input = block.input
+            const args = typeof input === 'string' ? input
+              : input && typeof input === 'object' && Object.keys(input).length > 0 ? JSON.stringify(input)
+              : ''
+            emit('cli-agent-event', {
+              requestId, parentId, kind: 'tool',
+              id: toolId, name: String(block.name ?? 'tool'),
+              arguments: args,
+            })
+          }
+        }
+        return
+      }
+
+      if (type === 'user') {
+        // tool_result 只在完整 user 事件中出现（主线程与子 agent 同构，按 parentId 路由）
+        const contentArr = (json.message as Json | undefined)?.content
+        for (const block of Array.isArray(contentArr) ? (contentArr as Json[]) : []) {
+          if (block?.type !== 'tool_result') continue
+          const id = String(block.tool_use_id ?? '')
+          if (!id) continue
+          const text = toolResultText(block.content)
+          const isError = block.is_error === true
+          if (parentId) {
+            emit('cli-agent-event', { requestId, parentId, kind: 'tool-result', id, content: text, isError })
+          } else {
+            // 子 agent 派发卡（Agent/Task）的 tool_use_result.usage 携带该子 agent 的 token 账目
+            const usage = (json.tool_use_result as Json | undefined)?.usage as Json | undefined
+            emit('cli-tool-result', {
+              requestId, id, content: text, isError,
+              tokens: usage ? {
+                input: Number(usage.input_tokens) || 0,
+                output: Number(usage.output_tokens) || 0,
+              } : undefined,
+            })
+          }
         }
         return
       }
@@ -446,28 +462,18 @@ export async function claudeCliChatStream(
       settle(() => {
         const finalizeContent = (): {
           content: string | null
-          nextModel: string | null
           nextSkill: string[]
           startCommands: { name: string; run: string }[]
         } => {
           const raw = finalText ?? (content.length > 0 ? content : null)
-          if (!raw) return { content: null, nextModel: null, nextSkill: [], startCommands: [] }
-          let work = raw
-          let nextModel: string | null = null
-          let nextSkill: string[] = []
-          let startCommands: { name: string; run: string }[] = []
+          if (!raw) return { content: null, nextSkill: [], startCommands: [] }
+          // 尾行指令 $ 锚定、从尾部剥离——单次链式调用
+          const s = extractNextSkill(raw)
+          const c = extractStartCommands(s.text)
+          const nextSkill = s.ids
+          const startCommands = c.commands
+          const work = c.text
           const notes: string[] = []
-          for (let i = 0; i < 4; i++) {
-            const m = extractNextModel(work)
-            const s = extractNextSkill(m.text)
-            const c = extractStartCommands(s.text)
-            if (!m.nextModel && s.ids.length === 0 && c.commands.length === 0) break
-            if (m.nextModel) nextModel = m.nextModel
-            if (s.ids.length > 0) nextSkill = s.ids
-            if (c.commands.length > 0) startCommands = c.commands
-            work = c.text
-          }
-          if (nextModel) notes.push(`下一轮对话将使用模型：${nextModel}`)
           if (nextSkill.length > 0) notes.push(`下一轮将附带 Skill：${nextSkill.join('、')}`)
           if (startCommands.length > 0) notes.push(`启动命令清单已提交（${startCommands.length} 项：${startCommands.map((c) => c.name).join('、')}）`)
           if (notes.length > 0) {
@@ -475,16 +481,15 @@ export async function claudeCliChatStream(
             reasoning += note
             emit('ai-reasoning', { requestId, delta: note })
           }
-          return { content: work.length > 0 ? work : null, nextModel, nextSkill, startCommands }
+          return { content: work.length > 0 ? work : null, nextSkill, startCommands }
         }
         if (finalText !== null || finishReason === 'max_turns') {
-          const { content: clean, nextModel, nextSkill, startCommands } = finalizeContent()
+          const { content: clean, nextSkill, startCommands } = finalizeContent()
           resolve({
             content: clean,
             reasoning: reasoning.length > 0 ? reasoning : null,
             toolCalls: [],
             finishReason,
-            nextModel,
             nextSkill,
             startCommands,
           })
@@ -500,13 +505,12 @@ export async function claudeCliChatStream(
           return
         }
         if (code === 0) {
-          const { content: clean, nextModel, nextSkill, startCommands } = finalizeContent()
+          const { content: clean, nextSkill, startCommands } = finalizeContent()
           resolve({
             content: clean,
             reasoning: reasoning.length > 0 ? reasoning : null,
             toolCalls: [],
             finishReason: 'stop',
-            nextModel,
             nextSkill,
             startCommands,
           })

@@ -5,7 +5,7 @@
  */
 import { spawn } from 'node:child_process'
 import { errorMessage } from './util'
-import { buildChildEnv } from './proc'
+import { buildChildEnv } from './proc-env'
 
 /** 单个改动文件条目（git status --porcelain v1 解析） */
 export interface GitFileEntry {
