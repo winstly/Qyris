@@ -16,6 +16,10 @@ interface StartupState {
 
   /** 覆盖某项目的启动命令存档，同步落盘 */
   setStartupCommands: (cmds: StartCommand[], projectPath: string) => Promise<void>
+  /** 更新单条启动命令（按 name 匹配），同步落盘 */
+  updateStartCommand: (name: string, patch: Partial<Pick<StartCommand, 'run' | 'url'>>, projectPath: string) => Promise<void>
+  /** 删除单条启动命令（按 name 匹配），同步落盘 */
+  deleteStartCommand: (name: string, projectPath: string) => Promise<void>
   /** 清空某项目的启动命令 */
   clearStartupCommands: (projectPath: string) => Promise<void>
   /** 设置当前工程（投影 startupCommands） */
@@ -39,6 +43,31 @@ export const useStartupStore = create<StartupState>()((set, get) => ({
     const patch: Partial<StartupState> = { startupCommandsMap: map }
     if (get()._currentProject === projectPath) patch.startupCommands = cmds
     set(patch)
+    await persistMap(map)
+  },
+
+  updateStartCommand: async (name, patch, projectPath) => {
+    const cur = get().startupCommandsMap[projectPath] ?? []
+    const key = name.trim().toLowerCase()
+    const idx = cur.findIndex((c) => c.name.trim().toLowerCase() === key)
+    const next = idx >= 0
+      ? cur.map((c, i) => i === idx ? { ...c, ...patch } : c)
+      : [...cur, { name: name.trim(), run: patch.run ?? '', url: patch.url }]
+    const map = { ...get().startupCommandsMap, [projectPath]: next }
+    const statePatch: Partial<StartupState> = { startupCommandsMap: map }
+    if (get()._currentProject === projectPath) statePatch.startupCommands = next
+    set(statePatch)
+    await persistMap(map)
+  },
+
+  deleteStartCommand: async (name, projectPath) => {
+    const cur = get().startupCommandsMap[projectPath] ?? []
+    const key = name.trim().toLowerCase()
+    const next = cur.filter((c) => c.name.trim().toLowerCase() !== key)
+    const map = { ...get().startupCommandsMap, [projectPath]: next }
+    const statePatch: Partial<StartupState> = { startupCommandsMap: map }
+    if (get()._currentProject === projectPath) statePatch.startupCommands = next
+    set(statePatch)
     await persistMap(map)
   },
 

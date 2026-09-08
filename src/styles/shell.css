@@ -379,6 +379,24 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
   line-height: 1.4;
 }
 
+/* 设置面板：数字输入 + 单位后缀（记忆整理轮次） */
+.settings-memrounds {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-memrounds .field__input { width: 96px; }
+/* 隐藏 number 输入原生上下箭头（Chromium）：步进仍可用键盘上下键 */
+.settings-memrounds .field__input::-webkit-outer-spin-button,
+.settings-memrounds .field__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.settings-memrounds__unit {
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+
 /* 设置面板 tab 导航 */
 .settings-tabs {
   display: flex;

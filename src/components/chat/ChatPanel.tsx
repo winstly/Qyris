@@ -51,10 +51,33 @@ export function ChatPanel() {
   }
 
   const clearChat = async () => {
-    const ok = await useAppStore.getState().showConfirm('清空对话', '确定清空当前全部对话吗？此操作不可撤销。')
-    if (ok) {
-      useChatStore.getState().clear()
-      useAgentStore.getState().clear()
+    const projectPath = useAppStore.getState().projectPath
+    // 清空对话默认 = 开新会话、历史保留在库；两个勾选才做真删除。
+    // 勾选删记忆时必须跳过收尾提取（clear 内部处理），否则提取会把刚删的记忆立刻蒸回来
+    const checks = [
+      { id: 'clearHistory', label: '同时删除对话历史（不可恢复）', checked: false },
+      ...(projectPath ? [{ id: 'clearMemory', label: '同时删除该工程的记忆', checked: false }] : []),
+    ]
+    const result = await useAppStore.getState().showConfirm(
+      '清空对话',
+      '将结束当前会话并开启新对话；当前对话默认保留在本地历史中，如需彻底删除请勾选下方选项。',
+      checks,
+    )
+    const ok = typeof result === 'object' ? result.confirmed : result
+    if (!ok) return
+    const checked = typeof result === 'object' ? result.checks : {}
+    const deleteHistory = checked.clearHistory === true
+    const deleteMemory = projectPath && checked.clearMemory === true
+    useChatStore.getState().clear({ deleteMessages: deleteHistory, skipFinalExtract: !!deleteMemory })
+    useAgentStore.getState().clear()
+    if (deleteMemory) {
+      try {
+        const { api } = await import('@/services/desktop')
+        await api.memoryClear('project', projectPath)
+        // 清空后刷新记忆面板列表
+        const { useMemoryStore } = await import('@/store/useMemoryStore')
+        void useMemoryStore.getState().load(projectPath)
+      } catch { /* 静默 */ }
     }
   }
 

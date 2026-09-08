@@ -1,0 +1,210 @@
+/* ============ 左侧折叠面板（项目列表 + 用户记忆） ============ */
+
+.sidebar {
+  flex: 0 0 auto;
+  display: flex;
+  height: 100%;
+  border-right: 1px solid var(--edge-hair);
+  background: var(--s1);
+  overflow: hidden;
+}
+
+/* 图标列：始终可见，40px 宽 */
+.sidebar__icons {
+  flex: 0 0 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: var(--space-2) 0;
+  gap: 2px;
+  border-right: 1px solid var(--edge-hair);
+}
+
+.sidebar__icon-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  transition: color var(--motion-fast), background var(--motion-fast);
+}
+.sidebar__icon-btn:hover { color: var(--fg-2); background: var(--row-hover); }
+.sidebar__icon-btn--active {
+  color: var(--accent);
+  background: var(--accent-dim);
+}
+
+/* 展开面板：固定宽度 260px */
+.sidebar__panel {
+  flex: 0 0 260px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  animation: sidebar-slide-in 0.15s var(--ease-standard);
+}
+
+@keyframes sidebar-slide-in {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+
+.sidebar__panel-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--edge-hair);
+}
+
+.sidebar__panel-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.sidebar__panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ============ 用户记忆区域（侧边栏内） ============ */
+
+.user-mem {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: var(--space-2);
+  gap: var(--space-2);
+}
+
+/* ── 搜索行：搜索框（占满剩余宽）+ ⋯ 菜单按钮 ── */
+.user-mem__top {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.user-mem__search {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 7px;
+  color: var(--muted);
+  background: var(--s2);
+  border: 1px solid var(--edge-hair);
+  border-radius: var(--radius-sm);
+  transition: border-color var(--motion-fast);
+}
+.user-mem__search:focus-within { border-color: var(--accent); }
+.user-mem__search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: var(--text-xs);
+}
+.user-mem__search-input::placeholder { color: var(--muted); }
+.user-mem__search-clear {
+  display: inline-flex;
+  padding: 1px;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+.user-mem__search-clear:hover { color: var(--fg); background: var(--row-hover); }
+
+/* ── ⋯ 菜单（导出/导入/清空）：触发按钮 + portal 菜单 ── */
+.user-mem__menu-wrap { flex: 0 0 auto; position: relative; }
+.user-mem__more {
+  height: 26px;
+  padding: 0 7px;
+  letter-spacing: 2px;
+  font-weight: 700;
+  color: var(--muted);
+}
+.user-mem__more:hover { color: var(--fg); }
+/* portal 到 body + fixed 定位（坐标内联注入）：不受滚动容器 overflow 裁剪。
+   z-index 与 .select__menu/ctxmenu 同级（200）：高于 modal(100)，弹窗之上也能浮出。 */
+.user-mem__menu {
+  position: fixed;
+  z-index: 200;
+  min-width: 140px;
+  padding: 4px 0;
+  background: var(--s3);
+  border: 1px solid var(--edge);
+  border-radius: var(--radius-md);
+  box-shadow: var(--elev-raised);
+}
+.user-mem__menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 12px;
+  text-align: left;
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.user-mem__menu-item:hover:not(:disabled) { background: var(--row-hover); color: var(--fg); }
+.user-mem__menu-item:disabled { color: var(--muted); cursor: default; background: transparent; }
+.user-mem__menu-item--danger { color: var(--danger); }
+.user-mem__menu-item--danger:hover:not(:disabled) { background: var(--danger-dim); }
+.user-mem__menu-sep { height: 1px; margin: 4px 0; background: var(--edge-hair); }
+
+.user-mem__list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.user-mem__loading,
+.user-mem__error {
+  padding: var(--space-4);
+  text-align: center;
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.user-mem__error { color: var(--danger); display: flex; align-items: center; justify-content: center; gap: 6px; }
+
+.user-mem__status {
+  flex: 0 0 auto;
+  padding: 4px 0 0;
+  border-top: 1px solid var(--edge-hair);
+  font-size: var(--text-micro);
+  color: var(--muted);
+  text-align: center;
+}
+
+/* 紧凑模式条目（侧边栏用） */
+.memory__item--compact {
+  padding: 5px 8px;
+}
+.memory__item--compact .memory__item-title {
+  font-size: var(--text-xs);
+}
+.memory__item--compact .memory__item-content {
+  font-size: 10px;
+  line-height: 1.4;
+}
+.memory__item--compact .memory__item-meta {
+  font-size: 10px;
+  gap: 5px;
+}

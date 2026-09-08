@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react'
 import { useAppStore, type Theme } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
 import { SECRET_KEY } from '@/services/ai'
+import { useMemoryStore } from '@/store/useMemoryStore'
 import type { ModelTiers } from '@/types'
-import { IconClose, IconCheck, IconAlert, IconFolder } from '@/components/common/icons'
+import { IconClose, IconCheck, IconAlert, IconFolder, IconCopy } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
 
 /**
- * 设置面板：两个 tab —— 模型设置（Base URL / API Key / 模型名）+ 系统设置（主题）。
+ * 设置面板：三个 tab —— 模型设置（Base URL / API Key / 模型名）+ 记忆设置（整理触发轮次、
+ * 数据存储位置；蒸馏模型跟随主模型不单独配置）+ 系统设置（主题）。
  * API Key 只写入系统 keychain，绝不落配置文件或 localStorage。
  */
 export function SettingsDialog() {
@@ -19,12 +21,14 @@ export function SettingsDialog() {
   const refreshHasApiKey = useAppStore((s) => s.refreshHasApiKey)
   const theme = useAppStore((s) => s.theme)
   const setTheme = useAppStore((s) => s.setTheme)
+  const showConfirm = useAppStore((s) => s.showConfirm)
+  const showAlert = useAppStore((s) => s.showAlert)
   const skillsDirs = useAppStore((s) => s.skillsDirs)
   const setSkillsDirs = useAppStore((s) => s.setSkillsDirs)
   const skillMetas = useAppStore((s) => s.skillMetas)
   const loadSkills = useAppStore((s) => s.loadSkills)
 
-  const [tab, setTab] = useState<'model' | 'system'>('model')
+  const [tab, setTab] = useState<'model' | 'memory' | 'system'>('model')
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
   const [model, setModel] = useState(settings.model)
   const [provider, setProvider] = useState<'openai' | 'anthropic'>(settings.provider)
@@ -37,6 +41,13 @@ export function SettingsDialog() {
   // Skills 目录本地编辑草稿：输入过程不落盘不重扫（否则每个按键 = 一次配置写盘 + 全目录扫描），
   // 失焦/增删行时统一提交。null = 未在编辑，直接透传 store 值
   const [dirsDraft, setDirsDraft] = useState<string[] | null>(null)
+  // 数据存储位置：系统设置 tab 打开时读取；迁移期间按钮禁用（一次性 await，无进度条）
+  const [dataDir, setDataDir] = useState<string | null>(null)
+  const [dirBusy, setDirBusy] = useState<'pick' | 'migrate' | null>(null)
+  const [dirCopied, setDirCopied] = useState(false)
+  // 记忆 tab 本地草稿：触发轮次（空串=缺省 6）。蒸馏模型跟随「模型设置」主模型，不单独配置。
+  // 进入记忆 tab 时读取一次，保存时统一落盘
+  const [memRounds, setMemRounds] = useState('')
 
   useEffect(() => {
     if (open) {
@@ -50,8 +61,26 @@ export function SettingsDialog() {
       setApiKeyInput('')
       setTestResult(null)
       setDirsDraft(null)
+      setDirBusy(null)
+      setMemRounds('')
     }
   }, [open, settings])
+
+  // 记忆设置：进入记忆 tab 时读取配置 + 数据存储位置（迁移成功后由 onChangeDir 回写）
+  useEffect(() => {
+    if (!open || tab !== 'memory') return
+    let alive = true
+    api.getDataDir()
+      .then((d) => { if (alive) setDataDir(d) })
+      .catch(() => { /* 非桌面壳等场景：路径位保持占位文案 */ })
+    api.getConfig()
+      .then((c) => {
+        if (!alive) return
+        setMemRounds(c.memExtractRounds != null ? String(c.memExtractRounds) : '')
+      })
+      .catch(() => { /* 读不到保持缺省 */ })
+    return () => { alive = false }
+  }, [open, tab])
 
   if (!open) return null
 
@@ -80,6 +109,11 @@ export function SettingsDialog() {
       cliPermission,
       tiers: Object.keys(cleanTiers).length ? cleanTiers : undefined,
     })
+    // 记忆设置落盘：轮次空串/非法 = 清配置回缺省 6。归一（2..60）在主进程 config.ts
+    const rounds = Math.floor(Number(memRounds))
+    await api.mergeConfig({
+      memExtractRounds: Number.isFinite(rounds) && rounds >= 2 ? Math.min(60, rounds) : undefined,
+    })
     await refreshHasApiKey()
     setOpen(false)
   }
@@ -104,6 +138,43 @@ export function SettingsDialog() {
     }
   }
 
+  const onCopyDataDir = async () => {
+    if (!dataDir) return
+    try {
+      await navigator.clipboard.writeText(dataDir)
+      setDirCopied(true)
+      window.setTimeout(() => setDirCopied(false), 1500)
+    } catch { /* 剪贴板不可用时静默 */ }
+  }
+
+  const onChangeDataDir = async () => {
+    if (dirBusy) return
+    setDirBusy('pick')
+    try {
+      const target = await api.selectDataDir()
+      if (!target || target === dataDir) return
+      const confirmed = await showConfirm(
+        '更改数据存储位置',
+        `应用数据（对话历史、记忆、文件快照）将迁移到：${target}。迁移期间请勿操作应用，确定继续？`,
+      )
+      if (confirmed !== true) return
+      setDirBusy('migrate')
+      const r = await api.migrateDataDir(target)
+      if (r.ok) {
+        setDataDir(target)
+        // 库文件已搬家，记忆面板状态条的库大小口径同步刷新
+        void useMemoryStore.getState().refreshStats()
+        void showAlert('迁移完成', '应用数据已迁移到新位置。')
+      } else {
+        void showAlert('迁移失败', r.error ?? '未知错误')
+      }
+    } catch (e) {
+      void showAlert('迁移失败', String(e))
+    } finally {
+      setDirBusy(null)
+    }
+  }
+
   return (
     <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(false) }}>
       <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label="设置">
@@ -124,6 +195,14 @@ export function SettingsDialog() {
             模型设置
           </button>
           <button
+            className={`settings-tab ${tab === 'memory' ? 'settings-tab--active' : ''}`}
+            onClick={() => setTab('memory')}
+            role="tab"
+            aria-selected={tab === 'memory'}
+          >
+            记忆设置
+          </button>
+          <button
             className={`settings-tab ${tab === 'system' ? 'settings-tab--active' : ''}`}
             onClick={() => setTab('system')}
             role="tab"
@@ -133,7 +212,64 @@ export function SettingsDialog() {
           </button>
         </div>
 
-        {tab === 'model' ? (
+        {tab === 'memory' ? (
+          <>
+            <div className="modal__body">
+              <div className="field">
+                <span className="field__label">记忆整理触发轮次</span>
+                <div className="settings-memrounds">
+                  <input
+                    className="field__input"
+                    type="number"
+                    min={2}
+                    max={60}
+                    step={1}
+                    value={memRounds}
+                    onChange={(e) => setMemRounds(e.target.value)}
+                    placeholder="默认 6"
+                    aria-label="记忆整理触发轮次"
+                  />
+                  <span className="settings-memrounds__unit">轮 AI 回复</span>
+                </div>
+                <span className="field__hint">
+                  每累计多少轮 AI 回复后自动把对话蒸馏进记忆——越小记得越勤、token 消耗越多；清空输入恢复默认。会话结束与记忆页的「重新整理」不受此值影响
+                </span>
+              </div>
+
+              <div className="field">
+                <span className="field__label">数据存储位置</span>
+                <div className="settings-datadir">
+                  <code className="settings-datadir__path mono" title={dataDir ?? ''}>
+                    {dataDir ?? '—'}
+                  </code>
+                  <button
+                    className="icon-btn"
+                    onClick={() => void onCopyDataDir()}
+                    disabled={!dataDir}
+                    aria-label="复制路径"
+                    title="复制路径"
+                  >
+                    {dirCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                  </button>
+                  <button
+                    className="btn btn--ghost btn--sm"
+                    onClick={() => void onChangeDataDir()}
+                    disabled={dirBusy !== null}
+                  >
+                    {dirBusy === 'migrate' ? '迁移中…' : '更改位置…'}
+                  </button>
+                </div>
+                <span className="field__hint">
+                  对话历史、记忆与文件快照存储于此目录；更改位置时自动迁移，迁移期间请勿操作
+                </span>
+              </div>
+            </div>
+            <div className="modal__actions">
+              <button className="btn btn--ghost btn--sm" onClick={() => setOpen(false)}>取消</button>
+              <button className="btn btn--primary btn--sm" onClick={() => void onSave()}>保存</button>
+            </div>
+          </>
+        ) : tab === 'model' ? (
           <>
             <div className="modal__body">
             <label className="field">

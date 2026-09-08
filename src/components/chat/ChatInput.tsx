@@ -3,6 +3,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { isDesktop } from '@/services/desktop'
 import { fmtTok } from '@/utils/tokens'
+import { skillLoadInstruction } from '@/utils/skillInstruction'
 import { IconSend, IconStop, IconClose, IconCheck } from '@/components/common/icons'
 import type { SkillMeta } from '@/types'
 
@@ -104,10 +105,8 @@ export function ChatInput() {
     let aiMsg = ''
     if (selectedSkills.length > 0) {
       meta.skills = selectedSkills.map((s) => ({ id: s.id, name: s.name }))
-      const ids = selectedSkills.map((s) => s.id).join(', ')
-      const skillPart = selectedSkills.length > 1
-        ? `请先用 load_skill 依次加载以下 ${selectedSkills.length} 个 Skill，全部加载后再执行：${ids}`
-        : `请先用 load_skill 加载 Skill「${ids}」，再执行。`
+      // 生成器唯一来源（措辞是 ai-cli 反解正则的契约），见 utils/skillInstruction.ts
+      const skillPart = skillLoadInstruction(selectedSkills.map((s) => s.id))
       aiMsg = userText ? `${skillPart}\n\n${userText}` : skillPart
     } else {
       aiMsg = userText

@@ -11,7 +11,12 @@ import * as secrets from '../lib/secrets'
 import * as ai from '../lib/ai'
 import * as snapshot from '../lib/snapshot'
 import * as inspect from '../lib/inspect'
-import * as sessions from '../lib/sessions'
+import * as messages from '../lib/messages'
+import * as memory from '../lib/memory/service'
+import * as memoryAgent from '../lib/memory/agent'
+import * as migrate from '../lib/migrate'
+import { warmupEmbed } from '../lib/memory/embed'
+import { closeDb, dataDir } from '../lib/db'
 import * as skills from '../lib/skills'
 import * as projectCreate from '../lib/project-create'
 import * as git from '../lib/git'
@@ -55,11 +60,12 @@ function saveWindowState(win: BrowserWindow): void {
   }
 }
 
-/** 退出清理（幂等）：先杀运行中的子进程树（含在途 CLI 子进程），再停所有 watcher */
+/** 退出清理（幂等）：先杀运行中的子进程树（含在途 CLI 子进程），再停所有 watcher、关闭 SQLite */
 function cleanup(): void {
   proc.killRunningForCleanup()
   proc.cancelRunOnce()
   void watcher.stopWatching()
+  closeDb()
 }
 
 function registerIpc(): void {
@@ -86,9 +92,48 @@ function registerIpc(): void {
   handle('restore_session', (_e, p) => snapshot.restoreSession(p.projectRoot, p.sessionId))
   handle('clear_project_snapshots', (_e, p) => snapshot.clearProjectSnapshots(p.projectRoot))
 
-  // 会话历史持久化
-  handle('load_session', (_e, p) => sessions.loadSession(p.projectRoot))
-  handle('save_session', (_e, p) => sessions.saveSession(p.projectRoot, p.messages))
+  // 会话消息持久化（SQLite）
+  handle('messages_recent', (_e, p) => messages.messagesRecent(p.projectRoot, p.limit))
+  handle('messages_before', (_e, p) => messages.messagesBefore(p.projectRoot, p.sessionId, p.beforeSeq, p.limit))
+  handle('message_append', (_e, p) => messages.messageAppend(p.projectRoot, p.sessionId, p.message))
+  handle('message_patch', (_e, p) => messages.messagePatch(p.projectRoot, p.sessionId, p.id, p.patch))
+  handle('messages_truncate', (_e, p) => messages.messagesTruncate(p.projectRoot, p.sessionId, p.afterSeq))
+  handle('project_data_delete', (_e, p) => messages.projectDataDelete(p.projectRoot))
+  handle('save_session_tokens', (_e, p) => messages.saveSessionTokens(p.projectRoot, p.sessionId, p.tokens))
+  handle('load_session_tokens', (_e, p) => messages.loadSessionTokens(p.projectRoot, p.sessionId))
+
+  // 记忆（检索底座：FTS + 向量混合；写入由 P2 mem agent 负责，此处仅管理通道）
+  handle('memory_list', (_e, p) => memory.memoryList(p.projectRoot, p.includeArchived === true))
+  handle('memory_search', (_e, p) =>
+    memory.memorySearch(String(p.query ?? ''), p.projectRoot, p.topK, p.includeArchived === true))
+  handle('memory_update', (_e, p) => memory.memoryUpdate(p.id, p.patch))
+  handle('memory_delete', (_e, p) => memory.memoryDelete(p.id))
+  handle('memory_move_scope', (_e, p) => memory.memoryMoveScope(p.id, p.target, p.projectRoot))
+  handle('memory_clear', (_e, p) => memory.memoryClear(p.scope, p.projectRoot))
+  handle('memory_stats', () => memory.memoryStats())
+  // P3 备份通道（对话框绑定调用方窗口）
+  handle('memory_export', (e, p) =>
+    memory.memoryExport(p.scope, p.projectRoot ?? undefined, BrowserWindow.fromWebContents(e.sender)))
+  handle('memory_import', (e) =>
+    memory.memoryImport(BrowserWindow.fromWebContents(e.sender)))
+
+  // mem agent（P2 记忆蒸馏管线：滚动/收尾/手动触发 + 会话摘要 + lesson；游标与频控在主进程）
+  handle('memory_session_context', async (_e, p) => ({
+    summary: await memory.sessionSummary(String(p.projectRoot ?? ''), String(p.sessionId ?? '')),
+  }))
+  handle('memory_maybe_extract', (_e, p) =>
+    memoryAgent.memoryMaybeExtract(String(p.projectRoot ?? ''), String(p.sessionId ?? '')))
+  handle('session_ended', (_e, p) =>
+    memoryAgent.sessionEnded(String(p.projectRoot ?? ''), String(p.sessionId ?? '')))
+  handle('memory_run_now', (_e, p) => memoryAgent.memoryRunNow(String(p.projectRoot ?? '')))
+  handle('memory_extracting', (_e, p) => memoryAgent.isExtracting(String(p.projectRoot ?? '')))
+  handle('note_lesson', (_e, p) =>
+    memory.noteLesson(String(p.projectRoot ?? ''), String(p.sessionId ?? ''), p.lesson))
+
+  // 存储位置（设置项：当前路径显示 / 选择目录 + 迁移）
+  handle('get_data_dir', () => dataDir())
+  handle('select_data_dir', (e) => migrate.selectDataDir(BrowserWindow.fromWebContents(e.sender)))
+  handle('migrate_data_dir', (_e, p) => migrate.migrateDataDir(String(p?.dir ?? '')))
 
   // 子进程 / watcher（windowId 用于事件定向路由）
   handle('run_project', (e, p) => proc.runProject(p.projectRoot, p.name, p.command, e.sender.id))
@@ -160,9 +205,10 @@ function registerIpc(): void {
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
   })
 
-  // AI（windowId 绑定到发起请求的窗口，用于事件定向路由）
+  // AI（windowId 绑定到发起请求的窗口，用于事件定向路由；opts 透传 CLI 记忆反哺通道——
+  //  sessionSummary/memoryBlock，缺此一跳 CLI 模式的记忆注入会整体断供）
   handle('ai_chat_stream', (e, p) =>
-    ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot, e.sender.id))
+    ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot, e.sender.id, p.opts ?? undefined))
   handle('ai_test_connection', (_e, p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode))
   handle('ai_cancel', (_e, p) => ai.aiCancel(p.requestId))
 
@@ -277,6 +323,14 @@ app.whenReady().then(() => {
     const killed = proc.cleanupOrphanServices()
     if (killed > 0) console.log(`[cleanup] 已清理 ${killed} 个上次遗留的服务进程`)
   } catch { /* 清理失败不阻塞启动 */ }
+
+  // 嵌入模型预热 + 蒸馏 token 恢复 + 记忆维护作业（fire-and-forget 不阻塞启动）：
+  //  预热成功后跑指纹自愈（不符 → 全量重嵌）；衰减/归档作业 boot 调度（30s 首跑 + 每 6h）
+  void warmupEmbed().then((ready) => {
+    if (ready) void memory.maybeStartReembedJob().catch((e) => console.warn(`[memory] 重嵌自愈失败：${String(e)}`))
+  })
+  void memory.loadDistillTokens().catch(() => {})
+  memory.startDecayJob()
 
   // 应用菜单
   if (process.platform === 'darwin') {

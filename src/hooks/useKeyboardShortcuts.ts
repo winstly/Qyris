@@ -23,6 +23,9 @@ export function useKeyboardShortcuts() {
       } else if (key === 's') {
         e.preventDefault()
         void useFileStore.getState().saveFile()
+      } else if (key === 'm') {
+        e.preventDefault()
+        useAppStore.getState().toggleMemorySidebar()
       } else if (key === 'f') {
         const fs = useFileStore.getState()
         // 有活动文本文件 → 编辑器内搜索

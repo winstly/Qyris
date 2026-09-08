@@ -1,8 +1,16 @@
 /**
  * 工具执行器：把模型的 function call 落到桌面后端命令上，
  * 并联动左侧文件树 / 编辑器刷新。
+ *
+ * ⚠️ 结果文本前缀即成败协议（消费方用 startsWith 判定，见 useChatStore / subagent）：
+ *   - 工具级失败一律以「错误：」开头
+ *   - 执行器抛错的兜底统一「工具执行失败：」
+ *   已知残留风险：成功结果本身以「错误」开头时会被误判为失败（如文件首行恰好如此），
+ *   结构化成败字段是后续演进方向，本轮不做。
+ * 可用工具清单以 TOOL_DEFS（services/ai.ts）为唯一来源，禁止手抄。
  */
 import { api } from './desktop'
+import { TOOL_DEFS } from './ai'
 import { useProjectStore } from '@/store/useProjectStore'
 import { useSettingsStore } from '@/store/useSettingsStore'
 import { useStartupStore } from '@/store/useStartupStore'
@@ -30,15 +38,29 @@ export interface ToolOutcome {
   summary: string
 }
 
-/** AI 启动的服务命令沉淀：upsert 进当前项目存档（「全部运行」按钮直接复用，零模型） */
+/** AI 启动的服务命令沉淀：upsert 进当前项目存档（「全部运行」按钮直接复用，零模型）。
+ *  名称比较与 updateStartCommand/deleteStartCommand 对齐：大小写不敏感 + trim。 */
 function persistStartCommand(name: string, command: string, project?: string): void {
   const p = project ?? useProjectStore.getState().projectPath
   if (!p) return
+  const key = name.trim().toLowerCase()
   const cur = useStartupStore.getState().startupCommandsMap[p] ?? []
-  const next = cur.some((c) => c.name === name)
-    ? cur.map((c) => (c.name === name ? { ...c, run: command } : c))
-    : [...cur, { name, run: command }]
+  const next = cur.some((c) => c.name.trim().toLowerCase() === key)
+    ? cur.map((c) => (c.name.trim().toLowerCase() === key ? { ...c, run: command } : c))
+    : [...cur, { name: name.trim(), run: command }]
   void useStartupStore.getState().setStartupCommands(next, p)
+}
+
+/** 教训采集（P2）：一次性命令失败 → noteLesson（fire-and-forget；切片不在/刚 clear 则跳过，
+ *  同会话重复失败由主进程去重） */
+function noteCommandFailure(projectRoot: string, command: string, code: number | null, output: string): void {
+  const sessionId = useChatStore.getState().byProject[projectRoot]?.sessionId
+  if (!sessionId) return
+  const firstLine = command.split('\n')[0].trim().slice(0, 60) || command.slice(0, 60)
+  void api.noteLesson(projectRoot, sessionId, {
+    title: `命令失败：${firstLine}`,
+    content: `退出码 ${code ?? -1}\n${output.slice(-500)}`,
+  }).catch(() => {})
 }
 
 export async function executeTool(name: string, args: Record<string, unknown>, cardId = '', project = ''): Promise<ToolOutcome> {
@@ -118,6 +140,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         // cancelToken：无卡片 id 时（子 agent 路径）现配一个，保证在途进程可被「停止生成」硬中断
         const out = await api.runOnce(root, command, cardId || uid())
         const ok = out.code === 0
+        if (!ok) noteCommandFailure(root, command, out.code, out.output)
         const tail = (out.output || '（无输出）').slice(0, RUN_ONCE_TAIL_CHARS)
         return {
           result: ok
@@ -130,16 +153,36 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
       case 'report_start_commands': {
         const arr = Array.isArray(args.services) ? args.services : []
         const services = (arr as Record<string, unknown>[])
-          .map((s) => ({ name: String(s?.name ?? '').trim(), run: String(s?.run ?? '').trim() }))
+          .map((s) => ({
+            name: String(s?.name ?? '').trim(),
+            run: String(s?.run ?? '').trim(),
+            url: typeof s?.url === 'string' && s.url.trim() ? s.url.trim() : undefined,
+          }))
           .filter((s) => s.name && s.run)
         if (services.length === 0) {
           return { result: '错误：services 不能为空，每项需包含 name（服务名）与 run（启动命令）。', summary: '启动清单为空' }
         }
         await useStartupStore.getState().setStartupCommands(services, root)
-        const list = services.map((s) => `- ${s.name}：${s.run}`).join('\n')
+        const list = services.map((s) => `- ${s.name}：${s.run}${s.url ? `（预览地址 ${s.url}）` : ''}`).join('\n')
         return {
           result: `已保存 ${services.length} 个服务的启动命令：\n${list}\n用户可在预览面板点击「全部运行」直接启动（无需再次识别）。`,
           summary: `已保存 ${services.length} 条启动命令`,
+        }
+      }
+
+      case 'update_start_command': {
+        const name = String(args.name ?? '').trim()
+        const command = String(args.command ?? '').trim()
+        if (!name) return { result: '错误：name 不能为空。', summary: '服务名为空' }
+        if (!command) return { result: '错误：command 不能为空。', summary: '命令为空' }
+        const cmds = useStartupStore.getState().startupCommandsMap[root] ?? []
+        const exists = cmds.some((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase())
+        await useStartupStore.getState().updateStartCommand(name, { run: command }, root)
+        return {
+          result: exists
+            ? `已更新服务「${name}」的启动命令为：${command}。用户下次点「全部运行」或「运行」时将使用新命令。`
+            : `已添加新服务「${name}」：${command}。用户可在预览面板点击「全部运行」启动。`,
+          summary: exists ? `已更新 ${name} 命令` : `已添加 ${name}`,
         }
       }
 
@@ -287,7 +330,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
       }
 
       default:
-        return { result: `错误：未知工具 ${name}。可用工具：list_files / search_files / read_file / write_file / run_once / report_start_commands / run_project / verify_start / get_build_status / stop_project / dispatch_subtasks / askUserQuestion / load_skill。`, summary: `未知工具 ${name}` }
+        return { result: `错误：未知工具 ${name}。可用工具：${TOOL_DEFS.map((t) => t.function.name).join(' / ')}。`, summary: `未知工具 ${name}` }
     }
   } catch (e) {
     return { result: `工具执行失败：${String(e)}`, summary: '执行失败' }

@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Agentic Development Environment</strong><br>
-  预览 · 文件 · AI 对话 · 多 Agent 编排 · 一站式开发体验
+  预览 · 文件 · AI 对话 · 记忆 · 多 Agent 编排 · 一站式开发体验
 </p>
 
 <p align="center">
@@ -21,9 +21,19 @@
 
 ## 什么是轻驭？
 
-轻驭是一款本地运行的 **Agentic Development Environment（ADE）**。左侧是真实本地项目的文件树 + 代码编辑器 + 多服务运行预览，右侧是 AI 对话栏——AI 可以直接读写你的项目文件、规划并编排子任务、识别并管理多个本地服务。
+轻驭是一款本地运行的 **Agentic Development Environment（ADE）**。左侧是真实本地项目的文件树 + 代码编辑器 + 多服务运行预览，右侧是 AI 对话栏——AI 可以直接读写你的项目文件、规划并编排子任务、识别并管理多个本地服务。内置**分层记忆系统**，AI 跨会话记住你的偏好、决策和项目上下文。
 
 ## 功能特性
+
+### 分层记忆系统
+
+- **三层记忆模型**：工作记忆（当前会话窗口 + 滚动摘要）、短期记忆（会话内事件）、长期记忆（跨会话知识）
+- **混合检索**：FTS5 全文检索（中文 trigram 分词）+ sqlite-vec 向量 KNN → RRF 融合排序，每轮对话零 LLM 调用
+- **本地嵌入**：BGE-small-zh-v1.5（transformers.js WASM），离线运行、记忆不出机；模型加载失败自动降级 FTS-only
+- **蒸馏管线**：headless 单轮 LLM 调用，从对话增量 transcript 提取长期记忆；滚动触发（≥6 轮）+ 会话收尾触发 + 手动触发
+- **原子去重**：`createOrFoldAtomic` 同步事务内完成查重+写入，部分唯一索引兜底
+- **可配数据目录**：用户可在设置中自定义数据存储位置，迁移时自动校验+回滚
+- **记忆面板**：工作区「记忆」标签页，支持搜索、筛选、编辑、导入导出；侧边栏「用户记忆」区展示跨工程全局记忆
 
 ### 双模式 AI 调度
 
@@ -47,12 +57,13 @@
 - 重新识别需用户确认，杜绝重复消耗
 - 一次性命令（依赖安装、构建验证）走 `run_once`，不污染服务列表
 - **多服务并行运行**——每个命名服务独立成槽，各自拥有独立的日志、状态、启停控制
+- 服务列表**行内编辑**：点击铅笔图标直接修改启动命令，回车保存；加号按钮手动添加新服务；垃圾桶按钮删除服务（含命令存档与运行记录）
 - 阶段进度条：`编译中 → 部署中 → 运行中 / 异常`
 - 运行中自动解析监听地址，**WebContentsView** 独立进程预览 + 多地址切换 + 系统浏览器打开
-- 预览页 **DevTools** 一键打开（独立 Chromium 实例，不影响主 UI）
+- 预览页 **DevTools** 一键打开（已打开时自动聚焦已有窗口，独立 Chromium 实例，不影响主 UI）
 - 一键清缓存刷新（`session.clearStorageData` + `clearCache`，按 origin 精确清理）
 - **元素选取器**：悬浮高亮 → 点选元素 → IPC 回传 → 输入区卡片展示（浮动动画）→ 发送后以结构化 meta 呈现
-- 启动失败报错区「发给 AI 修复」按钮，一键将 stderr 发到对话让 AI 诊断
+- 启动失败报错区「发给 AI 修复」按钮，一键将 stderr + 当前启动命令发到对话让 AI 诊断；AI 可通过 `update_start_command` 直接修正存档命令
 - 弹窗打开时自动隐藏预览层（WebContentsView 是 native overlay，会遮挡 DOM 弹窗）
 - 切换项目或退出时强制杀掉全部进程树
 
@@ -79,9 +90,10 @@
   - **切换器 / 专注视图**随时查看任意子 agent 执行进度
   - 子 agent **独立 token 记账**，总额自动汇总到主对话
   - 失败自动重试（模型类错误），完成 / 取消自动清理出列表
-- 内置工具（API 模式）：`list_files` / `search_files` / `read_file` / `write_file` / `run_once` / `report_start_commands` / `run_project` / `get_build_status` / `stop_project` / `dispatch_subtasks` / `askUserQuestion` / `load_skill`
+- 内置工具（API 模式）：`list_files` / `search_files` / `read_file` / `write_file` / `run_once` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `dispatch_subtasks` / `askUserQuestion` / `load_skill`
 - 内置工具（CLI 模式）：Read / Write / Bash / PowerShell / Glob / Grep / Edit / Agent / Task / WebFetch / WebSearch
 - 真取消：「停止生成」在网络层硬中断请求，连同在途子 agent 请求一并取消
+- **消息持久化**：SQLite 存储，keyset 分页（最新 50 条 + 向上翻页），稳定点 write-through（user 发送 / assistant 收尾 / toolResult 追加）
 
 ### 安全
 
@@ -149,9 +161,11 @@ npm run typecheck   # 类型检查（渲染层 + 主进程双 tsconfig）
 npm run dist        # 构建 + 打包安装包
 
 # 冒烟测试
-npm run smoke:cli   # CLI adapter 全链路（序列化 / 参数 / 罐装 NDJSON 事件）
-npm run smoke:git   # Git 操作（分支 / 提交 / 状态解析）
-npm run smoke:env   # 子进程环境（PATH 探测 / 命令检测 / 编码）
+npm run smoke:cli           # CLI adapter 全链路（序列化 / 参数 / 罐装 NDJSON 事件）
+npm run smoke:git           # Git 操作（分支 / 提交 / 状态解析）
+npm run smoke:env           # 子进程环境（PATH 探测 / 命令检测 / 编码）
+npm run smoke:memory        # 消息持久化 + 记忆检索（FTS / vec / RRF / 迁移）
+npm run smoke:memory-agent  # 蒸馏管线（LLM mock + 游标 + 去重 + 晋升）
 ```
 
 ## 目录结构
@@ -159,6 +173,8 @@ npm run smoke:env   # 子进程环境（PATH 探测 / 命令检测 / 编码）
 ```
 ├── electron-builder.yml
 ├── build/                          # 应用图标（ico / png）
+├── docs/
+│   └── memory-system-design.md     # 记忆系统设计文档
 ├── electron/
 │   ├── main/index.ts               # 主进程（IPC 注册 · 窗口 · 外链治理）
 │   ├── preload/index.ts            # contextBridge 白名单（~85 IPC 通道）
@@ -166,6 +182,14 @@ npm run smoke:env   # 子进程环境（PATH 探测 / 命令检测 / 编码）
 │       ├── ai.ts                   # AI dispatch 层（API / CLI 双 adapter 分发）
 │       ├── ai-api.ts               # API adapter（OpenAI / Anthropic SSE）
 │       ├── ai-cli.ts               # CLI adapter（Claude Code stream-json NDJSON）
+│       ├── db.ts                   # SQLite 数据库层（WAL · schema · 扩展加载）
+│       ├── messages.ts             # 消息持久化（CRUD · keyset 分页 · token 追踪）
+│       ├── memory/
+│       │   ├── index.ts            # 记忆系统入口（IPC 注册 · 迁移守卫）
+│       │   ├── service.ts          # 记忆服务（混合检索 · 去重 · 导入导出）
+│       │   ├── agent.ts            # 蒸馏 agent（headless LLM · 增量提取 · 游标）
+│       │   └── embed.ts            # 本地嵌入（BGE-small-zh · WASM · 降级）
+│       ├── migrate.ts              # 数据目录迁移（校验 · 回滚）
 │       ├── preview.ts              # 预览 WebContentsView 管理器
 │       ├── proc.ts                 # 子进程管理（多槽 · 生命周期 · 端口查询）
 │       ├── proc-env.ts             # 子进程环境构建（PATH 探测 · OEM 编码检测）
@@ -197,16 +221,21 @@ npm run smoke:env   # 子进程环境（PATH 探测 / 命令检测 / 编码）
     │   ├── useAppStore.ts          # 全局应用状态（编排层）
     │   ├── useBuildStore.ts        # 编译流水线状态机
     │   ├── useFileStore.ts         # 文件树状态
-    │   └── useGitStore.ts          # Git 状态
+    │   ├── useGitStore.ts          # Git 状态
+    │   └── useMemoryStore.ts       # 记忆状态（列表 · 搜索 · 筛选 · 蒸馏状态）
     ├── components/
     │   ├── chat/                   # 对话面板 · 工具卡片 · 子 agent 面板
     │   ├── workspace/              # 预览 · 编辑器 · 文件树 · Git
-    │   ├── shell/                  # 设置 · 状态栏
+    │   ├── shell/                  # 设置 · 状态栏 · 记忆侧边栏
+    │   ├── memory/                 # 记忆面板 · 列表行 · 编辑弹窗 · 用户记忆区
     │   └── common/                 # 通用组件
     ├── styles/                     # CSS（BEM 命名 · z-index 阶梯）
     ├── types/                      # 共享类型
     ├── hooks/                      # 自定义 hooks
-    └── utils/                      # 工具函数
+    └── utils/
+        ├── chatHistory.ts          # 消息窗口管理（40 条窗口 + 摘要注入）
+        ├── skillInstruction.ts     # Skill 指令注入
+        └── ...                     # 其他工具函数
 ```
 
 ## 架构设计
@@ -217,8 +246,9 @@ npm run smoke:env   # 子进程环境（PATH 探测 / 命令检测 / 编码）
 useProjectStore   ← projectPath 单一事实源
 useSettingsStore  ← settings / skillMetas / skillsDirs 单一事实源
 useStartupStore   ← startupCommands 单一事实源
+useMemoryStore    ← 记忆列表 / 搜索 / 蒸馏状态
 useAppStore       → 写入上述三个 store + 编排 UI 状态
-useChatStore      → useSettingsStore + useStartupStore + useAgentStore
+useChatStore      → useSettingsStore + useStartupStore + useAgentStore + useMemoryStore
 useBuildStore     → useProjectStore
 useAgentStore     → 无 store 依赖
 ```
@@ -232,6 +262,24 @@ useAgentStore     → 无 store 依赖
                        ├─ stream_event → ai-delta / ai-reasoning / cli-tool-event
                        ├─ user (tool_result) → cli-tool-result / cli-agent-event
                        └─ result → 权威收口
+```
+
+### 记忆系统数据流
+
+```
+对话进行中
+  ├─ 每轮检索：最新用户消息 → FTS5 + vec KNN → RRF 融合 → 注入系统提示（零 LLM）
+  ├─ 滚动蒸馏：≥6 轮 + ≥60s 冷却 → mem agent 提取长期记忆
+  └─ 工作记忆：最近 40 条消息 + 会话滚动摘要
+
+会话收尾
+  └─ 收尾蒸馏：sessionId 换代 → 最终提取 + 短期记忆晋升判断
+
+存储层
+  ├─ messages 表：消息原数据（keyset 分页 · 稳定点 write-through）
+  ├─ mem_items 表：记忆条目（tier · category · importance · status）
+  ├─ mem_vec 表：向量嵌入（sqlite-vec · BGE-small-zh 512 维）
+  └─ mem_fts 表：全文索引（FTS5 trigram · 中文支持）
 ```
 
 ## 许可证

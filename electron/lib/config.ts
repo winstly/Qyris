@@ -14,6 +14,8 @@ export interface RecentProject {
 export interface StartCommand {
   name: string
   run: string
+  /** 本地预览地址提示（可选，AI 已知端口时上报），启动时作为初始检测地址 */
+  url?: string
 }
 
 export interface AppConfig {
@@ -34,6 +36,14 @@ export interface AppConfig {
   skillsDir?: string | null
   /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「运行」直接执行） */
   startupCommands?: Record<string, StartCommand[]>
+  /** 用户数据根目录（SQLite 库等大件所在），缺省 ~/.qyris/data；P1 出设置项与迁移 */
+  dataDir?: string | null
+  /** 记忆嵌入模型（transformers.js hub id），缺省 Xenova/bge-small-zh-v1.5 */
+  embedModel?: string | null
+  /** 嵌入模型下载镜像（transformers.js remoteHost），缺省 https://hf-mirror.com */
+  embedRemoteHost?: string | null
+  /** 记忆整理触发轮次：自游标起累计多少轮 assistant 回复后做滚动提取（2..60），缺省 6 */
+  memExtractRounds?: number
 }
 
 /** 新数组字段 + 旧单目录字段合并去重（旧字段排前，保持存量用户主目录序） */
@@ -45,6 +55,14 @@ function mergeSkillDirs(list: unknown, legacy: unknown): string[] {
     if (t && !out.includes(t)) out.push(t)
   }
   return out
+}
+
+/** 记忆整理轮次归一：合法区间 2..60，非法/越界回 undefined（消费方取缺省 6） */
+function clampRounds(v: unknown): number | undefined {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined
+  const n = Math.floor(v)
+  if (n < 2 || n > 60) return undefined
+  return n
 }
 
 /** 读取失败一律回默认值（get_config 永不 reject） */
@@ -71,6 +89,11 @@ export async function getConfig(): Promise<AppConfig> {
         parsed.startupCommands && typeof parsed.startupCommands === 'object' && !Array.isArray(parsed.startupCommands)
           ? parsed.startupCommands
           : undefined,
+      dataDir: typeof parsed.dataDir === 'string' && parsed.dataDir.trim() ? parsed.dataDir : null,
+      embedModel: typeof parsed.embedModel === 'string' && parsed.embedModel.trim() ? parsed.embedModel : null,
+      embedRemoteHost:
+        typeof parsed.embedRemoteHost === 'string' && parsed.embedRemoteHost.trim() ? parsed.embedRemoteHost : null,
+      memExtractRounds: clampRounds(parsed.memExtractRounds),
     }
   } catch {
     return {

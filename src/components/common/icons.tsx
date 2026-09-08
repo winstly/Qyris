@@ -278,3 +278,14 @@ export function IconMobile(p: P) {
     </svg>
   )
 }
+
+/** 分层记忆（三层堆叠，对应 short/long/summary 分层模型） */
+export function IconLayers(p: P) {
+  return (
+    <svg {...base(p)}>
+      <path d="m12 3 9 5-9 5-9-5 9-5Z" />
+      <path d="m3 12.8 9 5 9-5" />
+      <path d="m3 17.3 9 5 9-5" />
+    </svg>
+  )
+}

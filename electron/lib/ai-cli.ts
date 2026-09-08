@@ -27,7 +27,7 @@ type Json = Record<string, any>
 const CLI_MAX_TURNS = 60
 const CLI_TIMEOUT_MS = 30 * 60_000
 /** stream-json 必配：verbose 才有完整事件；include-partial-messages 才有逐 token 增量 */
-const CLI_ARGS_BASE = ['-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages']
+// CLI_ARGS_BASE 已内联到 buildCliArgs，按 outputFormat 动态组装
 /** 受限只读档白名单（--allowedTools，逗号拼接单参数） */
 const READONLY_TOOLS = 'Read,Glob,Grep,LS,TodoWrite,WebSearch,WebFetch'
 
@@ -76,8 +76,14 @@ function toolNameOf(callId: string, namesById: Map<string, string>): string {
 
 /** @internal 把轻驭历史（OpenAI 格式）扁平成 CLI 友好的对话文本。
  *  system 全部丢弃（CLI 系统提示由 adapter 注入，CLI 还会自动加载 cwd 下 CLAUDE.md）；
- *  轻驭工具痕迹以「本环境不存在」声明 + 截断参数保留，供 CLI 理解此前轮次发生了什么 */
-export function serializeConversation(messages: unknown): string {
+ *  轻驭工具痕迹以「本环境不存在」声明 + 截断参数保留，供 CLI 理解此前轮次发生了什么。
+ *  sessionSummary / memoryBlock 非空时前置进正文（P0 修复：CLI 路径的记忆反哺通道——渲染层注入的
+ *  system 消息在这里被丢弃，工作记忆摘要与长期记忆块必须走正文）——
+ *  memoryBlock 为渲染层预格式化块（含节标题）原样透传；头部区永不截断，
+ *  160k 总预算只约束对话正文（budget = 160k − 头部长度，正文仍超限才掐头留尾） */
+export function serializeConversation(messages: unknown, sessionSummary?: string | null, memoryBlock?: string | null): string {
+  const summary = typeof sessionSummary === 'string' ? sessionSummary.trim() : ''
+  const memory = typeof memoryBlock === 'string' ? memoryBlock.trim() : ''
   const msgs = (Array.isArray(messages) ? messages : []) as Json[]
   const namesById = new Map<string, string>()
   for (const m of msgs) {
@@ -119,11 +125,16 @@ export function serializeConversation(messages: unknown): string {
   }
 
   let joined = out.join('\n\n')
-  if (joined.length > PROMPT_TOTAL_CAP) {
-    const half = PROMPT_TOTAL_CAP / 2
+  // 头部（摘要 → 记忆）在前、正文在后：头部永不截断，正文 budget = 160k − 头部长度
+  // 「【此前会话进展】」标题与渲染层 src/store/useChatStore.ts（summaryBlock）双拷贝契约：
+  // tsconfig 隔离无法共享常量，改动必须两处同步并跑 smoke:cli
+  const head = [summary ? `【此前会话进展】\n${summary}` : '', memory].filter(Boolean).join('\n\n')
+  const budget = head ? Math.max(0, PROMPT_TOTAL_CAP - head.length) : PROMPT_TOTAL_CAP
+  if (joined.length > budget) {
+    const half = budget / 2
     joined = `${joined.slice(0, half)}\n（…更早对话已省略…）\n${joined.slice(-half)}`
   }
-  return joined
+  return head ? `${head}\n\n${joined}` : joined
 }
 
 /** @internal 下一轮 Skill 请求指令（尾行协议；id 允许中文目录名） */
@@ -139,16 +150,20 @@ export function extractNextSkill(text: string): { text: string; ids: string[] } 
 }
 
 /** @internal 从回复尾部提取 [[START_COMMANDS: ...]] 并剥离 */
-export function extractStartCommands(text: string): { text: string; commands: { name: string; run: string }[] } {
+export function extractStartCommands(text: string): { text: string; commands: { name: string; run: string; url?: string }[] } {
   if (!text) return { text, commands: [] }
   const m = text.match(/\[\[START_COMMANDS:\s*(\[.*\])\s*\]\]\s*$/is)
   if (!m || m.index === undefined) return { text, commands: [] }
-  let commands: { name: string; run: string }[] = []
+  let commands: { name: string; run: string; url?: string }[] = []
   try {
     const parsed = JSON.parse(m[1]) as unknown
     if (Array.isArray(parsed)) {
       commands = (parsed as Record<string, unknown>[])
-        .map((s) => ({ name: String(s?.name ?? '').trim(), run: String(s?.run ?? '').trim() }))
+        .map((s) => ({
+          name: String(s?.name ?? '').trim(),
+          run: String(s?.run ?? '').trim(),
+          url: typeof s?.url === 'string' && s.url.trim() ? s.url.trim() : undefined,
+        }))
         .filter((s) => s.name && s.run)
         .slice(0, 8)
     }
@@ -220,7 +235,7 @@ export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Pro
   ].join('\n')
 }
 
-/** @internal */ export function buildCliSystemPrompt(projectRoot: string | null, skillBlock = '', skillIndex = ''): string {
+/** @internal */ export function buildCliSystemPrompt(projectRoot: string | null, skillBlock = '', skillIndex = '', skillDirs: string[] = []): string {
   const lines = [
     '你是「轻驭」工作台调度的编码 agent，通过本机 Claude Code CLI 在项目目录内自主工作。',
     '你拥有自己的文件读写与命令执行工具——直接使用它们完成任务，不要把操作写成建议。',
@@ -232,14 +247,30 @@ export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Pro
     '你的最终回复会完整展示给用户：给出结论、关键文件路径与遗留风险，不要输出过程碎片。',
   ]
   lines.push(projectRoot ? `当前项目目录：${projectRoot}，请在该目录内工作。` : '当前未打开项目。')
+  if (skillDirs.length > 0) {
+    lines.push(
+      `Skill 目录（本工作台的 Skill 以子目录形式存放在这些目录，子目录名即 skill id，指令文件路径为 <目录>/<id>/SKILL.md。需要 Skill 原文时用 Read 直接读取对应路径，不要用 find/grep 全盘搜索）：${skillDirs.join('、')}`,
+    )
+  }
   if (skillBlock) lines.push('', skillBlock)
   if (skillIndex) lines.push('', skillIndex)
   return lines.join('\n')
 }
 
-/** @internal CLI 启动参数（prompt 走 stdin）。不传 --model：CLI 自带模型配置，指定不在白名单的模型反而报错 */
-export function buildCliArgs(_model: string, permissionMode: 'auto' | 'readonly'): string[] {
-  const args = [...CLI_ARGS_BASE, '--max-turns', String(CLI_MAX_TURNS)]
+/** @internal CLI 启动参数（prompt 走 stdin）。不传 --model：CLI 自带模型配置，指定不在白名单的模型反而报错。
+ *  maxTurns 可覆盖轮数上限（mem agent 蒸馏传 1：headless 单轮，不给工具循环留口子） */
+export function buildCliArgs(
+  _model: string,
+  permissionMode: 'auto' | 'readonly',
+  opts?: { systemPrompt?: string; outputFormat?: string; maxTurns?: number },
+): string[] {
+  const format = opts?.outputFormat ?? 'stream-json'
+  const args = ['-p', '--output-format', format]
+  if (format === 'stream-json') {
+    args.push('--verbose', '--include-partial-messages')
+  }
+  args.push('--max-turns', String(opts?.maxTurns ?? CLI_MAX_TURNS))
+  if (opts?.systemPrompt) args.push('--system-prompt', opts.systemPrompt)
   if (permissionMode === 'readonly') args.push('--allowedTools', READONLY_TOOLS)
   else args.push('--dangerously-skip-permissions')
   return args
@@ -254,6 +285,9 @@ export async function claudeCliChatStream(
   cfgIn?: AppConfig | null,
   /** 发起请求的窗口 ID（多窗口事件定向路由） */
   windowId: number | null = null,
+  /** P0 记忆反哺通道：sessionSummary/memoryBlock 前置进序列化正文（API adapter 忽略，已在 system）；
+   *  systemPrompt 覆盖 CLI 系统提示；outputFormat 覆盖输出格式（默认 stream-json）。 */
+  opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string },
 ): Promise<AiCompletion> {
   if (windowId != null) registerRequestWindow(requestId, windowId)
   const emit = (event: string, payload: unknown): void => {
@@ -271,8 +305,12 @@ export async function claudeCliChatStream(
     resolveSkillBlock(skillDirs, referencedIds),
     buildSkillIndex(skillDirs, referencedIds),
   ])
-  const prompt = `${buildCliSystemPrompt(projectRoot, skillBlock, skillIndex)}\n\n<conversation>\n${serializeConversation(messages)}\n</conversation>`
-  const args = buildCliArgs(model, permissionMode)
+  const prompt = opts?.systemPrompt
+    ? `<conversation>\n${serializeConversation(messages, opts?.sessionSummary ?? null, opts?.memoryBlock ?? null)}\n</conversation>`
+    : `${buildCliSystemPrompt(projectRoot, skillBlock, skillIndex, skillDirs)}\n\n<conversation>\n${serializeConversation(messages, opts?.sessionSummary ?? null, opts?.memoryBlock ?? null)}\n</conversation>`
+  const args = buildCliArgs(model, permissionMode, opts?.systemPrompt
+    ? { systemPrompt: opts.systemPrompt, outputFormat: opts.outputFormat }
+    : undefined)
   const isWin = process.platform === 'win32'
 
   return new Promise<AiCompletion>((resolve, reject) => {
@@ -434,7 +472,7 @@ export async function claudeCliChatStream(
         } else if (json.subtype === 'error_max_turns') {
           finalText = typeof json.result === 'string' && json.result ? json.result : null
           finishReason = 'max_turns'
-          const note = '\n（CLI 已达到 60 轮上限，任务可能未完成——请检查中间结果，必要时拆分任务后继续）\n'
+          const note = `\n（CLI 已达到 ${CLI_MAX_TURNS} 轮上限，任务可能未完成——请检查中间结果，必要时拆分任务后继续）\n`
           reasoning += note
           emit('ai-reasoning', { requestId, delta: note })
         } else {

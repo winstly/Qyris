@@ -19,8 +19,15 @@ declare global {
     restoreFile: (projectRoot: string, path: string) => Promise<void>
     restoreSession: (projectRoot: string, sessionId: string) => Promise<number>
     clearProjectSnapshots: (projectRoot: string) => Promise<void>
-    loadSession: (projectRoot: string) => Promise<unknown[] | null>
-    saveSession: (projectRoot: string, messages: unknown[]) => Promise<void>
+    // 消息持久化（SQLite write-through + keyset 分页，见 useChatStore 头注释）
+    messagesRecent: (projectRoot: string, limit?: number) => Promise<{ sessionId: string | null; messages: ChatMessage[]; hasMore: boolean; oldestSeq: number | null; total: number }>
+    messagesBefore: (projectRoot: string, sessionId: string, beforeSeq: number, limit?: number) => Promise<{ messages: ChatMessage[]; hasMore: boolean; oldestSeq: number | null }>
+    messageAppend: (projectRoot: string, sessionId: string, message: ChatMessage) => Promise<{ seq: number }>
+    messagePatch: (projectRoot: string, sessionId: string, id: string, patch: { content?: string; reasoning?: string | null; tool?: { toolCalls?: ToolCall[]; toolResults?: ToolResultEntry[] }; meta?: MessageMeta | null }) => Promise<void>
+    messagesTruncate: (projectRoot: string, sessionId: string, afterSeq: number) => Promise<void>
+    projectDataDelete: (projectRoot: string) => Promise<void>
+    saveSessionTokens: (projectRoot: string, sessionId: string, tokens: { input: number; output: number }) => Promise<void>
+    loadSessionTokens: (projectRoot: string, sessionId: string) => Promise<{ input: number; output: number }>
     createEntry: (projectRoot: string, parentDir: string, name: string, isDir: boolean) => Promise<TreeNode>
     renameEntry: (projectRoot: string, filePath: string, newName: string) => Promise<string>
     deleteEntry: (projectRoot: string, filePath: string) => Promise<void>
@@ -79,9 +86,42 @@ declare global {
     pickParentDir: () => Promise<string | null>
 
     // AI
-    aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null) => Promise<AiCompletion>
+    aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string }) => Promise<AiCompletion>
     aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) => Promise<string>
     aiCancel: (requestId: string) => Promise<void>
+
+    // 记忆（分层记忆系统 P1；projectRoot=null 表示仅全局）
+    memoryList: (projectRoot: string | null, includeArchived?: boolean) => Promise<{ items: MemoryItem[] }>
+    memorySearch: (query: string, projectRoot: string | null, topK?: number, includeArchived?: boolean) => Promise<{ hits: MemoryHit[]; degraded: boolean }>
+    memoryUpdate: (id: string, patch: { title?: string; content?: string; category?: string; importance?: number }) => Promise<MemoryItem>
+    memoryDelete: (id: string) => Promise<void>
+    memoryMoveScope: (id: string, target: 'project' | 'user', projectRoot?: string) => Promise<MemoryItem>
+    memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) => Promise<void>
+    memoryStats: () => Promise<MemoryStats>
+    // 记忆管线 P2（渲染层消费面；electron 侧由 memory 管线提供）
+    /** 工作记忆会话滚动摘要（category='summary' 的 active 条目；无则 null） */
+    memorySessionContext: (projectRoot: string, sessionId: string) => Promise<{ summary: string | null }>
+    /** 滚动提取触发（fire-and-forget：主进程按轮数/频控决定是否真的跑） */
+    memoryMaybeExtract: (projectRoot: string, sessionId: string) => Promise<void>
+    /** 会话收尾提取 + 短期记忆晋升判断（clear/关工程前调用，旧 sessionId 还在手时） */
+    sessionEnded: (projectRoot: string, sessionId: string) => Promise<void>
+    /** 手动触发一次 mem agent 整理（记忆面板「立即整理」） */
+    memoryRunNow: (projectRoot: string) => Promise<{ ok: boolean; error?: string; ops?: number }>
+    /** 该工程是否正在整理记忆（主进程排队/执行中） */
+    memoryExtracting: (projectRoot: string) => Promise<boolean>
+    /** 教训采集：命令失败 / 服务启动失败（fire-and-forget，同会话重复由主进程去重） */
+    noteLesson: (projectRoot: string, sessionId: string, lesson: { title: string; content: string }) => Promise<void>
+    /** 导出记忆为 JSON 备份（主进程弹保存框；用户取消回 ok=false + 取消文案） */
+    memoryExport: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
+      Promise<{ ok: boolean; path?: string; count?: number; error?: string }>
+    /** 从 JSON 备份导入记忆（主进程弹打开框；同 id 跳过，嵌入可能耗时秒级） */
+    memoryImport: () =>
+      Promise<{ ok: boolean; imported?: number; skipped?: number; error?: string }>
+
+    // 数据存储位置（对话历史 / 记忆 / 快照所在目录）
+    getDataDir: () => Promise<string>
+    selectDataDir: () => Promise<string | null>
+    migrateDataDir: (targetDir: string) => Promise<{ ok: boolean; error?: string }>
 
     // 窗口
     pickDirectory: () => Promise<string | null>
@@ -97,6 +137,9 @@ declare global {
     onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }>
     onCliToolResult: DesktopEventSub<{ requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }>
     onCliAgentEvent: DesktopEventSub<CliAgentEventPayload>
+    onMemoryExtractState: DesktopEventSub<{ projectRoot: string; extracting: boolean }>
+    /** 记忆数据变更广播（any 写路径完成后主进程发，all=true 表示 clear('all') 等全库变更） */
+    onMemoryChanged: DesktopEventSub<{ all: boolean; projectKeys: string[] }>
     onFsChanged: DesktopEventSub<{ paths: string[]; projectRoot?: string }>
     onElementPicked: DesktopEventSub<{ selector: string; tag: string; id: string; text: string }>
     onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>

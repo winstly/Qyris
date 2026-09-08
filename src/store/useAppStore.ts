@@ -14,7 +14,7 @@ import { useAgentStore } from './useAgentStore'
 import { useProjectStore } from './useProjectStore'
 import { useSettingsStore } from './useSettingsStore'
 import { useStartupStore } from './useStartupStore'
-import type { AiSettings, ChatMessage, RecentProject, SkillMeta, StartCommand, TreeNode } from '@/types'
+import type { AiSettings, RecentProject, SkillMeta, StartCommand, TreeNode } from '@/types'
 
 // ---------- 文件 store 快照（多工程常驻：切换时 checkpoint/restore 当前工程的打开文件/展开态） ----------
 
@@ -85,7 +85,7 @@ export type Theme = 'system' | 'light' | 'dark'
 
 interface AppState {
   booted: boolean
-  activeTab: 'preview' | 'files' | 'projects'
+  activeTab: 'preview' | 'files' | 'memory'
   /** 工作区占宽比例（拖拽分割线调节，工作区 ≥ 500px / 对话栏 ≥ 300px 由组件层钳制） */
   splitRatio: number
   /** 文件 Tab 内文件树占比 */
@@ -115,7 +115,10 @@ interface AppState {
   /** 全部项目的启动命令存档（内存缓存，落盘走 config.json） */
   startupCommandsMap: Record<string, StartCommand[]>
 
-  setTab: (t: 'preview' | 'files' | 'projects') => void
+  setTab: (t: 'preview' | 'files' | 'memory') => void
+  /** 左侧记忆侧边栏展开/收起（独立于工作区 Tab） */
+  memorySidebarOpen: boolean
+  toggleMemorySidebar: () => void
   setSplitRatio: (r: number) => void
   setFilesSplitRatio: (r: number) => void
   setGitPanelRatio: (r: number) => void
@@ -153,6 +156,7 @@ export const useAppStore = create<AppState>()(
     (set, get) => ({
       booted: false,
       activeTab: 'preview',
+      memorySidebarOpen: false,
       splitRatio: 0.74,
       filesSplitRatio: 0.26,
       gitPanelRatio: 0.45,
@@ -172,6 +176,7 @@ export const useAppStore = create<AppState>()(
       startupCommandsMap: {},
 
       setTab: (t) => set({ activeTab: t }),
+      toggleMemorySidebar: () => set((s) => ({ memorySidebarOpen: !s.memorySidebarOpen })),
       setSplitRatio: (r) => set({ splitRatio: Math.min(0.85, Math.max(0.5, r)) }),
       setFilesSplitRatio: (r) => set({ filesSplitRatio: Math.min(0.5, Math.max(0.15, r)) }),
       setGitPanelRatio: (r) => set({ gitPanelRatio: Math.min(0.75, Math.max(0.2, r)) }),
@@ -291,14 +296,19 @@ export const useAppStore = create<AppState>()(
         // 构建态：进程由主进程按工程隔离，切走不停；订阅该工程文件变更
         await api.startWatching(projectPath)
 
-        // 对话：已驻留（含在途流）不覆盖、从磁盘恢复仅首次
+        // 对话：已驻留（含在途流）不覆盖、从磁盘恢复仅首次——取最新会话的最近 50 条窗口（带 seq），
+        // 更早历史由触顶翻页 loadOlder() 按 keyset 游标加载
         if (chatNeedsRestore) {
           try {
-            const history = await api.loadSession(projectPath)
-            if (history && history.length) {
-              useChatStore.getState().restore(history as ChatMessage[])
-            } else {
+            const resp = await api.messagesRecent(projectPath)
+            if (resp.sessionId === null) {
               useChatStore.getState().clear()
+            } else {
+              useChatStore.getState().restore(resp.messages, {
+                sessionId: resp.sessionId,
+                hasMoreOlder: resp.hasMore,
+                oldestSeq: resp.oldestSeq,
+              })
             }
           } catch { /* 会话加载失败忽略 */ }
         }

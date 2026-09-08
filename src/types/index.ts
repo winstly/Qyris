@@ -90,6 +90,8 @@ export interface RecentProject {
 export interface StartCommand {
   name: string
   run: string
+  /** 本地预览地址（AI 编译时已知则上报，如 http://localhost:8000）；启动时作为初始检测地址 */
+  url?: string
 }
 
 /** Skill 文件的 frontmatter 摘要（不含 body 内容） */
@@ -122,6 +124,8 @@ export interface AppConfig {
   skillsDir?: string | null
   /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「全部运行」直接执行） */
   startupCommands?: Record<string, StartCommand[]>
+  /** 记忆整理触发轮次：累计多少轮 AI 回复后滚动提取（2..60），缺省 6 */
+  memExtractRounds?: number
 }
 
 export interface AiToolCall {
@@ -184,12 +188,16 @@ export interface MessageMeta {
   projectStart?: boolean
   /** 预览页选中的元素（显示卡片用） */
   element?: { selector: string; tag: string; id: string; text: string }
+  /** 本条消息触发的记忆检索命中（引用 chip 展示用，纯 UI 元数据，不参与 AI payload） */
+  citations?: { id: string; title: string }[]
 }
 
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
   content: string
+  /** 落库序号（主进程 SQLite write-through 成功后回挂）：有 seq = 已持久化；流式 pending 草稿永远没有 seq */
+  seq?: number
   /** 模型的思考过程（reasoning_content），有则折叠展示 */
   reasoning?: string
   /** 流式生成中（打字机光标） */
@@ -201,6 +209,64 @@ export interface ChatMessage {
   toolResults?: ToolResultEntry[]
   /** 用户消息的系统级元数据（卡片渲染用） */
   meta?: MessageMeta
+}
+
+/** message_patch 的载荷：对已落库消息的指定字段做覆盖（未给出的字段保持原值；meta 显式 null = 清空） */
+export interface ChatMessagePatch {
+  content?: string
+  reasoning?: string | null
+  tool?: { toolCalls?: ToolCall[]; toolResults?: ToolResultEntry[] }
+  meta?: MessageMeta | null
+}
+
+// ---------- 记忆（分层记忆系统，见 docs/memory-system-design.md） ----------
+
+export type MemoryTier = 'short' | 'long'
+
+export type MemoryCategory = 'preference' | 'fact' | 'event' | 'lesson' | 'skill' | 'summary'
+
+export type MemoryStatus = 'active' | 'merged' | 'archived'
+
+/** mem_items 行（主进程 SQLite，camelCase 直出） */
+export interface MemoryItem {
+  id: string
+  /** 工程键（sha1 前 16 位；'global' = 跨工程） */
+  projectKey: string
+  /** short 层归属会话；long 层为 null */
+  sessionId: string | null
+  tier: MemoryTier
+  category: MemoryCategory
+  /** 一行摘要 */
+  title: string
+  content: string
+  /** 溯源 JSON（message ids / snapshot refs） */
+  sourceJson: string | null
+  importance: number
+  accessCount: number
+  lastAccessedAt: number | null
+  status: MemoryStatus
+  supersededBy: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+/** 语义/关键词检索命中（score 为主进程 RRF 融合分，仅排序用） */
+export interface MemoryHit extends MemoryItem {
+  score: number
+}
+
+/** 记忆库统计（memoryStats，全局口径不分工程） */
+export interface MemoryStats {
+  total: number
+  byTier: Record<string, number>
+  byCategory: Record<string, number>
+  /** 本地 embedding 模型就绪（false = 降级仅关键词检索） */
+  embedReady: boolean
+  /** sqlite-vec 扩展可用 */
+  vecAvailable: boolean
+  dbBytes: number
+  /** mem agent 蒸馏累计 token（近似值） */
+  distillTokens?: { input: number; output: number }
 }
 
 // ---------- OpenAI 兼容 wire format ----------

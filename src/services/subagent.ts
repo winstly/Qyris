@@ -24,6 +24,12 @@ export interface SubTask {
 
 const MAX_ROUNDS = 20
 
+/** 子 agent 工具集：排除「派发子任务」与「向用户提问」——二者主对话专属，子 agent 里是死路
+ *  （dispatch_subtasks 代码拦截、askUserQuestion executeTool 无处理）。与系统提示「不要派发/不要提问」一致。 */
+const SUBAGENT_TOOL_DEFS = TOOL_DEFS.filter(
+  (t) => t.function.name !== 'dispatch_subtasks' && t.function.name !== 'askUserQuestion',
+)
+
 /** 在途子 agent 模型请求 id 注册表：「停止生成」需要连子 agent 的请求一起取消 */
 const activeRequests = new Set<string>()
 
@@ -52,10 +58,12 @@ export function modelForTier(tier?: string): string {
 }
 
 function subagentSystemPrompt(project: string): string {
+  // 工具清单从实际工具集派生（与 SUBAGENT_TOOL_DEFS 同源，不会漂移），不手抄
+  const toolNames = SUBAGENT_TOOL_DEFS.map((t) => t.function.name).join(' / ')
   const lines = [
     '你是轻驭工作台的子任务执行 agent，在独立上下文中完成主 agent 派发的单个任务。',
     '用简体中文；代码、命令、标识符保持原样；过程简洁直接，不写客套话。',
-    '你拥有与主对话相同的项目工具（list_files / search_files / read_file / write_file / run_once / get_build_status 等）。修改文件前必须先 read_file 获取真实内容，禁止凭空臆造。',
+    `你拥有与主对话相同的项目工具：${toolNames}。修改文件前必须先 read_file 获取真实内容，禁止凭空臆造。`,
     '不要派发子任务、不要向用户提问——无法完成时在最终回复中说明原因与已尝试的步骤。',
     project
       ? `当前项目目录：${project}。工具的 path/dir 参数传项目内相对路径。`
@@ -106,7 +114,7 @@ async function runOne(task: SubTask, threadId: string, project: string): Promise
     const requestId = uid()
     activeRequests.add(requestId)
     try {
-      completion = await api.aiChatStream(requestId, settings.provider, settings.baseUrl, model, messages, TOOL_DEFS, settings.dispatchMode, project)
+      completion = await api.aiChatStream(requestId, settings.provider, settings.baseUrl, model, messages, SUBAGENT_TOOL_DEFS, settings.dispatchMode, project)
     } catch (e) {
       // 取消引发的请求中止按取消收尾，不算错误
       if (useChatStore.getState().byProject[project]?.cancelled) return finish('cancelled', '（已取消）')
@@ -140,6 +148,7 @@ async function runOne(task: SubTask, threadId: string, project: string): Promise
         status: 'running',
       }, project)
       const out = tc.name === 'dispatch_subtasks'
+        // 「错误：」前缀是成败协议（下方 startsWith 判定 + 主对话侧同口径），不可去掉
         ? { result: '错误：子任务内不能再派发子任务（禁止嵌套），请自行完成该工作。', summary: '禁止嵌套派发' }
         : await executeTool(tc.name, args, project)
       const ok = !out.result.startsWith('错误') && !out.result.startsWith('工具执行失败')

@@ -182,6 +182,20 @@
   cursor: pointer;
 }
 .msg__meta-card-remove:hover { color: var(--fg); background: var(--row-hover); }
+/* 记忆引用 chip：小号弱化，不可点击（详情跳转 P3 再做），title 列出命中清单 */
+.msg__meta-card--cite {
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: default;
+  background: transparent;
+  border-color: color-mix(in oklab, var(--accent), transparent 82%);
+}
+.msg__meta-card--cite .msg__meta-card-label {
+  padding: 0 2px;
+  background: transparent;
+  font-size: 10px;
+}
+.msg__meta-card--cite .msg__meta-card-name { color: var(--muted); }
 
 /* 用户消息：hover 出编辑入口 */
 .msg__edit-trigger {

@@ -11,6 +11,11 @@
  *
  * 多工程常驻：状态按工程（projectPath）隔离。切到别的工程时，本工程的流式循环照常跑，
  * ai-delta/ai-reasoning/cli-tool-event/cli-tool-result/cli-agent-event 事件按 requestId → 工程路由回对应切片，切回即最新。
+ *
+ * 持久化模型：主进程 SQLite 逐条 write-through——只在稳定点落库（send 的用户消息 / finalize 收尾 /
+ * 工具结果回填 / CLI 工具卡建档与回填 / 编辑重发截断），流式增量只在内存；消息有 seq = 已持久化，
+ * pending 草稿永远没有 seq。历史不清除：clear() 只是开新会话（换 sessionId，epoch+1），
+ * 更早历史由 loadOlder() 沿 keyset 游标向上翻页（见 MessageList 的触顶加载与视口锚定）。
  */
 import { create } from 'zustand'
 import { api } from '@/services/desktop'
@@ -21,8 +26,9 @@ import { useStartupStore } from './useStartupStore'
 import { useAgentStore } from './useAgentStore'
 import { uid, safeParseObject } from '@/utils/id'
 import { estimateTokens } from '@/utils/tokens'
+import { buildHistory } from '@/utils/chatHistory'
 import type {
-  AiCompletion, ChatMessage, CliAgentEventPayload, OAIMessage, ToolCall,
+  AiCompletion, ChatMessage, CliAgentEventPayload, MemoryHit, OAIMessage, ToolCall,
 } from '@/types'
 
 export type ChatStatus = 'idle' | 'streaming' | 'tools' | 'awaiting-user' | 'error' | 'retrying'
@@ -60,6 +66,14 @@ export interface ChatSlice {
   sessionId: string
   /** CLI 模式：模型请求下一轮附带的 Skill id（按已扫描索引校验后写入） */
   cliSkills: string[]
+  /** 最近一次记忆上下文取到的会话摘要原文（null = 暂无摘要）；CLI 模式随 aiChatStream 透传主进程前置 */
+  lastSummary: string | null
+  /** 是否还有更早的历史可向上翻页（keyset 分页游标，restore 时由主进程给出） */
+  hasMoreOlder: boolean
+  /** 已加载窗口里最老一条消息的 seq（messages_before 的翻页游标） */
+  oldestSeq: number | null
+  /** 正在向上翻页加载更早历史 */
+  loadingOlder: boolean
 }
 
 function emptyChatSlice(): ChatSlice {
@@ -75,6 +89,10 @@ function emptyChatSlice(): ChatSlice {
     usage: { input: 0, output: 0 },
     sessionId: uid(),
     cliSkills: [],
+    lastSummary: null,
+    hasMoreOlder: false,
+    oldestSeq: null,
+    loadingOlder: false,
   }
 }
 
@@ -93,9 +111,13 @@ interface ChatState {
   answerAsk: (answer: string) => void
   cancelProject: (project: string) => void
   cancel: () => void
-  clear: () => void
+  /** 清空当前对话（开新会话）。opts.deleteMessages=真删库内消息；skipFinalExtract=跳过收尾提取
+   *  （勾选同时删记忆时用，防止提取把刚删的记忆立刻蒸回来） */
+  clear: (opts?: { deleteMessages?: boolean; skipFinalExtract?: boolean }) => void
+  /** 向上翻页：沿 oldestSeq 游标向主进程取更早历史并正序 prepend（触顶时由 MessageList 触发） */
+  loadOlder: () => Promise<void>
   editAndResend: (messageId: string, newContent: string, meta?: import('@/types').MessageMeta) => Promise<void>
-  restore: (messages: ChatMessage[]) => void
+  restore: (messages: ChatMessage[], session: { sessionId: string; hasMoreOlder: boolean; oldestSeq: number | null }) => void
   ensureProject: (path: string) => void
   closeProject: (path: string) => void
 }
@@ -135,6 +157,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   closeProject: (path) => {
+    // 会话收尾提取：关工程 = 会话终止，趁旧 sessionId 还在手先通知（fire-and-forget）
+    const cur = get().byProject[path]
+    if (cur && cur.messages.length > 0) void api.sessionEnded(path, cur.sessionId).catch(() => {})
     set((s) => {
       const byProject = { ...s.byProject }
       delete byProject[path]
@@ -155,6 +180,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       : trimmed
     const userMsg: ChatMessage = { id: uid(), role: 'user', content, meta }
     patchSlice(project, { messages: [...cur.messages, userMsg], status: 'streaming', cancelled: false, pendingElement: null })
+    // 稳定点：用户消息立即落库，seq 由 append 返回后回挂
+    persistUpsert(project, userMsg)
     await runAgentLoop(project)
   },
 
@@ -216,13 +243,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   handleCliToolEvent: (requestId, id, name, phase, argumentsStr) => {
     const project = findProjectByRequest(requestId)
     if (!project) return
+    let created: ChatMessage | undefined
     useChatStore.setState((s) => {
       const cur = s.byProject[project]
       if (!cur || cur.cancelled) return s
       let messages: ChatMessage[]
       if (phase === 'start') {
         const tc: ToolCall = { id, name, args: safeParseObject(argumentsStr), status: 'running' }
-        messages = [...cur.messages, { id: uid(), role: 'assistant', content: '', toolCalls: [tc] }]
+        created = { id: uid(), role: 'assistant', content: '', toolCalls: [tc] }
+        messages = [...cur.messages, created]
       } else {
         // stop 仅代表指令输入组装完成、工具尚未执行完：只回填参数，状态由 handleCliToolResult 收口
         messages = [...cur.messages]
@@ -236,6 +265,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }
       return { byProject: { ...s.byProject, [project]: { ...cur, messages } } }
     })
+    // 稳定点：CLI 工具卡建档即落库（结果随后以 patch 回填同一行）
+    if (created) persistUpsert(project, created)
     // CLI 子 agent 派发卡（Agent/Task）：在 agent 面板建档，列表与实时转录随后由 cli-agent-event 驱动
     if (phase === 'start' && (name === 'Agent' || name === 'Task') && !getSlice(project)?.cancelled) {
       const args = safeParseObject(argumentsStr)
@@ -261,14 +292,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (thread) {
       useAgentStore.getState().finishThread(thread.id, isError ? 'error' : 'done', result, tokens, project)
     }
+    let updated: ChatMessage | undefined
     useChatStore.setState((s) => {
       const cur = s.byProject[project]
       if (!cur || cur.cancelled) return s
-      let hit = false
       const messages = cur.messages.map((m) => {
         if (!m.toolCalls?.some((tc) => tc.id === id)) return m
-        hit = true
-        return {
+        updated = {
           ...m,
           toolCalls: m.toolCalls.map((tc) =>
             tc.id === id
@@ -277,10 +307,13 @@ export const useChatStore = create<ChatState>()((set, get) => ({
           ),
           toolResults: [...(m.toolResults ?? []), { toolCallId: id, content: result }],
         }
+        return updated
       })
-      if (!hit) return s
+      if (!updated) return s
       return { byProject: { ...s.byProject, [project]: { ...cur, messages } } }
     })
+    // 稳定点：工具结果回填整行覆写（若该卡还在 append 在途，等它收场再写）
+    if (updated) persistAfterSettled(project, updated.id)
   },
 
   /** CLI 子 agent 实时转录：按 parentId 找到派发卡对应线程，文本/工具/结果分别入账 */
@@ -358,16 +391,49 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (project) get().cancelProject(project)
   },
 
-  clear: () => {
+  clear: (opts?: { deleteMessages?: boolean; skipFinalExtract?: boolean }) => {
     const project = get().current
     if (!project) return
     const cur = getSlice(project)
     if (!cur) return
     if (cur.status !== 'idle') get().cancel()
+    if (opts?.deleteMessages) {
+      // 真删除：清掉库内本会话全部消息（seq>0）。此时不做收尾提取——消息都要删了，蒸出的记忆违背预期
+      void api.messagesTruncate(project, cur.sessionId, 0).catch(() => {})
+    } else if (!opts?.skipFinalExtract && cur.messages.length > 0) {
+      // 会话收尾提取：换代前旧 sessionId 还在手，通知主进程做收尾整理 + 短期晋升判断（fire-and-forget）。
+      // skipFinalExtract（勾选删除记忆时）必须跳过：否则清空记忆后立刻从旧消息蒸出新记忆，等于没删
+      void api.sessionEnded(project, cur.sessionId).catch(() => {})
+    }
+    // 语义 = 开新会话：只换 sessionId/epoch，历史默认保留在库里（勾选删除历史时由上面 truncate 真删）
     patchSlice(project, {
       messages: [], status: 'idle', pendingAsk: null, activeRequestId: null,
       answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: uid(), cliSkills: [], epoch: cur.epoch + 1,
+      lastSummary: null,
+      hasMoreOlder: false, oldestSeq: null, loadingOlder: false,
     })
+  },
+
+  loadOlder: async () => {
+    const project = get().current
+    const cur = project ? getSlice(project) : undefined
+    if (!project || !cur || cur.loadingOlder || !cur.hasMoreOlder || cur.oldestSeq === null) return
+    const epoch = cur.epoch
+    patchSlice(project, { loadingOlder: true })
+    try {
+      const resp = await api.messagesBefore(project, cur.sessionId, cur.oldestSeq)
+      const s = getSlice(project)
+      // 换代守卫：翻页期间 clear()/editAndResend() 换了代次，过期响应直接丢弃（prepend 不能复活已删消息）
+      if (!s || s.epoch !== epoch) return
+      patchSlice(project, {
+        messages: [...resp.messages, ...s.messages],
+        hasMoreOlder: resp.hasMore,
+        oldestSeq: resp.oldestSeq,
+      })
+    } catch { /* 翻页失败静默：下次滚到顶可重试 */ } finally {
+      const s = getSlice(project)
+      if (s?.loadingOlder) patchSlice(project, { loadingOlder: false })
+    }
   },
 
   editAndResend: async (messageId, newContent, meta) => {
@@ -380,9 +446,11 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const idx = cur.messages.findIndex((m) => m.id === messageId)
     if (idx === -1) return
     const finalMeta = meta ?? cur.messages[idx].meta
+    // 内存与库同构：库侧覆写会清空 toolCalls/toolResults/reasoning（见下方 messagePatch），
+    // 切片同步清空——否则重启前内存视图残留旧工具卡，与库不一致
     const messages = [
       ...cur.messages.slice(0, idx),
-      { ...cur.messages[idx], content: trimmed, meta: finalMeta },
+      { ...cur.messages[idx], content: trimmed, meta: finalMeta, reasoning: undefined, toolCalls: undefined, toolResults: undefined },
     ]
     patchSlice(project, {
       messages,
@@ -394,10 +462,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       cliSkills: [],
       epoch: cur.epoch + 1,
     })
+    // DB 同步：截断被编辑消息之后的历史（该消息不是 pending，必有 seq），再把该行覆写为编辑后内容——
+    // 编辑重发本来就丢掉原 toolCalls/后续消息（上面 slice），库与切片保持一致。
+    // patch 失败必须告警：截断已落库而 patch 未落库 → 库内该消息仍是旧内容（重启后可见）。
+    const edited = messages[messages.length - 1]
+    if (edited.seq !== undefined) {
+      const sessionId = cur.sessionId
+      void api.messagesTruncate(project, sessionId, edited.seq)
+        .catch((e) => { console.warn(`[chat] 编辑重发截断失败：${String(e)}`) })
+        .then(() => api.messagePatch(project, sessionId, edited.id, {
+          content: edited.content, reasoning: null, tool: { toolCalls: [], toolResults: [] },
+        }).catch((e) => { console.warn(`[chat] 编辑重发 patch 失败（库内内容可能未更新）：${String(e)}`) }))
+    }
     await runAgentLoop(project)
   },
 
-  restore: (messages) => {
+  restore: (messages, session) => {
     const project = get().current
     if (!project) return
     patchSlice(project, {
@@ -409,9 +489,95 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       pendingElement: null,
       usage: { input: 0, output: 0 },
       cliSkills: [],
+      lastSummary: null,
+      sessionId: session.sessionId,
+      hasMoreOlder: session.hasMoreOlder,
+      oldestSeq: session.oldestSeq,
     })
+    // 恢复会话 token 用量（异步，不阻塞渲染）
+    void api.loadSessionTokens(project, session.sessionId).then((t) => {
+      const s = getSlice(project)
+      if (s && s.sessionId === session.sessionId) {
+        patchSlice(project, { usage: { ...s.usage, input: t.input, output: t.output } })
+      }
+    }).catch(() => {})
   },
 }))
+
+// ---------- 持久化 write-through ----------
+// 只在稳定点逐条落库（主进程 SQLite），流式增量只在内存；消息有 seq = 已持久化。
+// 全部 fire-and-forget + 静默吞错：库暂时落后于内存可接受，绝不阻塞对话主链路。
+
+/** message_append 在途登记（msgId → 是否成功）：append 收场前该行不在库里，后续 patch 必须等它 */
+const inflightAppends = new Map<string, Promise<boolean>>()
+
+/** 用切片内最新消息状态整行覆写库行（content/reasoning/tool 全量） */
+function persistPatchLatest(project: string, sessionId: string, msg: ChatMessage): Promise<void> {
+  return api.messagePatch(project, sessionId, msg.id, {
+    content: msg.content,
+    reasoning: msg.reasoning ?? null,
+    tool: { toolCalls: msg.toolCalls ?? [], toolResults: msg.toolResults ?? [] },
+  }).then(() => undefined, () => { /* 落库失败静默 */ })
+}
+
+/** 稳定点落库统一入口：无 seq → append 新行并回挂 seq；有 seq → patch 原行 */
+function persistUpsert(project: string, msg: ChatMessage): void {
+  const sessionId = getSlice(project)?.sessionId
+  if (!sessionId) return
+  if (msg.seq !== undefined) {
+    void persistPatchLatest(project, sessionId, msg)
+    return
+  }
+  const p = api.messageAppend(project, sessionId, msg)
+    .then((r) => {
+      // 回挂 seq：按 id 定位（切片可能已被流式更新）；切片已换代找不到该消息则只当落库成功
+      const s = getSlice(project)
+      if (s) {
+        const messages = s.messages.map((m) => (m.id === msg.id && m.seq === undefined ? { ...m, seq: r.seq } : m))
+        if (messages !== s.messages) patchSlice(project, { messages })
+      }
+      return true
+    })
+    .catch(() => false)
+  inflightAppends.set(msg.id, p)
+  void p.then(() => { if (inflightAppends.get(msg.id) === p) inflightAppends.delete(msg.id) })
+}
+
+/** 等 append 收场后按 id 定位消息（失败/换代/找不到回 null）；persistAfterSettled 与 persistMessageMeta 共用 */
+async function awaitSettledMsg(project: string, msgId: string): Promise<ChatMessage | null> {
+  const sessionId = getSlice(project)?.sessionId
+  if (!sessionId) return null
+  const inflight = inflightAppends.get(msgId)
+  if (inflight && !(await inflight)) return null
+  const s = getSlice(project)
+  if (!s || s.sessionId !== sessionId) return null
+  return s.messages.find((m) => m.id === msgId) ?? null
+}
+
+/** 等该消息的 append 收场后再整行覆写（append 失败则行不存在，跳过）；等待期间会话已切换则放弃 */
+function persistAfterSettled(project: string, msgId: string): void {
+  void (async () => {
+    const latest = await awaitSettledMsg(project, msgId)
+    if (latest?.seq !== undefined) {
+      const sessionId = getSlice(project)?.sessionId
+      if (sessionId) await persistPatchLatest(project, sessionId, latest)
+    }
+  })()
+}
+
+/** 折叠扫描改写的既有消息（running→done/error）同步回库，避免重启后残留「执行中」 */
+function persistSwept(project: string, swept: ChatMessage[]): void {
+  for (const m of swept) {
+    if (m.seq !== undefined) persistUpsert(project, m)
+  }
+}
+
+/** 会话 token 用量持久化（fire-and-forget，runAgentLoop 每轮结束时调用） */
+function persistTokens(project: string, epoch: number): void {
+  const s = getSlice(project)
+  if (!s || s.epoch !== epoch) return
+  void api.saveSessionTokens(project, s.sessionId, { input: s.usage.input, output: s.usage.output }).catch(() => {})
+}
 
 // ---------- Agent 循环 ----------
 
@@ -449,12 +615,102 @@ function sleepInterruptible(project: string, ms: number): Promise<boolean> {
 /** project → ask 的挂起 resolver（多工程并存时各自独立） */
 const askResolvers = new Map<string, (v: string) => void>()
 
+// ---------- 记忆上下文（P2）：会话摘要 + 长期记忆检索，防抖为每个 runAgentLoop 一次 ----------
+
+/** 剥掉 Skill 指令前缀 / 元素注入前缀，取检索用纯文本（不必完美，够检索即可） */
+function searchQueryOf(content: string): string {
+  return content
+    .replace(/^请先用 load_skill[^\n]*\n\n/s, '')
+    .replace(/^\[用户选中的预览页元素\][^\n]*\n\n/s, '')
+    .trim()
+}
+
+/** 单条记忆的注入行：content 截 80 字摘要 */
+function memoryLine(h: MemoryHit): string {
+  const digest = h.content.length > 80 ? h.content.slice(0, 80) + '…' : h.content
+  return `- [${h.category}] ${h.title}：${digest}`
+}
+
+/** 引用 chip：把命中的记忆 id/title 写进最后一条 user 消息 meta.citations（纯 UI 元数据，不进 AI payload），并同步回库 */
+function patchCitations(project: string, epoch: number, citations: { id: string; title: string }[]): void {
+  const s = getSlice(project)
+  if (!s || s.epoch !== epoch) return
+  const msgs = [...s.messages]
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'user') {
+      msgs[i] = { ...msgs[i], meta: { ...msgs[i].meta, citations } }
+      patchSlice(project, { messages: msgs })
+      persistMessageMeta(project, msgs[i].id)
+      return
+    }
+  }
+}
+
+/** 引用 chip 落库：等 append 收场后 patch 完整 meta（失败静默） */
+function persistMessageMeta(project: string, msgId: string): void {
+  void (async () => {
+    const latest = await awaitSettledMsg(project, msgId)
+    if (!latest?.meta?.citations?.length) return
+    const sessionId = getSlice(project)?.sessionId
+    if (sessionId) void api.messagePatch(project, sessionId, msgId, { meta: latest.meta }).catch(() => {})
+  })()
+}
+
+/**
+ * 取本轮记忆上下文：工作记忆会话摘要 + 按最后一条 user 消息的长期记忆检索。
+ * 每个 runAgentLoop 只调一次（防抖）；请求失败静默回 null，绝不阻塞对话主链路。
+ * 返回摘要原文（CLI 模式经 aiChatStream 透传）与注入 system 区的两个文本块（均可为 null）；
+ * 检索命中同时回写引用 chip。
+ */
+async function fetchMemoryContext(project: string, epoch: number, messages: ChatMessage[]): Promise<{
+  summary: string | null
+  summaryBlock: string | null
+  memoryBlock: string | null
+}> {
+  const s = getSlice(project)
+  if (!s || s.epoch !== epoch) return { summary: null, summaryBlock: null, memoryBlock: null }
+  let query = ''
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') { query = searchQueryOf(messages[i].content); break }
+  }
+  const [summary, searched] = await Promise.all([
+    api.memorySessionContext(project, s.sessionId).then((r) => r.summary).catch(() => null),
+    query ? api.memorySearch(query, project, 6).catch(() => null) : Promise.resolve(null),
+  ])
+  if (searched && searched.hits.length > 0) {
+    patchCitations(project, epoch, searched.hits.map((h) => ({ id: h.id, title: h.title })))
+  }
+  return {
+    summary,
+    // 「【此前会话进展】」标题是 CLI 序列化路径（electron/lib/ai-cli.ts serializeConversation）的
+    // 双拷贝契约——tsconfig 隔离无法共享常量，改动必须两处同步并跑 smoke:cli
+    summaryBlock: summary ? `【此前会话进展】\n${summary}` : null,
+    memoryBlock: searched && searched.hits.length > 0
+      ? '【长期记忆（供参考，可能过时）】\n' + searched.hits.map(memoryLine).join('\n')
+      : null,
+  }
+}
+
+/** 记忆提取触发（fire-and-forget）：稳定点交给主进程滚动提取，会话已换代则丢弃 */
+function fireMaybeExtract(project: string, epoch: number): void {
+  const s = getSlice(project)
+  if (!s || s.epoch !== epoch) return
+  void api.memoryMaybeExtract(project, s.sessionId).catch(() => {})
+}
+
 async function runAgentLoop(project: string) {
   const slice0 = getSlice(project)
   const epoch = slice0?.epoch ?? 0
   const messages = slice0?.messages ?? []
   const history = buildHistory(messages)
   const appState = useSettingsStore.getState()
+  // 记忆上下文每轮循环只取一次：摘要/记忆块跨迭代复用，请求失败静默
+  const { summary, summaryBlock, memoryBlock } = await fetchMemoryContext(project, epoch, messages)
+  // 取记忆期间会话已换代（clear/editAndResend）：本循环整体作废
+  if (getSlice(project)?.epoch !== epoch) return
+  // 摘要存切片（跨工具轮迭代复用 + 可观测）；CLI 模式经 opts.sessionSummary/memoryBlock 透传主进程
+  // （CLI 路径丢 system 消息，二者由 serializeConversation 前置进正文）；API 模式忽略 opts（已在 system）
+  patchSlice(project, { lastSummary: summary })
 
   // CLI 模式：把上一轮模型请求附带的 Skill 以标记注入本轮首条 user 历史
   if (appState.settings.dispatchMode === 'claude-cli' && slice0 && slice0.cliSkills.length > 0) {
@@ -495,13 +751,17 @@ async function runAgentLoop(project: string) {
       patchSlice(project, { status: 'streaming', activeRequestId: requestId })
       try {
         const { settings, skillMetas } = useSettingsStore.getState()
+        // 单 system 消息合并：基础提示词 + 会话摘要（在前）+ 长期记忆（在后）
+        const systemContent = [buildSystemPrompt(project, skillMetas), summaryBlock, memoryBlock]
+          .filter((b): b is string => !!b)
+          .join('\n\n')
         const payload: OAIMessage[] = [
-          { role: 'system', content: buildSystemPrompt(project, skillMetas) },
+          { role: 'system', content: systemContent },
           ...history,
         ]
         completion = await api.aiChatStream(
           requestId, settings.provider, settings.baseUrl, settings.model, payload, TOOL_DEFS,
-          settings.dispatchMode, project,
+          settings.dispatchMode, project, { sessionSummary: summary, memoryBlock },
         )
         break
       } catch (e) {
@@ -534,15 +794,14 @@ async function runAgentLoop(project: string) {
       const knownSkills = new Set(appState.skillMetas.map((m) => m.id))
       const skillReq = (completion.nextSkill ?? []).map((s) => s.trim()).filter((s) => s && knownSkills.has(s))
       const cmds = (completion.startCommands ?? [])
-        .map((s) => ({ name: String(s?.name ?? '').trim(), run: String(s?.run ?? '').trim() }))
+        .map((s) => ({
+          name: String(s?.name ?? '').trim(),
+          run: String(s?.run ?? '').trim(),
+          url: typeof s?.url === 'string' && s.url.trim() ? s.url.trim() : undefined,
+        }))
         .filter((s) => s.name && s.run)
-      // 反向查找最后一条 user 消息的 meta（避免 [...messages].reverse() 全量拷贝）
-      const curMsgs = getSlice(project)?.messages ?? []
-      let lastUserMeta: import('@/types').MessageMeta | undefined
-      for (let i = curMsgs.length - 1; i >= 0; i--) {
-        if (curMsgs[i].role === 'user') { lastUserMeta = curMsgs[i].meta; break }
-      }
-      if (cmds.length > 0 && lastUserMeta?.projectStart) {
+      // [[START_COMMANDS]] 协议：AI 编译首次提交 + 发给 AI 修复后的修正均生效
+      if (cmds.length > 0) {
         void useStartupStore.getState().setStartupCommands(cmds, project)
       }
       if (getSlice(project)?.epoch === epoch) patchSlice(project, { cliSkills: skillReq })
@@ -550,6 +809,8 @@ async function runAgentLoop(project: string) {
 
     if (completion.toolCalls.length === 0) {
       patchSlice(project, { status: 'idle', activeRequestId: null })
+      fireMaybeExtract(project, epoch)
+      persistTokens(project, epoch)
       return
     }
 
@@ -582,6 +843,7 @@ async function runAgentLoop(project: string) {
       appendToolResult(project, assistantId, { toolCallId: tc.id, content: result }, epoch)
       history.push({ role: 'tool', tool_call_id: tc.id, content: result })
     }
+    fireMaybeExtract(project, epoch)
   }
 }
 
@@ -600,51 +862,7 @@ function cliToolSummary(name: string, args: Record<string, unknown>): string {
   return (line || name).slice(0, 80)
 }
 
-function buildHistory(messages: ChatMessage[]): OAIMessage[] {
-  const out: OAIMessage[] = []
-  for (const m of messages) {
-    if (m.role === 'user') {
-      let content = m.content
-      if (m.meta?.skills?.length && !content.includes('load_skill')) {
-        const ids = m.meta.skills.map((s) => s.id).join(', ')
-        const instr = m.meta.skills.length > 1
-          ? `请先用 load_skill 依次加载以下 ${m.meta.skills.length} 个 Skill，全部加载后再执行：${ids}`
-          : `请先用 load_skill 加载 Skill「${ids}」，再执行。`
-        content = content ? `${instr}\n\n${content}` : instr
-      }
-      out.push({ role: 'user', content })
-      continue
-    }
-    if (m.pending) continue
-    if (m.toolCalls?.length) {
-      const results = m.toolResults ?? []
-      if (results.length >= m.toolCalls.length) {
-        out.push({
-          role: 'assistant',
-          content: m.content || null,
-          tool_calls: m.toolCalls.map((t) => ({
-            id: t.id,
-            type: 'function' as const,
-            function: { name: t.name, arguments: JSON.stringify(t.args) },
-          })),
-        })
-        for (const tr of results) {
-          out.push({ role: 'tool', tool_call_id: tr.toolCallId, content: tr.content })
-        }
-      } else {
-        const lines = m.toolCalls.map((t) => {
-          const tr = results.find((r) => r.toolCallId === t.id)
-          return `- ${t.name}：${tr ? tr.content.slice(0, 200) : t.status === 'done' ? '（已执行）' : '（未执行，被中断）'}`
-        })
-        const text = [m.content, '（此前调用过工具，结果如下：）', ...lines].filter(Boolean).join('\n')
-        out.push({ role: 'assistant', content: text })
-      }
-    } else if (m.content) {
-      out.push({ role: 'assistant', content: m.content })
-    }
-  }
-  return out
-}
+// buildHistory / windowSlice 已抽到 utils/chatHistory.ts（纯函数，可被冒烟脚本直接断言）
 
 function toHistoryEntry(c: AiCompletion): OAIMessage {
   return {
@@ -681,14 +899,15 @@ function stripStreamedPrefix(msgs: ChatMessage[], pendingIdx: number, content: s
 
 function collapseStreamingMessages(
   msgs: ChatMessage[], toolStatus: 'done' | 'error', exceptId?: string,
-): ChatMessage[] {
+): { messages: ChatMessage[]; swept: ChatMessage[] } {
+  const swept: ChatMessage[] = []
   let changed = false
   const out = msgs.map((m) => {
     if (m.role !== 'assistant') return m
     const sweepTools = m.id !== exceptId && (m.toolCalls?.some((tc) => tc.status === 'running') ?? false)
     if (!m.pending && !sweepTools) return m
     changed = true
-    return {
+    const next: ChatMessage = {
       ...m,
       pending: false,
       toolCalls: sweepTools
@@ -701,8 +920,10 @@ function collapseStreamingMessages(
             : tc)
         : m.toolCalls,
     }
+    swept.push(next)
+    return next
   })
-  return changed ? out : msgs
+  return changed ? { messages: out, swept } : { messages: msgs, swept }
 }
 
 function finalizeDraft(project: string, text: string, isError: boolean, epoch: number) {
@@ -713,15 +934,21 @@ function finalizeDraft(project: string, text: string, isError: boolean, epoch: n
   for (let i = msgs.length - 1; i >= 0; i--) {
     if (msgs[i].role === 'assistant' && msgs[i].pending) { pendingIdx = i; break }
   }
+  let finalized: ChatMessage | undefined
   if (pendingIdx !== -1) {
-    msgs[pendingIdx] = { ...msgs[pendingIdx], content: text || msgs[pendingIdx].content || '（无内容）', pending: false, error: isError }
+    finalized = { ...msgs[pendingIdx], content: text || msgs[pendingIdx].content || '（无内容）', pending: false, error: isError }
+    msgs[pendingIdx] = finalized
   } else if (text) {
-    msgs.push({ id: uid(), role: 'assistant', content: text, error: isError })
+    finalized = { id: uid(), role: 'assistant', content: text, error: isError }
+    msgs.push(finalized)
   }
   const collapsed = collapseStreamingMessages(msgs, 'error')
-  if (pendingIdx !== -1 || text || collapsed !== msgs) {
-    patchSlice(project, { messages: collapsed })
+  if (finalized || collapsed.messages !== msgs) {
+    patchSlice(project, { messages: collapsed.messages })
   }
+  // 稳定点：取消/错误收尾的消息此前未持久化 → append；被扫描改写的旧卡（running→error）→ patch
+  if (finalized) persistUpsert(project, finalized)
+  persistSwept(project, collapsed.swept)
 }
 
 function finalizeAssistant(project: string, completion: AiCompletion, epoch: number): string {
@@ -754,12 +981,27 @@ function finalizeAssistant(project: string, completion: AiCompletion, epoch: num
     const updated: ChatMessage = { ...last, content, pending: false, toolCalls: [...(last.toolCalls ?? []), ...toolCalls] }
     const msgs = [...s.messages]
     msgs[pendingIdx] = updated
-    patchSlice(project, { messages: collapseStreamingMessages(msgs, 'done', updated.id) })
+    const collapsed = collapseStreamingMessages(msgs, 'done', updated.id)
+    patchSlice(project, { messages: collapsed.messages })
+    // 稳定点：收尾消息落库（draft 未持久化 → append；已有 seq → patch）
+    persistUpsert(project, updated)
+    persistSwept(project, collapsed.swept)
     return updated.id
   }
   const msg: ChatMessage = { id: uid(), role: 'assistant', content, pending: false, toolCalls }
   if (reasoning) msg.reasoning = reasoning
-  patchSlice(project, { messages: collapseStreamingMessages([...s.messages, msg], 'done', msg.id) })
+  const collapsed = collapseStreamingMessages([...s.messages, msg], 'done', msg.id)
+  patchSlice(project, { messages: collapsed.messages })
+  persistUpsert(project, msg)
+  persistSwept(project, collapsed.swept)
+  // 孤儿思考消息（只有 reasoning、无 pending 标记，模型直接转工具调用时留下）随本稳定点补落库，否则永远不入库
+  const prev = s.messages[s.messages.length - 1]
+  if (
+    prev && prev.role === 'assistant' && !prev.pending && prev.seq === undefined &&
+    !prev.toolCalls?.length && (prev.reasoning ?? '').length > 0
+  ) {
+    persistUpsert(project, prev)
+  }
   return msg.id
 }
 
@@ -778,11 +1020,16 @@ function patchToolCard(project: string, toolCallId: string, patch: Partial<ToolC
 function appendToolResult(project: string, messageId: string, entry: { toolCallId: string; content: string }, epoch: number) {
   const s = getSlice(project)
   if (!s || s.epoch !== epoch) return
+  let updated: ChatMessage | undefined
   patchSlice(project, {
-    messages: s.messages.map((m) =>
-      m.id === messageId ? { ...m, toolResults: [...(m.toolResults ?? []), entry] } : m,
-    ),
+    messages: s.messages.map((m) => {
+      if (m.id !== messageId) return m
+      updated = { ...m, toolResults: [...(m.toolResults ?? []), entry] }
+      return updated
+    }),
   })
+  // 稳定点：工具结果整行覆写（含最新 toolCalls 状态）；该行的 append 若还在途则等它收场
+  if (updated) persistAfterSettled(project, messageId)
 }
 
 // ---------- askUserQuestion ----------

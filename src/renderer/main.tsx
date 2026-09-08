@@ -14,6 +14,8 @@ import 'highlight.js/styles/github-dark.css'
 import '@/styles/tokens.css'
 import '@/styles/shell.css'
 import '@/styles/panels.css'
+import '@/styles/memory.css'
+import '@/styles/sidebar.css'
 import '@/styles/chat.css'
 
 import App from '@/App'

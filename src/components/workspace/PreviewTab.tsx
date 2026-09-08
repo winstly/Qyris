@@ -7,7 +7,7 @@ import { api, onPreviewConsole, previewSetUrl, previewBounds, previewReload, pre
 import { BuildPipeline } from './BuildPipeline'
 import { Select } from '@/components/common/Select'
 import type { PreviewConsoleEntry } from '@/types'
-import { IconPlay, IconPlus, IconStop, IconRefresh, IconTerminal, IconLink, IconFolder, IconTarget, IconDesktop, IconTablet, IconMobile, IconExternal, IconClose, IconTrash } from '@/components/common/icons'
+import { IconPlay, IconPlus, IconStop, IconRefresh, IconTerminal, IconLink, IconFolder, IconTarget, IconDesktop, IconTablet, IconMobile, IconExternal, IconClose, IconTrash, IconPencil } from '@/components/common/icons'
 import { EmptyState } from '@/components/common/EmptyState'
 
 const PHASE_LABEL: Record<string, string> = {
@@ -48,7 +48,9 @@ export function PreviewTab() {
   const selectSlot = useBuildStore((s) => s.selectSlot)
   const start = useBuildStore((s) => s.start)
   const stop = useBuildStore((s) => s.stop)
+  const removeSlot = useBuildStore((s) => s.removeSlot)
   const stopAll = useBuildStore((s) => s.stopAll)
+  const activeTab = useAppStore((s) => s.activeTab)
   const selectUrl = useBuildStore((s) => s.selectUrl)
   const slot = useBuildStore((s) => selectSlotState(s, selectCurrentBuild(s).activeSlot))
 
@@ -62,18 +64,39 @@ export function PreviewTab() {
   const [deviceMode, setDeviceMode] = useState<DeviceMode>('desktop')
   const placeholderRef = useRef<HTMLDivElement>(null)
 
+  // 命令行内编辑状态
+  const [editingCmd, setEditingCmd] = useState<string | null>(null)
+  const [editingCmdValue, setEditingCmdValue] = useState('')
+  const cmdSavedRef = useRef(false) // Enter/Escape 已保存时跳过 onBlur 重复写入
+  const updateStartCommand = useStartupStore((s) => s.updateStartCommand)
+  const deleteStartCommand = useStartupStore((s) => s.deleteStartCommand)
+  const showConfirm = useAppStore((s) => s.showConfirm)
+  // 手动添加服务
+  const [addingService, setAddingService] = useState(false)
+  const [addName, setAddName] = useState('')
+  const [addCmd, setAddCmd] = useState('')
+  /** 提交手动添加服务（Enter 和按钮共用） */
+  const submitAddService = (): void => {
+    const n = addName.trim()
+    const c = addCmd.trim()
+    if (n && c && projectPath) {
+      void updateStartCommand(n, { run: c }, projectPath)
+      setAddingService(false)
+      setAddName('')
+      setAddCmd('')
+    }
+  }
+
   const [consoleOpen, setConsoleOpen] = useState(false)
   const [consoleLines, setConsoleLines] = useState<PreviewConsoleEntry[]>([])
   const consoleBodyRef = useRef<HTMLDivElement>(null)
   // 端口占用者（EADDRINUSE 时的可视化）
   const [portInfo, setPortInfo] = useState<{ pid: number; name: string; port: number } | null>(null)
+  // 预览报错→lesson 采集（噪音控制：同消息30s去重、每预览会话最多3条）
+  const recentErrorsRef = useRef<Map<string, number>>(new Map())
+  const errorCountRef = useRef(0)
 
   const previewUrl = slot?.detectedUrl || ''
-
-  // 预览地址变化 → 主进程创建/销毁 WebContentsView
-  useEffect(() => {
-    void previewSetUrl(previewUrl || '')
-  }, [previewUrl])
 
   useEffect(() => {
     const off = onPreviewConsole((entry) => {
@@ -81,9 +104,30 @@ export function PreviewTab() {
         const next = [...lines, entry]
         return next.length > MAX_CONSOLE_LINES ? next.slice(next.length - MAX_CONSOLE_LINES) : next
       })
+      // 预览报错→lesson（噪音控制：error 级别 + 同消息30s去重 + 每预览会话最多3条）
+      if (entry.level === 'error' && errorCountRef.current < 3) {
+        const now = Date.now()
+        const key = entry.message.slice(0, 100)
+        const last = recentErrorsRef.current.get(key) ?? 0
+        if (now - last > 30_000) {
+          recentErrorsRef.current.set(key, now)
+          errorCountRef.current++
+          const project = useAppStore.getState().projectPath
+          const session = useChatStore.getState().current ? useChatStore.getState().byProject[useChatStore.getState().current!]?.sessionId : undefined
+          if (project && session) {
+            void api.noteLesson(project, session, {
+              title: `预览报错：${key.slice(0, 60)}`,
+              content: `level=${entry.level}\nsource=${entry.sourceId}\n${entry.message}`.slice(0, 2000),
+            }).catch(() => {})
+          }
+        }
+      }
     })
+    // 预览地址切换时重置噪音计数
+    recentErrorsRef.current.clear()
+    errorCountRef.current = 0
     return off
-  }, [])
+  }, [previewUrl])
 
   // 打开面板时拉取主进程缓冲的历史
   useEffect(() => {
@@ -118,9 +162,19 @@ export function PreviewTab() {
   const activeDevice = DEVICES.find((d) => d.mode === deviceMode) ?? DEVICES[0]
   const constrained = activeDevice.width !== null
 
-  // placeholder 坐标同步（ResizeObserver + window resize → 主进程 setBounds）
+  // 预览视图门控：仅在 running 且有地址时创建 WebContentsView；building 期主动销毁残留。
+  // 原先只依赖 previewUrl，但 previewUrl 在 slot 创建时即为 AI 上报的 seed（非空），
+  // 导致 building 期就 loadURL——服务器尚未监听 → 连接拒绝 → 空白；且 phase 转 running
+  // 后 previewUrl 不变、effect 不重跑，不会重试 loadURL。
   useEffect(() => {
-    if (!showIframe) {
+    void previewSetUrl(showIframe ? previewUrl : '')
+  }, [showIframe, previewUrl])
+
+  // placeholder 坐标同步（ResizeObserver + window resize → 主进程 setBounds）。
+  // isActive 守卫：WebContentsView 是原生层，Tab 切换只是 CSS 隐藏 DOM 藏不住它——
+  // 非激活 Tab 时必须把 bounds 清零（零面积=不可见），切回时重报真实坐标。
+  useEffect(() => {
+    if (!showIframe || activeTab !== 'preview') {
       void previewBounds({ x: 0, y: 0, width: 0, height: 0 })
       return
     }
@@ -139,7 +193,7 @@ export function PreviewTab() {
     ro.observe(el)
     window.addEventListener('resize', report)
     return () => { cancelAnimationFrame(raf); ro.disconnect(); window.removeEventListener('resize', report) }
-  }, [showIframe, deviceMode])
+  }, [showIframe, deviceMode, activeTab])
 
   const chatBusy = chatStatus !== 'idle' && chatStatus !== 'error'
   const compiling = useMemo(() => {
@@ -162,7 +216,8 @@ export function PreviewTab() {
       const st = slots[name.toLowerCase()]
       return {
         name,
-        command: st?.command || archived?.run || '',
+        // 未运行时优先取存档命令（AI/用户更新后立即反映）；运行中用 slot 实际命令
+        command: (st?.processAlive ? st.command : null) || archived?.run || st?.command || '',
         archived: !!archived,
         slot: st,
       }
@@ -189,15 +244,18 @@ export function PreviewTab() {
       void showAlert('AI 正忙', '上一条消息还在处理中，请稍候，或点击「停止生成」后重试。')
       return
     }
+    // AI 编译规则与主系统提示（services/ai.ts buildSystemPrompt）同源对齐：CLI 无 verify_start/
+    // report_start_commands 工具，走 [[START_COMMANDS]] 尾行协议（与 ai-cli.ts 提取正则配对）。
+    // url 字段：AI 读过代码/输出，知道本地预览地址（含端口）时必须上报——这是预览地址的第一来源
     const prompt = cliMode
       ? '这是 AI 编译阶段：请探测当前项目的技术栈，需要时安装依赖 / 验证编译，' +
         '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
-        '逐个验证启动命令能真正启动（验证通过即停止服务，不要把服务留在后台运行），' +
-        '全部通过后在回复最后一行用 [[START_COMMANDS: [{"name":"portal","run":"npm run dev"}]]] 格式（紧凑单行 JSON）提交启动命令清单。运行由我来决定。'
+        '逐个验证启动命令能真正启动（验证通过即停止进程，不要把服务留在后台运行），' +
+        '全部通过后在回复最后一行用 [[START_COMMANDS: [{"name":"portal","run":"npm run dev","url":"http://localhost:5173"}]]] 格式提交（紧凑单行 JSON；url 为该服务的本地预览地址含端口，能从代码或启动输出确定就必填，只有 name 和 run 也可以）。该行由系统消费、不会展示给用户。提交后即完成，运行由我来决定。'
       : '这是 AI 编译阶段：请探测当前项目的技术栈，需要时用 run_once 安装依赖 / 验证编译，' +
         '然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），' +
-        '逐个用 verify_start 验证启动命令能真正启动（验证通过会自动停止服务），' +
-        '全部通过后用 report_start_commands 提交启动命令清单。不要直接 run_project 启动服务，运行由我来决定。'
+        '逐个用 verify_start 验证启动命令能真正启动（验证通过会自动停止进程），' +
+        '全部通过后用 report_start_commands 提交启动命令清单，能确定的服务附上本地预览地址 url（含端口）。提交后即完成，不要直接 run_project 启动服务——运行由我来决定。'
     void useChatStore.getState().send(prompt, { projectStart: true })
   }
 
@@ -211,19 +269,20 @@ export function PreviewTab() {
     }
     void useChatStore.getState().send(
       `启动服务「${slot.name}」失败：${slot.errorText}` +
-      ' 我已授权你自动安装缺失的工具链：请安装缺失的命令（Windows 优先用 winget，注意加非交互参数），' +
-      `安装完成后用原命令重新启动服务「${slot.name}」，并用 get_build_status 确认进入运行中状态。`,
+      ' 我已授权你自动安装缺失的工具链：请安装缺失的命令（Windows 用 winget install --id <包ID> --silent --accept-package-agreements --accept-source-agreements，macOS 用 brew install，Linux 用发行版包管理器），' +
+      `安装完成后先用 run_once 验证工具可用，再用原命令重新启动服务「${slot.name}」，并用 get_build_status 确认进入运行中状态。`,
     )
   }
 
-  /** 指令运行：直接执行存档的启动命令（零模型调用）；已存活的服务跳过 */
+  /** 指令运行：直接执行存档的启动命令（零模型调用）；已存活的服务跳过。
+   *  命令存档里带预览地址（AI 编译上报的 url）时作为初始检测地址传入 */
   const runAll = async () => {
     if (!projectPath || !hasCommands) return
     const bs = useBuildStore.getState()
     for (const c of startupCommands) {
       const st = bs.byProject[projectPath]?.slots[c.name.toLowerCase()]
       if (st?.processAlive) continue
-      await bs.start(c.name, c.run, projectPath)
+      await bs.start(c.name, c.run, projectPath, c.url)
     }
   }
 
@@ -283,7 +342,36 @@ export function PreviewTab() {
                 >
                   <span className={`status-dot status-dot--${st?.phase ?? 'idle'}`} />
                   <span className="slots__name mono" title={row.name}>{row.name}</span>
-                  <span className="slots__cmd mono" title={row.command}>{row.command || '（未知命令）'}</span>
+                  {editingCmd === key ? (
+                    <input
+                      className="slots__cmd-input mono"
+                      value={editingCmdValue}
+                      onChange={(e) => setEditingCmdValue(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          const val = editingCmdValue.trim()
+                          if (val && val !== row.command && projectPath) void updateStartCommand(row.name, { run: val }, projectPath)
+                          cmdSavedRef.current = true
+                          setEditingCmd(null)
+                        } else if (e.key === 'Escape') {
+                          cmdSavedRef.current = true
+                          setEditingCmd(null)
+                        }
+                      }}
+                      onBlur={() => {
+                        // Enter/Escape 已 setEditingCmd(null) 触发 unmount → onBlur；
+                        // 用 cmdSavedRef 防止重复写入
+                        if (cmdSavedRef.current) return
+                        const val = editingCmdValue.trim()
+                        if (val && val !== row.command && projectPath) void updateStartCommand(row.name, { run: val }, projectPath)
+                        setEditingCmd(null)
+                      }}
+                      autoFocus
+                    />
+                  ) : (
+                    <span className="slots__cmd mono" title={row.command || '（未知命令）'}>{row.command || '（未知命令）'}</span>
+                  )}
                   {running && (
                     <a
                       className="slots__url mono"
@@ -324,10 +412,80 @@ export function PreviewTab() {
                       运行
                     </button>
                   )}
+                  {!alive && (
+                    <button
+                      className="icon-btn"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        cmdSavedRef.current = false
+                        setEditingCmd(key)
+                        setEditingCmdValue(row.command)
+                      }}
+                      aria-label="编辑命令"
+                      title="编辑启动命令"
+                    >
+                      <IconPencil size={12} />
+                    </button>
+                  )}
+                  {!alive && (
+                    <button
+                      className="icon-btn"
+                      onClick={async (e) => {
+                        e.stopPropagation()
+                        if (!projectPath) return
+                        // 严格判断（showConfirm 可能返回对象，truthy 判断会误放行）
+                        if (await showConfirm('删除服务', `确认删除「${row.name}」？将同时移除启动命令存档与运行记录，删除后需重新 AI 编译或手动添加。`) !== true) return
+                        removeSlot(row.name, projectPath)
+                        void deleteStartCommand(row.name, projectPath)
+                      }}
+                      aria-label="删除服务"
+                      title="删除此服务（含命令存档与运行记录）"
+                    >
+                      <IconTrash size={12} />
+                    </button>
+                  )}
                 </div>
               )
             })}
           </div>
+          {/* 手动添加服务 */}
+          {addingService ? (
+            <div className="slots__add-form">
+              <input
+                className="slots__add-input mono"
+                placeholder="服务名"
+                value={addName}
+                onChange={(e) => setAddName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') setAddingService(false) }}
+                autoFocus
+              />
+              <input
+                className="slots__add-input slots__add-input--cmd mono"
+                placeholder="启动命令（如 npm run dev）"
+                value={addCmd}
+                onChange={(e) => setAddCmd(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    submitAddService()
+                  } else if (e.key === 'Escape') {
+                    setAddingService(false)
+                  }
+                }}
+              />
+              <button
+                className="btn btn--ghost btn--sm"
+                disabled={!addName.trim() || !addCmd.trim()}
+                onClick={submitAddService}
+              >
+                添加
+              </button>
+              <button className="btn btn--ghost btn--sm" onClick={() => setAddingService(false)}>取消</button>
+            </div>
+          ) : (
+            <button className="btn btn--ghost btn--sm slots__add-btn" onClick={() => setAddingService(true)}>
+              <IconPlus size={12} /> 添加服务
+            </button>
+          )}
         </>
       )}
 
@@ -454,8 +612,16 @@ export function PreviewTab() {
               onClick={() => {
                 const chat = selectCurrentChat(useChatStore.getState())
                 if (chat.status !== 'idle' && chat.status !== 'error') return
+                // 命令更新通道按调度模式分支：API 模式走 update_start_command 工具；
+                // CLI 模式无此工具，走 [[START_COMMANDS]] 尾行协议（ai-cli.ts 提取后自动存档，
+                // 全量替换语义——需提交完整清单，含未变更的其他服务）
+                const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
+                const fixHint = cliMode
+                  ? ' 诊断后如果需要修改启动命令，在回复最后一行用 [[START_COMMANDS: [{"name":"portal","run":"npm run dev"}]]] 格式提交修正后的完整启动命令清单（紧凑单行 JSON；必须包含所有服务，未变更的原样带上；该行由系统存档、不会展示给用户）。'
+                  : ' 诊断后如果需要修改启动命令（路径不对、端口冲突、缺少子目录等），必须调用 update_start_command 更新该服务的启动命令，否则下次运行仍会失败。'
                 void useChatStore.getState().send(
-                  `启动服务「${slot!.name}」失败，报错信息如下：\n\`\`\`\n${slot!.errorText}\n\`\`\`\n请诊断原因并修复。`,
+                  `启动服务「${slot!.name}」失败，当前启动命令为：\n\`\`\`\n${slot!.command}\n\`\`\`\n报错信息如下：\n\`\`\`\n${slot!.errorText}\n\`\`\`\n请诊断原因并修复。` +
+                  fixHint,
                 )
               }}
             >

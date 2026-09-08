@@ -12,8 +12,9 @@ export function buildSystemPrompt(projectPath: string | null, skillMetas: SkillM
     '「AI 编译」流程（用户点击「AI 编译」按钮，或要求识别启动命令 / 编译项目 / 准备运行环境时）：① 先 list_files 检测技术栈特征文件（package.json / Cargo.toml / go.mod / pyproject.toml / pom.xml 等），必要时 read_file 查看 scripts 配置；② 需要安装依赖或验证编译时用 run_once 执行一次性命令（不要用 run_project，编译类命令不建服务槽）；③ 识别出每个需要长期运行的服务（如前后端分离项目的 web / api）的启动命令后，逐个用 verify_start 做启动验证（验证通过会自动停止进程；失败按返回的日志修复后重试）；④ 全部验证通过后用 report_start_commands 一次性提交启动命令清单，服务名用简短英文且不重复，run 填完整启动命令。提交后即完成，不要直接 run_project 启动服务——运行由用户决定。仅在存在多个合理命令且无法判断时才 askUserQuestion 询问。',
     '工具链缺失处理（run_once / run_project / verify_start 报「未找到 X」）：说明该工具未安装或不在 PATH。先向用户说明将要执行的安装命令并征得同意（用户在预览面板点「授权 AI 自动安装」即视为已授权，无需再问）；同意后用 run_once 安装——Windows 优先 winget install --id <包ID> --silent --accept-package-agreements --accept-source-agreements，macOS 用 brew install，Linux 用发行版包管理器；安装成功后用 run_once 验证工具可用，再重试原命令。严禁未经授权静默安装工具链。',
     '用户在对话中明确要求「启动 / 运行」某服务时，才直接 run_project（每个服务取简短英文名，多服务逐个启动，不要拼进一个脚本），启动后用 get_build_status 跟踪「编译 / 部署 / 运行」阶段并向用户汇报；编译失败时根据错误输出修改文件后再次 run_project 重启（同名服务原地重启，不影响其他服务）。启动过的服务命令会自动沉淀，供用户之后一键运行。',
+    '启动失败诊断流程：收到服务启动失败的反馈时，先分析报错信息。如果问题出在启动命令本身（路径不对、缺少子目录、端口冲突需要换端口、参数错误等），必须调用 update_start_command 更新该服务的启动命令——这是必要步骤，不调用则下次运行仍会失败。如果问题出在代码 bug，则先修复代码，再按需调用 update_start_command。',
     '需要用户在选项间做选择或补充信息时，调用 askUserQuestion。',
-    '工作方式（任何非平凡任务）：① 先给出简短的编号计划（要做哪几步、每步交给哪个档位），再开始执行；② 边界清晰、可独立完成的子任务用 dispatch_subtasks 派发给子 agent（各自独立上下文，禁止子任务再嵌套派发），按难度选档位：fast=查找/统计/轻量总结，middle=常规代码修改，heavy=复杂重构/跨模块改动，thinking=疑难调试/深度推理，main=主模型；未配置的档位自动回退主模型；③ 简单问答或一两步能完成的事直接做，不需要计划与派发；④ 子任务结果返回后核对并汇总，不照单全收。',
+    '任务分级（先判断再动手）：涉及创建/修改文件、执行命令、或多步推理的属于「任务」；概念解释、单点查询、一两步能答完的属于「简单问答」。「简单问答」直接回答，不走下面的流程；「任务」按以下方式执行：① 先给出简短的编号计划（要做哪几步、每步交给哪个档位），再开始执行；② 边界清晰、可独立完成的子任务用 dispatch_subtasks 派发给子 agent（各自独立上下文，禁止子任务再嵌套派发），按难度选档位：fast=查找/统计/轻量总结，middle=常规代码修改，heavy=复杂重构/跨模块改动，thinking=疑难调试/深度推理，main=主模型；未配置的档位自动回退主模型；③ 子任务结果返回后核对并汇总，不照单全收。',
     '代码放在 markdown 代码块中并标注语言（```ts、```rust 等）。',
   ]
   if (projectPath) {
@@ -24,10 +25,10 @@ export function buildSystemPrompt(projectPath: string | null, skillMetas: SkillM
   // Skills 摘要注入
   if (skillMetas.length > 0) {
     lines.push('')
-    lines.push(`你有 ${skillMetas.length} 个可用 Skill（专业指令集）。当用户的问题匹配某个 Skill 的触发词或场景时，先调用 load_skill 加载完整指令，然后按指令执行。用户消息中引用多个 Skill 时，必须逐个 load_skill 全部加载后再执行，不要只加载一个。`)
+    lines.push(`你有 ${skillMetas.length} 个可用 Skill（专业指令集）。当用户的问题匹配某个 Skill 的触发词或场景时，先调用 load_skill 加载完整指令再执行；load_skill 的 skill_id 参数必须精确复制下方列表里的 id（区分大小写，不要加路径、.md 后缀、也不要改成中文名）。用户消息中引用多个 Skill 时，必须逐个 load_skill 全部加载后再执行，不要只加载一个。`)
     for (const s of skillMetas) {
       const triggers = s.triggers.length > 0 ? ` [${s.triggers.join(', ')}]` : ''
-      lines.push(`- ${s.id}：${s.description}${triggers}`)
+      lines.push(`- id「${s.id}」：${s.description}${triggers}`)
     }
   }
   return lines.join('\n')
@@ -137,12 +138,28 @@ export const TOOL_DEFS: OAIToolDef[] = [
               properties: {
                 name: { type: 'string', description: '服务名（简短英文，如 web / api / admin）' },
                 run: { type: 'string', description: '启动命令，如 "npm run dev"、"uvicorn main:app --reload"' },
+                url: { type: 'string', description: '该服务的本地预览地址（含端口，如 http://localhost:8000）。从代码或启动输出能确定时必须提供，不确定则省略' },
               },
               required: ['name', 'run'],
             },
           },
         },
         required: ['services'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'update_start_command',
+      description: '更新某个服务的启动命令（不重新运行）。用于诊断出命令本身有误（路径不对、端口冲突、缺少子目录等）后修正存档命令，修正后用户点「全部运行」即可用新命令启动',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: { type: 'string', description: '服务名（与已存档的服务名一致）' },
+          command: { type: 'string', description: '修正后的启动命令' },
+        },
+        required: ['name', 'command'],
       },
     },
   },
@@ -165,7 +182,7 @@ export const TOOL_DEFS: OAIToolDef[] = [
     type: 'function',
     function: {
       name: 'get_build_status',
-      description: '查看服务进程的状态。不传 name 时返回全部服务的总览（每服务一行：阶段/命令/地址）；传 name 时返回单个服务的三阶段（编译/部署/运行）详情、退出码与最近输出',
+      description: '查看服务进程的状态。不传 name 时返回全部服务的总览（每服务一行：阶段/命令/地址）；传 name 时返回单个服务的三阶段（编译/部署/运行）详情、退出码与最近输出。如果服务处于 error 状态且问题出在启动命令本身（路径不对、端口冲突等），需用 update_start_command 更新命令后再重启',
       parameters: {
         type: 'object',
         properties: {
@@ -236,7 +253,7 @@ export const TOOL_DEFS: OAIToolDef[] = [
       parameters: {
         type: 'object',
         properties: {
-          skill_id: { type: 'string', description: 'Skill 的 ID（系统提示中列出的路径，如 "debug-react.md"）' },
+          skill_id: { type: 'string', description: 'Skill 的加载 id：精确复制系统提示「可用 Skill」列表中的 id（如 "debug-react"），不要加路径或 .md 后缀' },
         },
         required: ['skill_id'],
       },

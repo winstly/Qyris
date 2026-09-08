@@ -2,7 +2,7 @@
  * Electron preload 暴露面（window.desktopAPI）的类型化封装层。
  * 前端所有文件操作都经由这里走主进程，绝不在渲染层直接碰文件系统。
  */
-import type { AppConfig, CliAgentEventPayload, GitStatus, PreviewConsoleEntry } from '@/types'
+import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, MemoryHit, MemoryItem, MemoryStats, PreviewConsoleEntry } from '@/types'
 
 /** 是否运行在 Electron 桌面壳内（浏览器直接跑 vite 时为 false，界面会给出提示） */
 export const isDesktop = typeof window !== 'undefined' && !!window.desktopAPI
@@ -41,8 +41,21 @@ export const api = {
   restoreFile: (projectRoot: string, path: string) => wrap((d) => d.restoreFile(projectRoot, path)),
   restoreSession: (projectRoot: string, sessionId: string) => wrap((d) => d.restoreSession(projectRoot, sessionId)),
   clearProjectSnapshots: (projectRoot: string) => wrap((d) => d.clearProjectSnapshots(projectRoot)),
-  loadSession: (projectRoot: string) => wrap((d) => d.loadSession(projectRoot)),
-  saveSession: (projectRoot: string, messages: unknown[]) => wrap((d) => d.saveSession(projectRoot, messages)),
+  // 消息持久化（稳定点 write-through + keyset 分页）
+  messagesRecent: (projectRoot: string, limit?: number) => wrap((d) => d.messagesRecent(projectRoot, limit)),
+  messagesBefore: (projectRoot: string, sessionId: string, beforeSeq: number, limit?: number) =>
+    wrap((d) => d.messagesBefore(projectRoot, sessionId, beforeSeq, limit)),
+  messageAppend: (projectRoot: string, sessionId: string, message: ChatMessage) =>
+    wrap((d) => d.messageAppend(projectRoot, sessionId, message)),
+  messagePatch: (projectRoot: string, sessionId: string, id: string, patch: ChatMessagePatch) =>
+    wrap((d) => d.messagePatch(projectRoot, sessionId, id, patch)),
+  messagesTruncate: (projectRoot: string, sessionId: string, afterSeq: number) =>
+    wrap((d) => d.messagesTruncate(projectRoot, sessionId, afterSeq)),
+  projectDataDelete: (projectRoot: string) => wrap((d) => d.projectDataDelete(projectRoot)),
+  saveSessionTokens: (projectRoot: string, sessionId: string, tokens: { input: number; output: number }) =>
+    wrap((d) => d.saveSessionTokens(projectRoot, sessionId, tokens)),
+  loadSessionTokens: (projectRoot: string, sessionId: string) =>
+    wrap((d) => d.loadSessionTokens(projectRoot, sessionId)) as Promise<{ input: number; output: number }>,
   createEntry: (projectRoot: string, parentDir: string, name: string, isDir: boolean) =>
     wrap((d) => d.createEntry(projectRoot, parentDir, name, isDir)),
   renameEntry: (projectRoot: string, path: string, newName: string) =>
@@ -80,7 +93,8 @@ export const api = {
   aiChatStream: (
     requestId: string, provider: string, baseUrl: string, model: string,
     messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null,
-  ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot)),
+    opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string },
+  ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot, opts)),
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
     wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode)),
   aiCancel: (requestId: string) => wrap((d) => d.aiCancel(requestId)),
@@ -109,6 +123,43 @@ export const api = {
   gitPush: (dir: string) => wrap((d) => d.gitPush(dir)),
   gitDiscard: (dir: string, paths: string[]) => wrap((d) => d.gitDiscard(dir, paths)),
   pickParentDir: () => wrap((d) => d.pickParentDir()),
+
+  // 记忆（分层记忆系统 P1）
+  memoryList: (projectRoot: string | null, includeArchived?: boolean) =>
+    wrap((d) => d.memoryList(projectRoot, includeArchived)) as Promise<{ items: MemoryItem[] }>,
+  memorySearch: (query: string, projectRoot: string | null, topK?: number, includeArchived?: boolean) =>
+    wrap((d) => d.memorySearch(query, projectRoot, topK, includeArchived)) as Promise<{ hits: MemoryHit[]; degraded: boolean }>,
+  memoryUpdate: (id: string, patch: { title?: string; content?: string; category?: string; importance?: number }) =>
+    wrap((d) => d.memoryUpdate(id, patch)) as Promise<MemoryItem>,
+  memoryDelete: (id: string) => wrap((d) => d.memoryDelete(id)),
+  memoryMoveScope: (id: string, target: 'project' | 'user', projectRoot?: string) =>
+    wrap((d) => d.memoryMoveScope(id, target, projectRoot)) as Promise<MemoryItem>,
+  memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
+    wrap((d) => d.memoryClear(scope, projectRoot)),
+  memoryStats: () => wrap((d) => d.memoryStats()) as Promise<MemoryStats>,
+  // 记忆管线 P2
+  memorySessionContext: (projectRoot: string, sessionId: string) =>
+    wrap((d) => d.memorySessionContext(projectRoot, sessionId)) as Promise<{ summary: string | null }>,
+  memoryMaybeExtract: (projectRoot: string, sessionId: string) =>
+    wrap((d) => d.memoryMaybeExtract(projectRoot, sessionId)) as Promise<void>,
+  sessionEnded: (projectRoot: string, sessionId: string) =>
+    wrap((d) => d.sessionEnded(projectRoot, sessionId)) as Promise<void>,
+  memoryRunNow: (projectRoot: string) =>
+    wrap((d) => d.memoryRunNow(projectRoot)) as Promise<{ ok: boolean; error?: string }>,
+  memoryExtracting: (projectRoot: string) =>
+    wrap((d) => d.memoryExtracting(projectRoot)) as Promise<boolean>,
+  noteLesson: (projectRoot: string, sessionId: string, lesson: { title: string; content: string }) =>
+    wrap((d) => d.noteLesson(projectRoot, sessionId, lesson)) as Promise<void>,
+  // 记忆备份（P3）：导出/导入主进程弹框，取消以 ok=false + 取消文案表达
+  memoryExport: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
+    wrap((d) => d.memoryExport(scope, projectRoot)) as Promise<{ ok: boolean; path?: string; count?: number; error?: string }>,
+  memoryImport: () =>
+    wrap((d) => d.memoryImport()) as Promise<{ ok: boolean; imported?: number; skipped?: number; error?: string }>,
+
+  // 数据存储位置
+  getDataDir: () => wrap((d) => d.getDataDir()),
+  selectDataDir: () => wrap((d) => d.selectDataDir()),
+  migrateDataDir: (targetDir: string) => wrap((d) => d.migrateDataDir(targetDir)),
 
   // 窗口
   pickDirectory: () => wrap((d) => d.pickDirectory()),
@@ -152,6 +203,17 @@ export function onCliToolResult(cb: (payload: { requestId: string; id: string; c
 export function onCliAgentEvent(cb: (payload: CliAgentEventPayload) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onCliAgentEvent(cb)
+}
+
+export function onMemoryExtractState(cb: (payload: { projectRoot: string; extracting: boolean }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onMemoryExtractState(cb)
+}
+
+/** 记忆数据变更广播：写完成后各窗口自刷新列表（渲染层单点防抖） */
+export function onMemoryChanged(cb: (payload: { all: boolean; projectKeys: string[] }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onMemoryChanged(cb)
 }
 
 

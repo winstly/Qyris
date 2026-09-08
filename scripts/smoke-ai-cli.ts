@@ -71,6 +71,26 @@ async function main(): Promise<void> {
   assert(bigS.includes('…更早对话已省略…'), '超 160k 掐头留尾插省略标记')
   assert(bigS.includes('TAIL_MARKER 最后一条请求'), '末尾本轮请求必须在留尾段完整保留')
 
+  // P0 修复回归：CLI 路径的记忆反哺通道（渲染层注入的 system 在此被丢弃，
+  // 工作记忆摘要与长期记忆块必须经 serializeConversation 前置进正文）
+  console.log('serializeConversation：记忆/摘要前置节（CLI 记忆反哺通道）')
+  const memS = serializeConversation(msgs, '上周决定用 pnpm', '【长期记忆（供参考，可能过时）】\n- [preference] 包管理器用 pnpm：用户明确要求一律用 pnpm')
+  assert(memS.includes('【此前会话进展】\n上周决定用 pnpm'), '会话摘要前置且带节标题')
+  assert(memS.includes('【长期记忆（供参考，可能过时）】\n- [preference] 包管理器用 pnpm'), '长期记忆块（渲染层预格式化）原样前置')
+  assert(
+    memS.indexOf('【此前会话进展】') < memS.indexOf('【长期记忆') && memS.indexOf('【长期记忆') < memS.indexOf('用户：第一个问题'),
+    '头部（摘要→记忆）在对话正文之前',
+  )
+  const memOnly = serializeConversation(msgs, null, 'MEM_BLOCK_ONLY')
+  assert(memOnly.startsWith('MEM_BLOCK_ONLY'), '仅记忆无摘要时同样前置')
+  assert(!serializeConversation(msgs).includes('MEM_BLOCK_ONLY'), '不传记忆块时无前置节（向后兼容）')
+  const headBig = serializeConversation(
+    [{ role: 'user', content: 'H' + 'A'.repeat(200_000) }],
+    '短摘要', '短记忆',
+  )
+  assert(headBig.includes('【此前会话进展】\n短摘要') && headBig.includes('短记忆'), '正文截断时头部（摘要/记忆）永不丢失')
+  assert(headBig.includes('…更早对话已省略…'), '正文预算按头部长度扣除后照常掐头留尾')
+
   console.log('buildCliArgs：')
   const autoArgs = buildCliArgs('sonnet', 'auto')
   assert(autoArgs.includes('-p'), '-p 非交互模式')
@@ -85,6 +105,13 @@ async function main(): Promise<void> {
   const ai = roArgs.indexOf('--allowedTools')
   assert(ai >= 0 && roArgs[ai + 1] === 'Read,Glob,Grep,LS,TodoWrite,WebSearch,WebFetch', 'readonly 档白名单逗号单参数')
   assert(!roArgs.includes('--dangerously-skip-permissions'), 'readonly 档不跳权限')
+  // mem agent 蒸馏直调（callCliJson）：readonly + json 输出 + 单轮
+  const distillArgs = buildCliArgs('sonnet', 'readonly', { systemPrompt: '蒸馏指令', outputFormat: 'json', maxTurns: 1 })
+  const di = distillArgs.indexOf('--max-turns')
+  assert(di >= 0 && distillArgs[di + 1] === '1', 'max-turns 可覆盖（蒸馏 headless 单轮）')
+  assert(distillArgs.includes('--system-prompt') && distillArgs.includes('蒸馏指令'), 'system-prompt 注入蒸馏指令')
+  assert(distillArgs.includes('--output-format') && distillArgs.includes('json'), 'output-format json 单次完整返回')
+  assert(!distillArgs.includes('--verbose'), 'json 格式不附带 stream-json 专属 flag')
 
   console.log('buildCliSystemPrompt：')
   assert(buildCliSystemPrompt('E:/proj').includes('E:/proj'), '包含项目目录')
@@ -97,6 +124,11 @@ async function main(): Promise<void> {
     'Skill 内容注入 + load_skill 例外声明',
   )
   assert(buildCliSystemPrompt('E:/proj').includes('忽略它并按任务字面继续'), '无 Skill 时声明忽略加载要求')
+  assert(
+    buildCliSystemPrompt('E:/proj', '', '', ['C:/skills/a', 'C:/skills/b']).includes('C:/skills/a')
+      && buildCliSystemPrompt('E:/proj', '', '', ['C:/skills/a']).includes('不要用 find/grep 全盘搜索'),
+    '注入 Skill 目录路径（防全盘扫描）',
+  )
 
   console.log('extractSkillIds / resolveSkillBlock：')
   const skillMsgs = [

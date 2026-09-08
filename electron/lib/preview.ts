@@ -99,7 +99,14 @@ export function previewExecuteJs(code: string): Promise<unknown> {
 }
 
 export function previewOpenDevTools(): void {
-  view?.webContents.openDevTools({ mode: 'detach' })
+  if (!view) return
+  // 已打开时 openDevTools 是 no-op，不会把已存在的 detached 窗口提到前台。
+  // 改为先判 isDevToolsOpened → focus，否则才 openDevTools。
+  if (view.webContents.isDevToolsOpened()) {
+    view.webContents.devToolsWebContents?.focus()
+  } else {
+    view.webContents.openDevTools({ mode: 'detach' })
+  }
 }
 
 export function getPreviewWebContents(): import('electron').WebContents | null {

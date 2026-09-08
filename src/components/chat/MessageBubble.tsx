@@ -82,7 +82,8 @@ function extractUserText(content: string): string {
 
 /** 用户消息：hover 出「编辑」，编辑态可改后重发；编辑非末条时有回退提醒 */
 function UserMessage({ msg }: { msg: ChatMessage }) {
-  const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart || msg.meta?.element)
+  const citations = msg.meta?.citations ?? []
+  const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart || msg.meta?.element || citations.length > 0)
   const userText = hasMeta ? (msg.meta?.projectStart ? null : extractUserText(msg.content) || null) : null
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(msg.content)
@@ -276,6 +277,15 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
               <span className="msg__meta-card-name">{s.name}</span>
             </div>
           ))}
+          {citations.length > 0 && (
+            <div
+              className="msg__meta-card msg__meta-card--cite"
+              title={`引用记忆（${citations.length} 条）：\n${citations.map((c) => `· ${c.title}`).join('\n')}`}
+            >
+              <span className="msg__meta-card-label">🧠</span>
+              <span className="msg__meta-card-name">引用 {citations.length} 条记忆</span>
+            </div>
+          )}
           {msg.meta!.element && (
             <div className="msg__meta-card msg__meta-card--element">
               <span className="msg__meta-card-label">元素</span>

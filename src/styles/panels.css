@@ -312,6 +312,59 @@
   color: var(--muted);
 }
 
+.slots__cmd-input {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--text-micro);
+  font-family: var(--font-mono);
+  color: var(--fg);
+  background: var(--s1);
+  border: 1px solid var(--edge-hair);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  outline: none;
+  height: 22px;
+  box-sizing: border-box;
+}
+.slots__cmd-input:focus { border-color: var(--accent); }
+
+.slots__add-btn {
+  align-self: flex-start;
+  margin-top: 2px;
+  border-style: dashed;
+  color: var(--muted);
+}
+.slots__add-btn:hover { color: var(--fg); border-color: var(--fg); }
+
+.slots__add-form {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  padding: 6px 8px;
+  background: var(--s1);
+  border: 1px solid var(--edge-hair);
+  border-radius: var(--radius-sm);
+  align-self: stretch;
+}
+
+.slots__add-input {
+  flex: 0 0 120px;
+  min-width: 0;
+  font-size: var(--text-micro);
+  font-family: var(--font-mono);
+  color: var(--fg);
+  background: var(--s2);
+  border: 1px solid var(--edge-hair);
+  border-radius: var(--radius-sm);
+  padding: 3px 6px;
+  outline: none;
+  height: 24px;
+  box-sizing: border-box;
+}
+.slots__add-input:focus { border-color: var(--accent); }
+.slots__add-input--cmd { flex: 1; }
+
 .slots__url {
   flex: 0 0 auto;
   max-width: 240px;

@@ -40,10 +40,16 @@ export async function aiChatStream(
   dispatchMode: string = 'api',
   projectRoot: string | null = null,
   windowId: number | null = null,
+  /** CLI 记忆反哺通道（API 路径忽略——摘要与记忆已由渲染层注入 system；CLI 路径丢弃 system，
+   *  二者经 serializeConversation 前置进正文）：sessionSummary=工作记忆滚动摘要（包节标题）；
+   *  memoryBlock=长期记忆检索块（渲染层预格式化含节标题，原样透传）。
+   *  systemPrompt：覆盖 CLI 的系统提示（--system-prompt 标志），mem agent 蒸馏指令用。
+   *  outputFormat：CLI 输出格式，默认 stream-json；mem agent 用 json（单次完整返回）。 */
+  opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string },
 ): Promise<AiCompletion> {
   if (dispatchMode === 'claude-cli') {
     const cfg = await getConfig()
-    return claudeCliChatStream(requestId, model, messages, projectRoot, cfg.aiCliPermission === 'readonly' ? 'readonly' : 'auto', cfg, windowId)
+    return claudeCliChatStream(requestId, model, messages, projectRoot, cfg.aiCliPermission === 'readonly' ? 'readonly' : 'auto', cfg, windowId, opts)
   }
   const key = await getSecretInternal(SECRET_ACCOUNT)
   if (!key) throw new Error('尚未配置 API Key，请打开设置面板填写（将存入系统 keychain）')

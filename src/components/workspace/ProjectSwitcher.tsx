@@ -15,7 +15,7 @@ export function ProjectSwitcher() {
   const openProjectDialog = useAppStore((s) => s.openProjectDialog)
   const closeProject = useAppStore((s) => s.closeProject)
   const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
-  const setTab = useAppStore((s) => s.setTab)
+  const toggleMemorySidebar = useAppStore((s) => s.toggleMemorySidebar)
 
   const btnRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
@@ -91,7 +91,7 @@ export function ProjectSwitcher() {
           <button className="projswitcher-action" onClick={() => { setMenu(null); void openProjectDialog() }}>
             <IconFolder size={13} /> 打开项目
           </button>
-          <button className="projswitcher-action" onClick={() => { setMenu(null); setTab('projects') }}>
+          <button className="projswitcher-action" onClick={() => { setMenu(null); toggleMemorySidebar() }}>
             <IconClock size={13} /> 查看全部项目
           </button>
         </div>,

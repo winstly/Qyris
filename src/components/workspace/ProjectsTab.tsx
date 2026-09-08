@@ -26,6 +26,7 @@ export function ProjectsTab() {
       `确定要将「${proj.name}」从历史记录中移除吗？`,
       [
         { id: 'session', label: '同时删除对话历史（不可恢复）' },
+        { id: 'memory', label: '同时删除工程记忆' },
         { id: 'files', label: '同时删除项目文件（不可恢复）' },
       ],
       { holdOpen: true, confirmingText: '删除中…' },
@@ -41,7 +42,11 @@ export function ProjectsTab() {
     let failed = ''
     try {
       if (checks.session) {
-        try { await api.saveSession(proj.path, []) } catch { /* 忽略 */ }
+        // 交给主进程统一清该项目数据（含全部历史会话消息与快照），历史会话一并清除
+        try { await api.projectDataDelete(proj.path) } catch { /* 忽略 */ }
+      }
+      if (checks.memory) {
+        try { await api.memoryClear('project', proj.path) } catch { /* 忽略 */ }
       }
       if (checks.files) {
         if (useAppStore.getState().openProjects.includes(proj.path)) {

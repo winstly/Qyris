@@ -3,10 +3,11 @@ import { useAppStore } from '@/store/useAppStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useChatStore } from '@/store/useChatStore'
-import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onCliToolResult, onCliAgentEvent, onFsChanged, onElementPicked, previewSetVisible, isDesktop, api } from '@/services/desktop'
+import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onCliToolResult, onCliAgentEvent, onFsChanged, onElementPicked, previewSetVisible, isDesktop } from '@/services/desktop'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useIsWide } from '@/hooks/useMediaQuery'
 import { Workspace } from '@/components/workspace/Workspace'
+import { MemorySidebar } from '@/components/shell/MemorySidebar'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { StatusBar } from '@/components/shell/StatusBar'
 import { SettingsDialog } from '@/components/shell/SettingsDialog'
@@ -19,6 +20,7 @@ export default function App() {
   const isWide = useIsWide()
   const theme = useAppStore((s) => s.theme)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const workspaceRef = useRef<HTMLDivElement>(null)
 
   useKeyboardShortcuts()
 
@@ -45,29 +47,7 @@ export default function App() {
     void previewSetVisible(!hasDialog)
   }, [hasDialog])
 
-  // 会话历史持久化：messages 变化时（防抖 400ms）写入 ~/.qyris/sessions/
-  useEffect(() => {
-    if (!isDesktop) return
-    let timer: number | null = null
-    const unsub = useChatStore.subscribe((state, prev) => {
-      const { projectPath } = useAppStore.getState()
-      if (!projectPath) return
-      const msgs = state.byProject[projectPath]?.messages
-      if (msgs === prev.byProject[projectPath]?.messages) return
-      if (timer !== null) window.clearTimeout(timer)
-      timer = window.setTimeout(() => {
-        const cur = useChatStore.getState().byProject[projectPath]?.messages ?? []
-        const toSave = cur.map((m) =>
-          m.pending ? { ...m, pending: false, content: m.content || '' } : m,
-        )
-        void api.saveSession(projectPath, toSave).catch(() => {})
-      }, 400)
-    })
-    return () => {
-      unsub()
-      if (timer !== null) window.clearTimeout(timer)
-    }
-  }, [])
+  // 会话持久化已改为 store 内稳定点 write-through（见 useChatStore），这里不再做全量覆写订阅
 
   // 全局事件接线：编译输出 / 退出码 / AI 增量 / 文件变更
   useEffect(() => {
@@ -86,17 +66,24 @@ export default function App() {
     return () => { offs.forEach((f) => f()) }
   }, [])
 
-  /** 主分割线拖拽：左工作区 ≥ 500px，右对话栏 ≥ 300px */
+  /** 主分割线拖拽：左工作区 ≥ 500px，右对话栏 ≥ 300px。
+   *  坐标基准是「工作区左缘」而非 body 左缘——工作区左侧还有 MemorySidebar（40px 图标列
+   *  + 可选 260px 面板），用 body 左缘算比率会让边线恒差一个侧边栏宽度（鼠标对不起边线）。 */
   const onDividerDown = (e: React.PointerEvent) => {
     e.preventDefault()
     const body = bodyRef.current
-    if (!body) return
-    const rect = body.getBoundingClientRect()
+    const ws = workspaceRef.current
+    if (!body || !ws) return
+    const bodyRect = body.getBoundingClientRect()
+    const wsLeft = ws.getBoundingClientRect().left
+    const sidebarW = wsLeft - bodyRect.left
+    const total = bodyRect.width
     const move = (clientX: number) => {
-      const total = rect.width
-      let r = (clientX - rect.left) / total
+      // flexBasis 百分比以 body 全宽为基准：工作区宽 = clientX - 工作区左缘
+      let r = (clientX - wsLeft) / total
       r = Math.max(500 / total, r)
-      r = Math.min(1 - 300 / total, r)
+      // 对话栏 ≥300px + 分割线 5px：工作区上限 = 1 - (侧边栏宽 + 分割线 + 300) / 全宽
+      r = Math.min(1 - (sidebarW + 5 + 300) / total, r)
       setSplitRatio(r)
     }
     const onMove = (ev: PointerEvent) => move(ev.clientX)
@@ -123,7 +110,9 @@ export default function App() {
       )}
 
       <div className="app__body" ref={bodyRef} data-ready={booted || undefined}>
+        <MemorySidebar />
         <div
+          ref={workspaceRef}
           className="app__workspace"
           style={isWide ? { flexBasis: `${splitRatio * 100}%` } : undefined}
         >

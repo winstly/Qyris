@@ -125,5 +125,10 @@ export function buildChildEnv(): NodeJS.ProcessEnv {
   } catch {
     /* 任何异常都回退当前进程 env，不阻塞 spawn */
   }
+  // Python 在非 TTY（管道）上默认 4KB 块缓冲——小 banner（如 http.server 的就绪行）
+  // 永远填不满缓冲区，导致阶段机收不到输出、phase 卡在 building。
+  // 强制 unbuffered 消除此问题；对非 Python 进程无副作用。
+  if (!env.PYTHONUNBUFFERED) env.PYTHONUNBUFFERED = '1'
+  if (!env.PYTHONIOENCODING) env.PYTHONIOENCODING = 'utf-8'
   return env
 }

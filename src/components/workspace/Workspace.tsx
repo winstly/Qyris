@@ -1,12 +1,11 @@
 import { useAppStore } from '@/store/useAppStore'
 import { PreviewTab } from './PreviewTab'
 import { FilesTab } from './FilesTab'
-import { ProjectsTab } from './ProjectsTab'
 import { CreateProjectDialog } from './CreateProjectDialog'
-import { ProjectSwitcher } from './ProjectSwitcher'
-import { IconEye, IconFolder, IconFile } from '@/components/common/icons'
+import { MemoryPanel } from '@/components/memory/MemoryPanel'
+import { IconEye, IconFile, IconLayers } from '@/components/common/icons'
 
-/** 工作区：「项目 / 文件 / 预览」三个 Tab */
+/** 工作区：「文件 / 预览 / 记忆（项目记忆）」三个 Tab（项目列表已移至左侧折叠面板） */
 export function Workspace() {
   const activeTab = useAppStore((s) => s.activeTab)
   const setTab = useAppStore((s) => s.setTab)
@@ -17,14 +16,6 @@ export function Workspace() {
   return (
     <div className="workspace">
       <div className="workspace__tabs" role="tablist" aria-label="工作区视图">
-        <button
-          role="tab"
-          aria-selected={activeTab === 'projects'}
-          className={`workspace__tab ${activeTab === 'projects' ? 'workspace__tab--active' : ''}`}
-          onClick={() => setTab('projects')}
-        >
-          <IconFolder size={13} /> 项目
-        </button>
         <button
           role="tab"
           aria-selected={activeTab === 'files'}
@@ -41,22 +32,27 @@ export function Workspace() {
         >
           <IconEye size={13} /> 预览
         </button>
-
-        <div className="workspace__spacer" />
-        <ProjectSwitcher />
+        <button
+          role="tab"
+          aria-selected={activeTab === 'memory'}
+          className={`workspace__tab ${activeTab === 'memory' ? 'workspace__tab--active' : ''}`}
+          onClick={() => setTab('memory')}
+        >
+          <IconLayers size={13} /> 记忆
+        </button>
       </div>
 
       <CreateProjectDialog open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
 
       <div className="workspace__panes" key={projectPath ?? 'none'}>
-        <div className={`pane ${activeTab === 'projects' ? 'pane--active' : ''}`}>
-          <ProjectsTab />
-        </div>
         <div className={`pane ${activeTab === 'files' ? 'pane--active' : ''}`}>
           <FilesTab />
         </div>
         <div className={`pane ${activeTab === 'preview' ? 'pane--active' : ''}`}>
           <PreviewTab />
+        </div>
+        <div className={`pane ${activeTab === 'memory' ? 'pane--active' : ''}`}>
+          <MemoryPanel />
         </div>
       </div>
     </div>
