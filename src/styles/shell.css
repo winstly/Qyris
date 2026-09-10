@@ -4,6 +4,32 @@
 
 html, body, #root { height: 100%; }
 
+/* 窗口过小全屏遮罩 */
+.size-guard {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 14px;
+  font-family: var(--font-ui);
+  text-align: center;
+}
+.size-guard__content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.size-guard__icon {
+  font-size: 48px;
+  color: var(--accent);
+  opacity: 0.5;
+}
+
 body {
   margin: 0;
   background: var(--bg);
@@ -102,7 +128,11 @@ button:focus-visible {
 }
 .app__body[data-ready] .app__workspace {
   flex-grow: 0;
-  flex-shrink: 0;
+  /* flex-shrink: 0 已移除：窄窗口下 workspace 必须可收缩，否则 chat 的 min-width 被挤爆导致黑屏 */
+}
+/* 侧边栏展开时：工作区必须可收缩，否则侧边栏覆盖工作区且 WebContentsView 不退让 */
+.sidebar--open ~ .app__workspace {
+  flex-shrink: 1;
 }
 
 .app__divider {
@@ -130,9 +160,16 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
 /* < 1024px：上下布局 */
 @media (max-width: 1023px) {
   .app__body { flex-direction: column; }
-  .app__workspace { flex: 1 1 auto !important; min-height: 0; }
+  .app__workspace {
+    flex: 1 1 0% !important;   /* !important 覆盖 [data-ready] 的 flex-grow:0; flex-shrink:0 */
+    min-width: 0;
+    min-height: 0;
+    width: 100% !important;     /* 防止旧 flexBasis 内联样式残留 */
+    flex-basis: 0% !important;
+  }
   .app__divider { display: none; }
   .chat {
+    flex: 0 0 auto !important;
     width: 100% !important;
     height: 46vh;
     min-height: 260px;

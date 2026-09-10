@@ -18,7 +18,7 @@ import path from 'node:path'
 import { dialog, type BrowserWindow } from 'electron'
 import type { SqliteDb } from '../db'
 import { getDb, projectKey, vecReadyFlag, dataDir } from '../db'
-import { embedTexts, embedReady, EMBED_DIM, DEFAULT_EMBED_MODEL } from './embed'
+import { embedTexts, embedReady, isEmbedBusy, EMBED_DIM, DEFAULT_EMBED_MODEL } from './embed'
 import { getConfig } from '../config'
 import { emitToAllWindows } from '../emitter'
 
@@ -81,7 +81,7 @@ const TOKENS_KEY = 'distill_tokens'
 export async function loadDistillTokens(): Promise<void> {
   try {
     const db = await getDb()
-    const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(TOKENS_KEY) as { value: string } | undefined
+    const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get(TOKENS_KEY) as { value: string } | undefined
     if (row?.value) {
       const t = JSON.parse(row.value) as { input?: number; output?: number }
       distillTokens.input = t.input ?? 0
@@ -94,16 +94,16 @@ export function addDistillTokens(input: number, output: number): void {
   distillTokens.input += input
   distillTokens.output += output
   // fire-and-forget 持久化
-  void getDb().then((db) => {
-    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(TOKENS_KEY, JSON.stringify(distillTokens))
+  void getDb().then(async (db) => {
+    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(TOKENS_KEY, JSON.stringify(distillTokens))
   }).catch(() => {})
 }
 
 export function resetDistillTokens(): void {
   distillTokens.input = 0
   distillTokens.output = 0
-  void getDb().then((db) => {
-    db.prepare('DELETE FROM meta WHERE key = ?').run(TOKENS_KEY)
+  void getDb().then(async (db) => {
+    await db.prepare('DELETE FROM meta WHERE key = ?').run(TOKENS_KEY)
   }).catch(() => {})
 }
 
@@ -141,9 +141,9 @@ async function expectedFingerprint(): Promise<string | null> {
 async function checkEmbedFingerprint(db: SqliteDb): Promise<boolean> {
   const expected = await expectedFingerprint()
   if (!expected) return true
-  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(FINGERPRINT_KEY) as { value: string } | undefined
+  const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get(FINGERPRINT_KEY) as { value: string } | undefined
   if (!row?.value) {
-    if (embedReady()) db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, expected)
+    if (embedReady()) await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, expected)
     return true
   }
   if (row.value !== expected) {
@@ -183,11 +183,11 @@ export async function memoryList(projectRoot: string | null, includeArchived = f
   const db = await getDb()
   const statusSql = includeArchived ? '' : " AND status = 'active'"
   if (!projectRoot) {
-    const rows = db.prepare(`SELECT * FROM mem_items WHERE project_key = 'global'${statusSql} ORDER BY updated_at DESC`).all() as MemRow[]
+    const rows = await db.prepare(`SELECT * FROM mem_items WHERE project_key = 'global'${statusSql} ORDER BY updated_at DESC`).all() as MemRow[]
     return { items: rows.map(rowToItem) }
   }
   const key = projectKey(projectRoot)
-  const rows = db
+  const rows = await db
     .prepare(`SELECT * FROM mem_items WHERE (project_key = ? OR project_key = 'global')${statusSql} ORDER BY updated_at DESC`)
     .all(key) as MemRow[]
   return { items: rows.map(rowToItem) }
@@ -203,7 +203,8 @@ export async function memorySearch(
   if (!q) return { hits: [], degraded: false }
   const limit = clampTopK(topK)
   const fingerprintOk = await checkEmbedFingerprint(db)
-  const useVec = vecReadyFlag() && fingerprintOk && embedReady()
+  // embedding 繁忙时（AI 记忆检索 / 蒸馏正在推理）跳过向量路，避免串行队列阻塞 IPC 响应
+  const useVec = vecReadyFlag() && fingerprintOk && embedReady() && !isEmbedBusy()
   const headroom = limit * 3 // 融合前多捞，补偿 scope/status 过滤与两路交叉
 
   // 关键词路：≥3 字走 FTS5 trigram 短语查询；1-2 字 trigram 无法成串，走 LIKE 兜底
@@ -262,12 +263,17 @@ export async function memorySearch(
     .sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt)
     .slice(0, limit)
 
-  // 回写访问计数（检索热路径上的小同步写，优于引入异步队列）。
+  // 回写访问计数：defer 到下一轮事件循环，不阻塞 IPC 响应。
   // 并发说明：单语句原子，与 memoryClear 的 SELECT→事务删除交错时最多对已删 id UPDATE 0 行，无害。
   if (hits.length > 0) {
-    const touch = db.prepare('UPDATE mem_items SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?')
+    const ids = hits.map((h) => h.id)
     const ts = Date.now()
-    for (const h of hits) touch.run(ts, h.id)
+    setImmediate(() => {
+      try {
+        const touch = db.prepare('UPDATE mem_items SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?')
+        for (const id of ids) touch.run(ts, id)
+      } catch { /* 静默：不阻塞检索主链路 */ }
+    })
   }
   return { hits, degraded: !useVec || vecFailed }
 }
@@ -296,17 +302,17 @@ export async function memoryUpdate(id: string, patch: MemoryPatch): Promise<Memo
     }
   }
   // vec 不可用时只更新文本：向量表不可达（vecReady 把关），FTS 由触发器自同步
-
-  const run = db.transaction(() => {
-    const res = db.prepare(
+  if (vector) {
+    await db.transaction([
+      { sql: 'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, updated_at = ? WHERE id = ?', params: [nextTitle, nextContent, nextCategory, nextImportance, Date.now(), id] },
+      { sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [id] },
+      { sql: 'INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)', params: [id, vector] },
+    ])
+  } else {
+    await db.prepare(
       'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, updated_at = ? WHERE id = ?',
     ).run(nextTitle, nextContent, nextCategory, nextImportance, Date.now(), id)
-    if (vector && Number(res.changes) > 0) {
-      db.prepare('DELETE FROM mem_vec WHERE item_id = ?').run(id)
-      db.prepare('INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)').run(id, vector)
-    }
-  })
-  run()
+  }
   emitMemoryChanged([row.project_key])
   const updated = getRow(db, id)
   return rowToItem(updated ?? row)
@@ -315,12 +321,12 @@ export async function memoryUpdate(id: string, patch: MemoryPatch): Promise<Memo
 /** 删除：mem_items（触发器清 FTS）+ mem_vec 同步清 */
 export async function memoryDelete(id: string): Promise<void> {
   const db = await getDb()
-  const row = getRow(db, id)
-  const run = db.transaction(() => {
-    db.prepare('DELETE FROM mem_items WHERE id = ?').run(id)
-    if (vecReadyFlag()) db.prepare('DELETE FROM mem_vec WHERE item_id = ?').run(id)
-  })
-  run()
+  const row = await getRow(db, id)
+  const stmts: { sql: string; params?: unknown[] }[] = [
+    { sql: 'DELETE FROM mem_items WHERE id = ?', params: [id] },
+  ]
+  if (vecReadyFlag()) stmts.push({ sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [id] })
+  await db.transaction(stmts)
   if (row) emitMemoryChanged([row.project_key])
 }
 
@@ -340,7 +346,7 @@ export async function memoryMoveScope(
   const nextKey = toUser ? 'global' : projectKey(String(projectRoot))
   const nextTier = toUser ? 'long' : row.tier
   const nextSession = toUser ? null : row.session_id
-  db.prepare(
+  await db.prepare(
     'UPDATE mem_items SET project_key = ?, tier = ?, session_id = ?, updated_at = ? WHERE id = ?',
   ).run(nextKey, nextTier, nextSession, Date.now(), id)
   emitMemoryChanged([row.project_key, nextKey])
@@ -362,19 +368,16 @@ function scopeWhere(scope: 'project' | 'global' | 'all', projectRoot?: string): 
 export async function memoryClear(scope: 'project' | 'global' | 'all', projectRoot?: string): Promise<void> {
   const db = await getDb()
   const { where, params } = scopeWhere(scope, projectRoot)
-  const rows = db.prepare(`SELECT id FROM mem_items WHERE ${where}`).all(...params) as { id: string }[]
+  const rows = await db.prepare(`SELECT id FROM mem_items WHERE ${where}`).all(...params) as { id: string }[]
   // 蒸馏 token 归零：仅全库清空（scope='all'）时归零——局部清空不应重置全局累计
   if (scope === 'all') resetDistillTokens()
   if (rows.length === 0) return
-  const run = db.transaction(() => {
-    const delItem = db.prepare('DELETE FROM mem_items WHERE id = ?')
-    const delVec = vecReadyFlag() ? db.prepare('DELETE FROM mem_vec WHERE item_id = ?') : null
-    for (const { id } of rows) {
-      delItem.run(id)
-      delVec?.run(id)
-    }
-  })
-  run()
+  const stmts: { sql: string; params?: unknown[] }[] = []
+  for (const { id } of rows) {
+    stmts.push({ sql: 'DELETE FROM mem_items WHERE id = ?', params: [id] })
+    if (vecReadyFlag()) stmts.push({ sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [id] })
+  }
+  await db.transaction(stmts)
   emitMemoryChanged(
     scope === 'all' ? 'all' : [scope === 'global' ? 'global' : projectKey(String(projectRoot))],
   )
@@ -383,13 +386,13 @@ export async function memoryClear(scope: 'project' | 'global' | 'all', projectRo
 /** 统计：面板概览用 */
 export async function memoryStats(): Promise<MemoryStats> {
   const db = await getDb()
-  const total = (db.prepare('SELECT COUNT(*) AS n FROM mem_items').get() as { n: number }).n
+  const total = ((await db.prepare('SELECT COUNT(*) AS n FROM mem_items').get()) as { n: number }).n
   const byTier: Record<string, number> = {}
-  for (const r of db.prepare('SELECT tier AS k, COUNT(*) AS n FROM mem_items GROUP BY tier').all() as { k: string; n: number }[]) {
+  for (const r of await db.prepare('SELECT tier AS k, COUNT(*) AS n FROM mem_items GROUP BY tier').all() as { k: string; n: number }[]) {
     byTier[r.k] = r.n
   }
   const byCategory: Record<string, number> = {}
-  for (const r of db.prepare('SELECT category AS k, COUNT(*) AS n FROM mem_items GROUP BY category').all() as { k: string; n: number }[]) {
+  for (const r of await db.prepare('SELECT category AS k, COUNT(*) AS n FROM mem_items GROUP BY category').all() as { k: string; n: number }[]) {
     byCategory[r.k] = r.n
   }
   let dbBytes = 0
@@ -427,9 +430,9 @@ export function emitMemoryChanged(keys: string[] | 'all'): void {
   emitToAllWindows('memory-changed', payload)
 }
 
-/** 事务内插入 mem_items 行（FTS 由触发器自同步） */
-function insertItemTx(db: SqliteDb, item: MemoryItem): void {
-  db.prepare(
+/** 插入 mem_items 行（FTS 由触发器自同步） */
+async function insertItemTx(db: SqliteDb, item: MemoryItem): Promise<void> {
+  await db.prepare(
     `INSERT INTO mem_items
        (id, project_key, session_id, tier, category, title, content, source_json, importance,
         access_count, last_accessed_at, status, superseded_by, created_at, updated_at)
@@ -441,13 +444,14 @@ function insertItemTx(db: SqliteDb, item: MemoryItem): void {
 }
 
 /** 嵌入结果回写（事务）：条目已不存在（embed 期间被并发删除/清空）则放弃，不留孤儿向量 */
-function writeVecGuarded(db: SqliteDb, id: string, vec: Float32Array | null): void {
+async function writeVecGuarded(db: SqliteDb, id: string, vec: Float32Array | null): Promise<void> {
   if (!vec || !vecReadyFlag()) return
-  db.transaction(() => {
-    if (!db.prepare('SELECT 1 FROM mem_items WHERE id = ?').get(id)) return
-    db.prepare('DELETE FROM mem_vec WHERE item_id = ?').run(id)
-    db.prepare('INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)').run(id, vec)
-  })()
+  const exists = await db.prepare('SELECT 1 FROM mem_items WHERE id = ?').get(id)
+  if (!exists) return
+  await db.transaction([
+    { sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [id] },
+    { sql: 'INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)', params: [id, vec] },
+  ])
 }
 
 /** 嵌入一条（事务外调用）；不可用/失败回 null（条目照落，仅关键词可检索） */
@@ -466,46 +470,42 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
   if (!input.global && !input.projectRoot) throw new Error('memory_create 需要 projectRoot 或 global=true')
   const now = Date.now()
   const importance = clampImportance(input.importance ?? 0.5)
-  // tx1（同步，原子）：查重 → 折叠 / 插入
-  const tx1 = db.transaction((): { folded: boolean; id: string } => {
-    const dup = db
-      .prepare(
-        `SELECT id FROM mem_items
-         WHERE project_key = ? AND category = ? AND title = ? AND status = 'active'
-         ORDER BY updated_at DESC LIMIT 1`,
-      )
-      .get(key, input.category, input.title) as { id: string } | undefined
-    if (dup) {
-      db.prepare(
-        'UPDATE mem_items SET content = ?, importance = MAX(importance, ?), updated_at = ? WHERE id = ?',
-      ).run(input.content, importance, now, dup.id)
-      return { folded: true, id: dup.id }
-    }
-    const item: MemoryItem = {
-      id: `mem_${randomUUID()}`,
-      projectKey: key,
-      sessionId: input.sessionId ?? null,
-      tier: input.tier,
-      category: input.category,
-      title: input.title,
-      content: input.content,
-      sourceJson: input.sourceJson ?? null,
-      importance,
-      accessCount: 0,
-      lastAccessedAt: null,
-      status: 'active',
-      supersededBy: null,
-      createdAt: now,
-      updatedAt: now,
-    }
-    insertItemTx(db, item)
-    return { folded: false, id: item.id }
-  })
-  const result = tx1()
+  // 查重 → 折叠 / 插入（SELECT 在事务外，条件分支分别执行）
+  const dup = await db
+    .prepare(
+      `SELECT id FROM mem_items
+       WHERE project_key = ? AND category = ? AND title = ? AND status = 'active'
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .get(key, input.category, input.title) as { id: string } | undefined
+  if (dup) {
+    await db.prepare(
+      'UPDATE mem_items SET content = ?, importance = MAX(importance, ?), updated_at = ? WHERE id = ?',
+    ).run(input.content, importance, now, dup.id)
+    return { folded: true, id: dup.id }
+  }
+  const item: MemoryItem = {
+    id: `mem_${randomUUID()}`,
+    projectKey: key,
+    sessionId: input.sessionId ?? null,
+    tier: input.tier,
+    category: input.category,
+    title: input.title,
+    content: input.content,
+    sourceJson: input.sourceJson ?? null,
+    importance,
+    accessCount: 0,
+    lastAccessedAt: null,
+    status: 'active',
+    supersededBy: null,
+    createdAt: now,
+    updatedAt: now,
+  }
+  await insertItemTx(db, item)
   // 事务外：嵌入 + 向量回写（存在性检查防孤儿）
-  writeVecGuarded(db, result.id, await embedOne(db, input.title, input.content))
+  await writeVecGuarded(db, item.id, await embedOne(db, input.title, input.content))
   emitMemoryChanged([key])
-  return result
+  return { folded: false, id: item.id }
 }
 
 /** 新建（无折叠语义的直建入口，agent create 走 createOrFoldAtomic）：
@@ -533,8 +533,8 @@ export async function memoryCreate(input: MemoryCreateInput): Promise<MemoryItem
     createdAt: now,
     updatedAt: now,
   }
-  db.transaction(() => insertItemTx(db, item))()
-  writeVecGuarded(db, item.id, await embedOne(db, item.title, item.content))
+  await insertItemTx(db, item)
+  await writeVecGuarded(db, item.id, await embedOne(db, item.title, item.content))
   emitMemoryChanged([key])
   return item
 }
@@ -579,26 +579,26 @@ export async function saveSessionSummary(projectRoot: string, sessionId: string,
     createdAt: now,
     updatedAt: now,
   }
-  db.transaction(() => {
-    const olds = db
-      .prepare(
-        `SELECT id FROM mem_items
-         WHERE project_key = ? AND session_id = ? AND tier = 'short' AND category = 'summary' AND status = 'active'`,
-      )
-      .all(key, sessionId) as { id: string }[]
-    for (const old of olds) {
-      db.prepare("UPDATE mem_items SET status = 'archived', updated_at = ? WHERE id = ?").run(now, old.id)
-    }
-    insertItemTx(db, item)
-  })()
-  writeVecGuarded(db, item.id, await embedOne(db, item.title, content))
+  const olds = await db.prepare(
+    `SELECT id FROM mem_items
+     WHERE project_key = ? AND session_id = ? AND tier = 'short' AND category = 'summary' AND status = 'active'`,
+  ).all(key, sessionId) as { id: string }[]
+  const stmts: { sql: string; params?: unknown[] }[] = olds.map((old) => ({
+    sql: "UPDATE mem_items SET status = 'archived', updated_at = ? WHERE id = ?", params: [now, old.id],
+  }))
+  stmts.push({
+    sql: `INSERT INTO mem_items (id, project_key, session_id, tier, category, title, content, source_json, importance, access_count, last_accessed_at, status, superseded_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, ?)`,
+    params: [item.id, item.projectKey, item.sessionId, item.tier, item.category, item.title, item.content, item.sourceJson, item.importance, item.createdAt, item.updatedAt],
+  })
+  await db.transaction(stmts)
+  await writeVecGuarded(db, item.id, await embedOne(db, item.title, content))
   emitMemoryChanged([key])
 }
 
 /** 归档（文本不变，不重嵌）；目标不存在回 false（mem agent 的 archive op 据此计数跳过） */
 export async function memoryArchive(id: string): Promise<boolean> {
   const db = await getDb()
-  const result = db.prepare("UPDATE mem_items SET status = 'archived', updated_at = ? WHERE id = ?").run(Date.now(), id)
+  const result = await db.prepare("UPDATE mem_items SET status = 'archived', updated_at = ? WHERE id = ?").run(Date.now(), id)
   return Number(result.changes) > 0
 }
 
@@ -614,42 +614,38 @@ export async function noteLesson(
   const db = await getDb()
   const key = projectKey(projectRoot)
   const now = Date.now()
-  const tx1 = db.transaction((): string => {
-    const dup = db
-      .prepare(
-        `SELECT id FROM mem_items
-         WHERE project_key = ? AND category = 'lesson' AND status = 'active' AND title = ?
-         ORDER BY updated_at DESC LIMIT 1`,
-      )
-      .get(key, title) as { id: string } | undefined
-    if (dup) {
-      db.prepare(
-        'UPDATE mem_items SET content = ?, importance = MIN(1.0, importance + 0.1), updated_at = ? WHERE id = ?',
-      ).run(content, now, dup.id)
-      return dup.id
-    }
-    const item: MemoryItem = {
-      id: `mem_${randomUUID()}`,
-      projectKey: key,
-      sessionId,
-      tier: 'short',
-      category: 'lesson',
-      title,
-      content,
-      sourceJson: null,
-      importance: clampImportance(0.5),
-      accessCount: 0,
-      lastAccessedAt: null,
-      status: 'active',
-      supersededBy: null,
-      createdAt: now,
-      updatedAt: now,
-    }
-    insertItemTx(db, item)
-    return item.id
-  })
-  const id = tx1()
-  writeVecGuarded(db, id, await embedOne(db, title, content))
+  const dup = await db
+    .prepare(
+      `SELECT id FROM mem_items
+       WHERE project_key = ? AND category = 'lesson' AND status = 'active' AND title = ?
+       ORDER BY updated_at DESC LIMIT 1`,
+    )
+    .get(key, title) as { id: string } | undefined
+  if (dup) {
+    await db.prepare(
+      'UPDATE mem_items SET content = ?, importance = MIN(1.0, importance + 0.1), updated_at = ? WHERE id = ?',
+    ).run(content, now, dup.id)
+    return dup.id
+  }
+  const item: MemoryItem = {
+    id: `mem_${randomUUID()}`,
+    projectKey: key,
+    sessionId,
+    tier: 'short',
+    category: 'lesson',
+    title,
+    content,
+    sourceJson: null,
+    importance: clampImportance(0.5),
+    accessCount: 0,
+    lastAccessedAt: null,
+    status: 'active',
+    supersededBy: null,
+    createdAt: now,
+    updatedAt: now,
+  }
+  await insertItemTx(db, item)
+  await writeVecGuarded(db, item.id, await embedOne(db, title, content))
   emitMemoryChanged([key])
 }
 
@@ -749,7 +745,7 @@ const REEMBED_BATCH = 64
  *  embed 未就绪 / sqlite-vec 未加载 / 指纹一致 / 首嵌未发生 → 跳过等下次 boot。 */
 export async function maybeStartReembedJob(): Promise<void> {
   const db = await getDb()
-  const row = db.prepare('SELECT value FROM meta WHERE key = ?').get(FINGERPRINT_KEY) as { value: string } | undefined
+  const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get(FINGERPRINT_KEY) as { value: string } | undefined
   const expected = await expectedFingerprint()
   if (!expected) return
   if (!row?.value) return // 首嵌闸门负责写入指纹，无需自愈
@@ -775,7 +771,7 @@ async function runReembedJob(expected: string): Promise<void> {
     .prepare("SELECT id, title, content FROM mem_items WHERE status = 'active' ORDER BY rowid")
     .all() as { id: string; title: string; content: string }[]
   if (items.length === 0) {
-    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, expected)
+    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, expected)
     console.info('[memory] 无 active 条目，指纹直接更新')
     return
   }
@@ -783,15 +779,14 @@ async function runReembedJob(expected: string): Promise<void> {
   const writeBatch = async (batch: { id: string; title: string; content: string }[], label: string): Promise<void> => {
     const vecs = await safeEmbed(batch.map((b) => embedDoc(b.title, b.content)))
     if (vecs.length !== batch.length) throw new Error(`${label}嵌入返回 ${vecs.length}/${batch.length}`)
-    const run = db.transaction(() => {
-      for (let j = 0; j < batch.length; j++) {
-        const vec = vecs[j]
-        if (vec?.length !== EMBED_DIM) throw new Error(`条目 ${batch[j].id} 嵌入维度异常`)
-        db.prepare('DELETE FROM mem_vec WHERE item_id = ?').run(batch[j].id)
-        db.prepare('INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)').run(batch[j].id, vec)
-      }
-    })
-    run()
+    const stmts: { sql: string; params?: unknown[] }[] = []
+    for (let j = 0; j < batch.length; j++) {
+      const vec = vecs[j]
+      if (vec?.length !== EMBED_DIM) throw new Error(`条目 ${batch[j].id} 嵌入维度异常`)
+      stmts.push({ sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [batch[j].id] })
+      stmts.push({ sql: 'INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)', params: [batch[j].id, vec] })
+    }
+    await db.transaction(stmts)
     await new Promise<void>((resolve) => setImmediate(resolve)) // 逐批让路事件循环
   }
   try {
@@ -807,7 +802,7 @@ async function runReembedJob(expected: string): Promise<void> {
       await writeBatch(missing.slice(i, i + REEMBED_BATCH), `补漏第 ${i} 批`)
     }
     if (missing.length > 0) console.info(`[memory] 重嵌补漏：${missing.length} 条`)
-    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, expected)
+    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(FINGERPRINT_KEY, expected)
     console.info(`[memory] 全量重嵌完成：${items.length} 条（补漏 ${missing.length}），指纹已更新为 ${expected}`)
   } catch (e) {
     console.warn(`[memory] 全量重嵌失败，保留旧指纹（下次 boot 重试）：${String(e)}`)
@@ -913,10 +908,6 @@ export async function memoryImportData(raw: string): Promise<{ imported: number;
     throw new Error('文件格式不符：需要 { version: 1, items: [...] }')
   }
   const db = await getDb()
-  const exists = db.prepare('SELECT 1 FROM mem_items WHERE id = ?')
-  const dup = db.prepare(
-    "SELECT 1 FROM mem_items WHERE project_key = ? AND category = ? AND title = ? AND status = 'active'",
-  )
   const insert = db.prepare(
     `INSERT INTO mem_items
        (id, project_key, session_id, tier, category, title, content, source_json, importance,
@@ -946,17 +937,14 @@ export async function memoryImportData(raw: string): Promise<{ imported: number;
     const st = it.status === 'archived' || it.status === 'merged' ? it.status : 'active'
     const sb = typeof it.supersededBy === 'string' ? it.supersededBy : null
     const sj = typeof it.sourceJson === 'string' ? it.sourceJson : null
-    // 单条同步事务：存在性/重复检查与 INSERT 原子（并发蒸馏在两条语句之间插不进来）
-    const tryOne = db.transaction((): boolean => {
-      if (exists.get(it.id)) return false
-      if (dup.get(key, it.category, it.title)) return false
-      insert.run(it.id, key, sid, it.tier, it.category, it.title, it.content, sj, imp, ac, lat, st, sb, now, now)
-      return true
-    })
-    if (!tryOne()) {
-      skipped++
-      continue
-    }
+    // 存在性/重复检查 + 插入（检查在事务外，INSERT 原子）
+    const idExists = await db.prepare('SELECT 1 FROM mem_items WHERE id = ?').get(it.id)
+    if (idExists) { skipped++; continue }
+    const titleDup = await db.prepare(
+      "SELECT 1 FROM mem_items WHERE project_key = ? AND category = ? AND title = ? AND status = 'active'",
+    ).get(key, it.category, it.title)
+    if (titleDup) { skipped++; continue }
+    await insert.run(it.id, key, sid, it.tier, it.category, it.title, it.content, sj, imp, ac, lat, st, sb, now, now)
     touchedKeys.add(key)
     fresh.push({ id: it.id, projectKey: key, sessionId: sid, tier: it.tier, category: it.category, title: it.title, content: it.content, sourceJson: sj, importance: imp, accessCount: 0, lastAccessedAt: null, status: st, supersededBy: sb, createdAt: now, updatedAt: now })
   }
@@ -970,15 +958,14 @@ export async function memoryImportData(raw: string): Promise<{ imported: number;
         console.warn('[memory] 导入批量嵌入失败，剩余条目仅关键词可检索')
         break
       }
-      const run = db.transaction(() => {
-        for (let j = 0; j < batch.length; j++) {
-          if (vecs[j]?.length !== EMBED_DIM) continue // 单条异常只跳过该条向量
-          // embed 途中被并发删除/清空的条目不落向量（防孤儿）
-          if (!db.prepare('SELECT 1 FROM mem_items WHERE id = ?').get(batch[j].id)) continue
-          db.prepare('INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)').run(batch[j].id, vecs[j])
-        }
-      })
-      run()
+      const stmts: { sql: string; params?: unknown[] }[] = []
+      for (let j = 0; j < batch.length; j++) {
+        if (vecs[j]?.length !== EMBED_DIM) continue
+        const exists = await db.prepare('SELECT 1 FROM mem_items WHERE id = ?').get(batch[j].id)
+        if (!exists) continue
+        stmts.push({ sql: 'INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)', params: [batch[j].id, vecs[j]] })
+      }
+      if (stmts.length > 0) await db.transaction(stmts)
       await new Promise<void>((resolve) => setImmediate(resolve))
     }
   }
@@ -1048,15 +1035,15 @@ function rowToItem(row: MemRow): MemoryItem {
   }
 }
 
-function getRow(db: SqliteDb, id: string): MemRow | undefined {
-  return db.prepare('SELECT * FROM mem_items WHERE id = ?').get(id) as MemRow | undefined
+async function getRow(db: SqliteDb, id: string): Promise<MemRow | undefined> {
+  return await db.prepare('SELECT * FROM mem_items WHERE id = ?').get(id) as MemRow | undefined
 }
 
-function fetchRowsByIds(db: SqliteDb, ids: string[]): Map<string, MemRow> {
+async function fetchRowsByIds(db: SqliteDb, ids: string[]): Promise<Map<string, MemRow>> {
   const map = new Map<string, MemRow>()
   if (ids.length === 0) return map
-  const stmt = db.prepare(`SELECT * FROM mem_items WHERE id IN (${ids.map(() => '?').join(',')})`)
-  for (const row of stmt.all(...ids) as MemRow[]) map.set(row.id, row)
+  const rows = await db.prepare(`SELECT * FROM mem_items WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids) as MemRow[]
+  for (const row of rows) map.set(row.id, row)
   return map
 }
 
@@ -1073,25 +1060,25 @@ function scopeCond(key: string | null): { sql: string; param: unknown } {
 }
 
 /** FTS5 短语查询：整串引号包裹防 FTS 查询语法注入（内部引号双写转义），bm25 升序 = 相关性降序 */
-function searchFts(db: SqliteDb, q: string, key: string | null, includeArchived: boolean, limit: number): MemRow[] {
+async function searchFts(db: SqliteDb, q: string, key: string | null, includeArchived: boolean, limit: number): Promise<MemRow[]> {
   const phrase = `"${q.replace(/"/g, '""')}"`
   const statusSql = includeArchived ? '' : " AND mi.status = 'active'"
   const { sql, param } = scopeCond(key)
   const stmt = `SELECT mi.* FROM mem_fts JOIN mem_items mi ON mi.rowid = mem_fts.rowid WHERE mem_fts MATCH ? AND ${sql}${statusSql} ORDER BY bm25(mem_fts) LIMIT ?`
   return param !== undefined
-    ? db.prepare(stmt).all(phrase, param, limit) as MemRow[]
-    : db.prepare(stmt).all(phrase, limit) as MemRow[]
+    ? await db.prepare(stmt).all(phrase, param, limit) as MemRow[]
+    : await db.prepare(stmt).all(phrase, limit) as MemRow[]
 }
 
 /** 1-2 字兜底：LIKE 全表（本工程+global 范围内），%/_/\ 转义防通配符注入 */
-function searchLike(db: SqliteDb, q: string, key: string | null, includeArchived: boolean, limit: number): MemRow[] {
+async function searchLike(db: SqliteDb, q: string, key: string | null, includeArchived: boolean, limit: number): Promise<MemRow[]> {
   const pattern = `%${q.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
   const statusSql = includeArchived ? '' : " AND mi.status = 'active'"
   const { sql, param } = scopeCond(key)
   const stmt = `SELECT * FROM mem_items mi WHERE (mi.title LIKE ? ESCAPE '\\' OR mi.content LIKE ? ESCAPE '\\') AND ${sql}${statusSql} ORDER BY mi.updated_at DESC LIMIT ?`
   return param !== undefined
-    ? db.prepare(stmt).all(pattern, pattern, param, limit) as MemRow[]
-    : db.prepare(stmt).all(pattern, pattern, limit) as MemRow[]
+    ? await db.prepare(stmt).all(pattern, pattern, param, limit) as MemRow[]
+    : await db.prepare(stmt).all(pattern, pattern, limit) as MemRow[]
 }
 
 /** 嵌入文本：标题与正文拼接（与设计稿一致，title 参与语义） */

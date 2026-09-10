@@ -14,6 +14,7 @@ declare global {
     searchFiles: (projectRoot: string, query: string) => Promise<{ files: string[]; truncated: boolean }>
     readTextFile: (projectRoot: string, filePath: string) => Promise<FileContent>
     writeTextFile: (projectRoot: string, filePath: string, content: string) => Promise<void>
+    editTextFile: (projectRoot: string, filePath: string, oldString: string, newString: string) => Promise<{ replaced: number; lineCount: number }>
     snapshotFile: (projectRoot: string, sessionId: string, path: string) => Promise<void>
     listSnapshots: (projectRoot: string) => Promise<Record<string, { ts: number; sessionId: string }>>
     restoreFile: (projectRoot: string, path: string) => Promise<void>
@@ -21,6 +22,7 @@ declare global {
     clearProjectSnapshots: (projectRoot: string) => Promise<void>
     // 消息持久化（SQLite write-through + keyset 分页，见 useChatStore 头注释）
     messagesRecent: (projectRoot: string, limit?: number) => Promise<{ sessionId: string | null; messages: ChatMessage[]; hasMore: boolean; oldestSeq: number | null; total: number }>
+    saveCurrentSession: (projectRoot: string, sessionId: string) => Promise<void>
     messagesBefore: (projectRoot: string, sessionId: string, beforeSeq: number, limit?: number) => Promise<{ messages: ChatMessage[]; hasMore: boolean; oldestSeq: number | null }>
     messageAppend: (projectRoot: string, sessionId: string, message: ChatMessage) => Promise<{ seq: number }>
     messagePatch: (projectRoot: string, sessionId: string, id: string, patch: { content?: string; reasoning?: string | null; tool?: { toolCalls?: ToolCall[]; toolResults?: ToolResultEntry[] }; meta?: MessageMeta | null }) => Promise<void>
@@ -66,6 +68,11 @@ declare global {
     scanSkills: (dirs: string[]) => Promise<SkillMeta[]>
     readSkill: (dirs: string[], skillId: string) => Promise<string | null>
     pickSkillsDir: () => Promise<string | null>
+    projectSkillImportZip: (dir: string, zipPath: string) => Promise<{ ok: boolean; name?: string; error?: string }>
+    projectSkillImportDir: (dir: string, srcDir: string) => Promise<{ ok: boolean; name?: string; count?: number; error?: string }>
+    projectSkillDelete: (dir: string, skillId: string) => Promise<{ ok: boolean; error?: string }>
+    projectSkillPickZip: () => Promise<string | null>
+    projectSkillPickDir: () => Promise<string | null>
 
     // 创建项目 / Git
     createEmptyProject: (parentDir: string, name: string) => Promise<string>
@@ -137,6 +144,7 @@ declare global {
     onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }>
     onCliToolResult: DesktopEventSub<{ requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }>
     onCliAgentEvent: DesktopEventSub<CliAgentEventPayload>
+    onCliRetry: DesktopEventSub<{ requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }>
     onMemoryExtractState: DesktopEventSub<{ projectRoot: string; extracting: boolean }>
     /** 记忆数据变更广播（any 写路径完成后主进程发，all=true 表示 clear('all') 等全库变更） */
     onMemoryChanged: DesktopEventSub<{ all: boolean; projectKeys: string[] }>

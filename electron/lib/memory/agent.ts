@@ -35,6 +35,8 @@ import { buildCliArgs } from '../ai-cli'
 import { registerOnceProc, cancelRunOnce, detectCommand } from '../proc'
 import { emitToAllWindows } from '../emitter'
 import * as service from './service'
+import { parseAgentJson } from './parse'
+export type { AgentCreateOp, AgentPatchOp, AgentArchiveOp, AgentOp, AgentOutput } from './parse'
 
 // ---------- 纪律条款（memU 移植，系统提示原文） ----------
 
@@ -87,231 +89,7 @@ const CONTEXT_TITLES_LIMIT = 40
 const TOOL_SUMMARY_MAX = 80
 
 // ---------- 输出契约（严格 JSON ops） ----------
-
-export interface AgentCreateOp {
-  op: 'create'
-  /** "project"=项目记忆（本工程）；"user"=用户记忆（跨工程通用） */
-  scope?: 'project' | 'user'
-  tier: 'short' | 'long'
-  category: string
-  title: string
-  content: string
-  importance: number
-  sources: string[]
-}
-export interface AgentPatchOp {
-  op: 'patch'
-  targetId: string
-  content: string
-  reason?: string
-}
-export interface AgentArchiveOp {
-  op: 'archive'
-  targetId: string
-  reason?: string
-}
-export type AgentOp = AgentCreateOp | AgentPatchOp | AgentArchiveOp
-
-export interface AgentOutput {
-  ops: AgentOp[]
-  summary: string | null
-}
-
-const CATEGORY_WHITELIST = new Set(['preference', 'fact', 'event', 'lesson', 'skill'])
-
-/** 确定性 scope 判定：preference 类恒 user（本系统定义 preference=用户偏好，项目选型/约定应记 fact）。
- *  其余类别尊重模型显式 scope，缺省/非法落 project。 */
-function resolveScope(category: string, rawScope: unknown, title: string): 'user' | 'project' {
-  if (category === 'preference') {
-    if (rawScope === 'project') console.warn(`[mem-agent] preference 被模型标为 project，已强制 user：${title}`)
-    return 'user'
-  }
-  return rawScope === 'user' ? 'user' : 'project'
-}
-
-/** 剥离尾随逗号（对象/数组末项后）：`{"a":1,}` / `[1,2,]` → 合法 JSON。逐字符扫描，跳过字符串字面量。 */
-function stripTrailingCommas(s: string): string {
-  let out = ''
-  let inStr = false
-  let esc = false
-  for (let i = 0; i < s.length; i++) {
-    const c = s[i]
-    if (inStr) {
-      out += c
-      if (esc) esc = false
-      else if (c === '\\') esc = true
-      else if (c === '"') inStr = false
-      continue
-    }
-    if (c === '"') { inStr = true; out += c; continue }
-    if (c === ',') {
-      let j = i + 1
-      while (j < s.length && /\s/.test(s[j])) j++
-      if (s[j] === '}' || s[j] === ']') continue // 丢弃尾随逗号
-    }
-    out += c
-  }
-  return out
-}
-
-/** 定位文本中首个（字符串之外的）{ 或 [，返回下标与开括号；无则 null */
-function firstOpenBrace(text: string): { idx: number; open: string } | null {
-  let inStr = false
-  let esc = false
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (inStr) {
-      if (esc) esc = false
-      else if (c === '\\') esc = true
-      else if (c === '"') inStr = false
-      continue
-    }
-    if (c === '"') { inStr = true; continue }
-    if (c === '{' || c === '[') return { idx: i, open: c }
-  }
-  return null
-}
-
-/** 从 start 起扫描与 open 匹配的平衡括号，返回闭合下标；未闭合回 -1。跳过字符串内括号。 */
-function scanBalanced(text: string, start: number, open: string): number {
-  const close = open === '{' ? '}' : ']'
-  let depth = 0
-  let inStr = false
-  let esc = false
-  for (let i = start; i < text.length; i++) {
-    const c = text[i]
-    if (inStr) {
-      if (esc) esc = false
-      else if (c === '\\') esc = true
-      else if (c === '"') inStr = false
-      continue
-    }
-    if (c === '"') { inStr = true; continue }
-    if (c === open) depth++
-    else if (c === close) {
-      depth--
-      if (depth === 0) return i
-    }
-  }
-  return -1
-}
-
-/** JSON 解析（含常见 LLM 输出修复）：原始 parse → 尾随逗号/引号/反斜杠修复 → 再 parse。失败回 undefined。 */
-function tryParseJson(slice: string): unknown | undefined {
-  try {
-    return JSON.parse(slice)
-  } catch {
-    const fixed = stripTrailingCommas(slice)
-      .replace(/[“”‘’]/g, "'")
-      .replace(/\\(?!["\\/bfnrt])/g, '/')
-    try {
-      return JSON.parse(fixed)
-    } catch {
-      return undefined
-    }
-  }
-}
-
-/** 从文本提取所有平衡 {...} 对象（跳过字符串内括号），用于残缺/多对象兜底 */
-function extractObjects(text: string): unknown[] {
-  const objs: unknown[] = []
-  let i = 0
-  while (i < text.length) {
-    while (i < text.length && text[i] !== '{') i++
-    if (i >= text.length) break
-    const end = scanBalanced(text, i, '{')
-    if (end === -1) { i++; continue }
-    const p = tryParseJson(text.slice(i, end + 1))
-    if (p !== undefined) objs.push(p)
-    i = end + 1
-  }
-  return objs
-}
-
-/** 解析模型输出：剥 code fence → 定位首个平衡 JSON（对象/数组）→ JSON.parse（含尾随逗号/引号修复）。
- *  平衡块缺失/解析失败 → 逐 {...} 对象提取兜底；仍无 → null（按 no-op 处理，调用方照样推进游标）。
- *  非法 op 条目剔除（create 缺 title/content、patch/archive 缺 targetId、未知 op）并告警计数。 */
-export function parseAgentJson(raw: string): AgentOutput | null {
-  const text = String(raw ?? '').replace(/```(?:json)?/gi, '').replace(/^﻿/, '').trim()
-
-  let parsed: unknown | undefined
-  const head = firstOpenBrace(text)
-  if (head) {
-    const end = scanBalanced(text, head.idx, head.open)
-    if (end !== -1) parsed = tryParseJson(text.slice(head.idx, end + 1))
-  }
-  if (parsed === undefined) {
-    const objs = extractObjects(text)
-    if (objs.length > 0) parsed = objs
-  }
-  if (parsed === undefined) {
-    if (text) console.warn(`[mem-agent] 输出无 JSON 结构，按 no-op 处理：${text.slice(0, 120)}`)
-    return null
-  }
-  // 兼容数组格式 [{...}] 和对象格式 {"ops":[...]}
-  let rawOps: unknown[]
-  let summary: string | null = null
-  if (Array.isArray(parsed)) {
-    rawOps = parsed
-  } else if (parsed && typeof parsed === 'object') {
-    const obj = parsed as Record<string, unknown>
-    rawOps = Array.isArray(obj.ops) ? obj.ops : []
-    summary = typeof obj.summary === 'string' ? obj.summary : null
-  } else {
-    return null
-  }
-  const dropped: string[] = []
-  const ops: AgentOp[] = []
-  for (const item of rawOps) {
-    const op = item as Record<string, unknown>
-    const opType = (op.op ?? op.action) as string | undefined
-    if (opType === 'create') {
-      const title = typeof op.title === 'string' ? op.title.trim() : ''
-      const content = typeof op.content === 'string' ? op.content.trim() : ''
-      if (!title || !content) {
-        dropped.push('create')
-        continue
-      }
-      const category = typeof op.category === 'string' && CATEGORY_WHITELIST.has(op.category) ? op.category : 'fact'
-      ops.push({
-        op: 'create',
-        scope: resolveScope(category, op.scope, title),
-        tier: op.tier === 'short' ? 'short' : 'long',
-        category,
-        title,
-        content,
-        importance:
-          typeof op.importance === 'number' && Number.isFinite(op.importance)
-            ? Math.min(Math.max(op.importance, 0), 1)
-            : 0.5,
-        sources: Array.isArray(op.sources)
-          ? op.sources.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)
-          : [],
-      })
-    } else if (opType === 'patch') {
-      const targetId = typeof op.targetId === 'string' ? op.targetId.trim() : ''
-      const content = typeof op.content === 'string' ? op.content.trim() : ''
-      if (!targetId || !content) {
-        dropped.push('patch')
-        continue
-      }
-      ops.push({ op: 'patch', targetId, content, reason: typeof op.reason === 'string' ? op.reason : undefined })
-    } else if (opType === 'archive') {
-      const targetId = typeof op.targetId === 'string' ? op.targetId.trim() : ''
-      if (!targetId) {
-        dropped.push('archive')
-        continue
-      }
-      ops.push({ op: 'archive', targetId, reason: typeof op.reason === 'string' ? op.reason : undefined })
-    } else {
-      dropped.push(String(opType ?? 'unknown'))
-    }
-  }
-  if (dropped.length > 0) {
-    console.warn(`[mem-agent] ${dropped.length} 个非法 op 已剔除（${[...new Set(dropped)].join(',')}）`)
-  }
-  return { ops, summary: summary?.trim() || null }
-}
+// 类型与解析函数已抽取到 parse.ts（零外部依赖，smoke 可直接 import）
 
 // ---------- 触发状态（游标 / 频控 / 并发） ----------
 
@@ -383,19 +161,19 @@ async function loadPersistedCursor(db: SqliteDb, ck: string): Promise<number | n
   return Number.isFinite(n) && n >= 0 ? n : null
 }
 
-/** 游标推进落盘（同库同步短写，代价可忽略；失败不阻塞提取主流程） */
-function persistCursor(db: SqliteDb, ck: string, cursor: number): void {
+/** 游标推进落盘（异步短写，失败不阻塞提取主流程） */
+async function persistCursor(db: SqliteDb, ck: string, cursor: number): Promise<void> {
   try {
-    db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(CURSOR_META_PREFIX + ck, String(cursor))
+    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(CURSOR_META_PREFIX + ck, String(cursor))
   } catch (e) {
     console.warn(`[mem-agent] 游标持久化失败（下次触发重扫窗口）：${String(e)}`)
   }
 }
 
 /** 游标作废（会话收尾）：内存 + meta 一并清 */
-function deletePersistedCursor(db: SqliteDb, ck: string): void {
+async function deletePersistedCursor(db: SqliteDb, ck: string): Promise<void> {
   try {
-    db.prepare('DELETE FROM meta WHERE key = ?').run(CURSOR_META_PREFIX + ck)
+    await db.prepare('DELETE FROM meta WHERE key = ?').run(CURSOR_META_PREFIX + ck)
   } catch { /* 作废失败无害：最多多扫一次窗口 */ }
 }
 
@@ -482,12 +260,12 @@ export async function sessionEnded(projectRoot: string, sessionId: string): Prom
   const max = await maxSeqOf(db, key, sessionId)
   if (max <= cur.cursor) {
     cursors.delete(ck)
-    deletePersistedCursor(db, ck)
+    await deletePersistedCursor(db, ck)
     return
   }
   await enqueueExtract(projectRoot, sessionId, 'final')
   cursors.delete(ck) // 收尾完成，游标作废
-  deletePersistedCursor(db, ck)
+  await deletePersistedCursor(db, ck)
 }
 
 /** 从 messages 表查该工程最新 session_id（lastSession 缓存未命中时兜底） */
@@ -590,7 +368,7 @@ async function runExtractionInner(projectRoot: string, sessionId: string, trigge
       // 手动触发：cursor 已到末尾但用户要求重新整理 → 重置为 0 全量重扫
       //（重复内容由 applyOps 的去重护栏折叠为 patch，不会产生重复行）
       cursors.set(ck, { cursor: 0, lastRunAt: clock() })
-      persistCursor(db, ck, 0)
+      await persistCursor(db, ck, 0)
       const allRows = db
         .prepare(`SELECT id, seq, role, content, tool_json FROM messages WHERE project_key = ? AND session_id = ? ORDER BY seq ASC`)
         .all(projectKey(projectRoot), sessionId) as TranscriptRow[]
@@ -683,7 +461,7 @@ async function extractWithRows(
   }
   const { applied, skipped } = await applyOps(projectRoot, sessionId, out)
   cursors.set(ck, { cursor: transcript.maxSeq, lastRunAt: clock() })
-  persistCursor(await getDb(), ck, transcript.maxSeq)
+  await persistCursor(await getDb(), ck, transcript.maxSeq)
   const total = out ? out.ops.length : 0
   console.info(
     `[mem-agent] trigger=${trigger} 输入=${rows.length}条(转录${transcript.text.length}字) LLM返回=${raw.length}字 ops=${applied}/${total}${skipped > 0 ? ` 跳过=${skipped}` : ''} summary=${out?.summary ? '有' : '无'}`,
@@ -808,8 +586,7 @@ interface RunContext {
 let disabledLogged = false
 
 /** 启用检查：llmHook 存在 = 测试模式直通。
- *  CLI 模式走 callCliJson 直调（--system-prompt 传蒸馏指令）；API 模式走 API adapter。
- *  蒸馏模型跟随「模型设置」的主模型（cfg.aiModel，用户拍板：不做单独选择）。
+ *  蒸馏跟随主模型调度（aiDispatchMode）：CLI / API。
  *  配置不完整 / Key 缺失 / CLI 未安装静默禁用。 */
 async function resolveRunContext(): Promise<RunContext | null> {
   if (llmHook) return { provider: 'openai', baseUrl: 'test://llm-hook', model: 'test-model', dispatchMode: 'api' }
@@ -874,15 +651,45 @@ async function callLlm(system: string, user: string): Promise<string> {
   return completion.content ?? ''
 }
 
-/** CLI 直调：--system-prompt + --output-format json，spawn 子进程拿完整结果。
+/** CLI 直调：--system-prompt + --output-format json + --json-schema，spawn 子进程拿完整结果。
  *  纪律三件套：readonly 工具白名单（蒸馏绝不持写权限）/ max-turns 1（headless 单轮，不给工具
  *  循环留口子）/ 超时树杀（挂起必须能自愈，否则 per-project 串行队列被永久占死） */
 const MEM_AGENT_CLI_TIMEOUT_MS = 10 * 60_000
 
+/** 记忆蒸馏 JSON Schema（--json-schema 强制输出结构，彻底消除格式偏差） */
+const DISTILL_JSON_SCHEMA = JSON.stringify({
+  type: 'object',
+  properties: {
+    ops: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          op: { type: 'string', enum: ['create', 'patch', 'archive'] },
+          scope: { type: 'string', enum: ['project', 'user'] },
+          tier: { type: 'string', enum: ['short', 'long'] },
+          category: { type: 'string', enum: ['preference', 'fact', 'event', 'lesson', 'skill'] },
+          title: { type: 'string' },
+          content: { type: 'string' },
+          importance: { type: 'number', minimum: 0, maximum: 1 },
+          sources: { type: 'array', items: { type: 'string' } },
+          targetId: { type: 'string' },
+          reason: { type: 'string' },
+        },
+        required: ['op'],
+      },
+    },
+    summary: { type: ['string', 'null'] },
+  },
+  required: ['ops'],
+})
+
 function callCliJson(systemPrompt: string, userMessage: string, model: string): Promise<string> {
   const prompt = `<conversation>\n用户：${userMessage}\n</conversation>`
+  // --bare：跳过 hooks/skills/MCP/CLAUDE.md，蒸馏是纯文本→JSON 单轮任务，不需要这些
   // readonly 档（--allowedTools 白名单，只读）而非 auto（--dangerously-skip-permissions）
-  const args = buildCliArgs(model, 'readonly', { systemPrompt, outputFormat: 'json', maxTurns: 1 })
+  // --json-schema 强制输出结构：ops 字段名、op 类型、category 枚举全部由 schema 保证
+  const args = buildCliArgs(model, 'readonly', { bare: true, systemPrompt, outputFormat: 'json', maxTurns: 1, jsonSchema: DISTILL_JSON_SCHEMA })
   const isWin = process.platform === 'win32'
   const cliCommand = 'claude'
 
@@ -939,16 +746,24 @@ function callCliJson(systemPrompt: string, userMessage: string, model: string): 
           reject(new Error(`CLI 退出码 ${code}：${stderr.slice(-500)}`))
           return
         }
-        // --output-format json 返回一个 JSON 对象，result 字段是最终文本
+        // --output-format json 返回 {"result":"...","structured_output":{...}}
+        // --json-schema 时 structured_output 是 schema 约束的 JSON，优先使用
         try {
-          const parsed = JSON.parse(stdout) as { result?: string; is_error?: boolean }
+          const parsed = JSON.parse(stdout) as { result?: string; structured_output?: unknown; is_error?: boolean }
           if (parsed.is_error) {
             reject(new Error(`CLI 报告错误：${parsed.result ?? '未知'}`))
             return
           }
-          const resultText = parsed.result ?? stdout
-          console.info(`[mem-agent] CLI json 返回 result 长度=${resultText.length}，前300字：${resultText.slice(0, 300)}`)
-          resolve(resultText)
+          // 优先取 structured_output（--json-schema 约束的结构化结果）
+          if (parsed.structured_output && typeof parsed.structured_output === 'object') {
+            const so = JSON.stringify(parsed.structured_output)
+            console.info(`[mem-agent] CLI json 返回 structured_output 长度=${so.length}，前300字：${so.slice(0, 300)}`)
+            resolve(so)
+          } else {
+            const resultText = parsed.result ?? stdout
+            console.info(`[mem-agent] CLI json 返回 result 长度=${resultText.length}，前300字：${resultText.slice(0, 300)}`)
+            resolve(resultText)
+          }
         } catch {
           // 如果不是 JSON，直接用原始输出
           console.info(`[mem-agent] CLI json 返回非JSON，原始输出前300字：${stdout.slice(0, 300)}`)

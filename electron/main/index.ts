@@ -78,6 +78,7 @@ function registerIpc(): void {
   handle('search_files', (_e, p) => fsops.searchFiles(p.projectRoot, p.query))
   handle('read_text_file', (_e, p) => fsops.readTextFile(p.projectRoot, p.path))
   handle('write_text_file', (_e, p) => fsops.writeTextFile(p.projectRoot, p.path, p.content))
+  handle('edit_text_file', (_e, p) => fsops.editTextFile(p.projectRoot, p.path, p.oldString, p.newString))
   handle('create_entry', (_e, p) => fsops.createEntry(p.projectRoot, p.parentDir, p.name, p.isDir))
   handle('rename_entry', (_e, p) => fsops.renameEntry(p.projectRoot, p.path, p.newName))
   handle('delete_entry', (_e, p) => fsops.deleteEntry(p.projectRoot, p.path))
@@ -94,6 +95,7 @@ function registerIpc(): void {
 
   // 会话消息持久化（SQLite）
   handle('messages_recent', (_e, p) => messages.messagesRecent(p.projectRoot, p.limit))
+  handle('save_current_session', (_e, p) => messages.saveCurrentSession(p.projectRoot, p.sessionId))
   handle('messages_before', (_e, p) => messages.messagesBefore(p.projectRoot, p.sessionId, p.beforeSeq, p.limit))
   handle('message_append', (_e, p) => messages.messageAppend(p.projectRoot, p.sessionId, p.message))
   handle('message_patch', (_e, p) => messages.messagePatch(p.projectRoot, p.sessionId, p.id, p.patch))
@@ -173,6 +175,29 @@ function registerIpc(): void {
     if (!win) return null
     const result = await dialog.showOpenDialog(win, {
       title: '选择 Skills 目录',
+      properties: ['openDirectory'],
+    })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+  // 项目级 Skill CRUD
+  handle('project_skill_import_zip', (_e, p) => skills.importSkillFromZip(p.dir, p.zipPath))
+  handle('project_skill_import_dir', (_e, p) => skills.importSkillFromDir(p.dir, p.srcDir))
+  handle('project_skill_delete', (_e, p) => skills.deleteProjectSkill(p.dir, p.skillId))
+  handle('project_skill_pick_zip', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      title: '选择 Skill ZIP 包',
+      filters: [{ name: 'ZIP 压缩包', extensions: ['zip'] }],
+      properties: ['openFile'],
+    })
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+  })
+  handle('project_skill_pick_dir', async (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender)
+    if (!win) return null
+    const result = await dialog.showOpenDialog(win, {
+      title: '选择 Skill 目录',
       properties: ['openDirectory'],
     })
     return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]

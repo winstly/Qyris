@@ -5,6 +5,9 @@
  *   skillsDir/
  *     debug-react/
  *       SKILL.md        ← frontmatter + 指令内容
+ *       scripts/        ← 可选：可执行代码
+ *       references/     ← 可选：文档资料
+ *       assets/         ← 可选：模板和资源
  *     deploy-docker/
  *       SKILL.md
  *
@@ -21,6 +24,11 @@
  */
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import os from 'node:os'
+
+const execFileAsync = promisify(execFile)
 
 export interface SkillMeta {
   /** 唯一标识：子目录名（如 "debug-react"） */
@@ -31,6 +39,8 @@ export interface SkillMeta {
   description: string
   /** 触发关键词列表 */
   triggers: string[]
+  /** 来源标记（渲染层注入，主进程扫描时不填） */
+  scope?: 'user' | 'project'
 }
 
 interface Frontmatter {
@@ -106,31 +116,151 @@ export async function readSkill(dir: string, skillId: string): Promise<string | 
   }
 }
 
-/** 手动解析 YAML frontmatter（避免引入额外依赖） */
+/** 从 ZIP 文件导入 Skill：解压到目标目录（ZIP 内应含一个顶层目录，内含 SKILL.md） */
+export async function importSkillFromZip(destDir: string, zipPath: string): Promise<{ ok: boolean; name?: string; error?: string }> {
+  try {
+    await fsp.mkdir(destDir, { recursive: true })
+    const tmpDir = path.join(destDir, '__import_tmp__')
+    await fsp.mkdir(tmpDir, { recursive: true })
+    try {
+      // 解压：Windows 用 PowerShell，macOS/Linux 用 unzip
+      const isWin = os.platform() === 'win32'
+      if (isWin) {
+        await execFileAsync('powershell', ['-NoProfile', '-Command', `Expand-Archive -Path '${zipPath}' -DestinationPath '${tmpDir}' -Force`])
+      } else {
+        await execFileAsync('unzip', ['-o', zipPath, '-d', tmpDir])
+      }
+      // 定位解压后的 skill 目录
+      const entries = await fsp.readdir(tmpDir, { withFileTypes: true })
+      const skillSrc = entries.length === 1 && entries[0].isDirectory()
+        ? path.join(tmpDir, entries[0].name)   // ZIP 根单目录 → 直接用
+        : tmpDir                                // ZIP 根多文件 → 整个 tmpDir
+      const skillName = skillSrc === tmpDir
+        ? path.basename(zipPath, path.extname(zipPath))
+        : entries[0].name
+      // 验证 SKILL.md 存在
+      const hasSkill = await fsp.access(path.join(skillSrc, SKILL_FILE)).then(() => true, () => false)
+      if (!hasSkill) return { ok: false, error: 'ZIP 中未找到 SKILL.md，不是合法的 Skill 包' }
+      // 移动到目标位置（覆盖已有）
+      const dest = path.join(destDir, skillName)
+      await fsp.rm(dest, { recursive: true, force: true }).catch(() => {})
+      await fsp.rename(skillSrc, dest)
+      return { ok: true, name: skillName }
+    } finally {
+      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+    }
+  } catch (e) {
+    return { ok: false, error: `导入失败：${String(e)}` }
+  }
+}
+
+/** 从本地目录导入 Skill：复制到目标目录。
+ *  兼容两种结构：
+ *    A) srcDir 本身含 SKILL.md → 单个 Skill，目录名即 id
+ *    B) srcDir 的子目录含 SKILL.md → 批量导入所有子 Skill */
+export async function importSkillFromDir(destDir: string, srcDir: string): Promise<{ ok: boolean; name?: string; count?: number; error?: string }> {
+  try {
+    await fsp.mkdir(destDir, { recursive: true })
+
+    // 结构 A：srcDir 本身含 SKILL.md
+    try {
+      await fsp.access(path.join(srcDir, SKILL_FILE))
+      const skillName = path.basename(srcDir)
+      const dest = path.join(destDir, skillName)
+      await fsp.rm(dest, { recursive: true, force: true }).catch(() => {})
+      await fsp.cp(srcDir, dest, { recursive: true })
+      return { ok: true, name: skillName, count: 1 }
+    } catch { /* 不含 SKILL.md，继续检查子目录 */ }
+
+    // 结构 B：扫描子目录中含 SKILL.md 的
+    const entries = await fsp.readdir(srcDir, { withFileTypes: true })
+    let imported = 0
+    let firstName: string | undefined
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      try {
+        await fsp.access(path.join(srcDir, entry.name, SKILL_FILE))
+      } catch { continue }
+      const dest = path.join(destDir, entry.name)
+      await fsp.rm(dest, { recursive: true, force: true }).catch(() => {})
+      await fsp.cp(path.join(srcDir, entry.name), dest, { recursive: true })
+      imported++
+      if (!firstName) firstName = entry.name
+    }
+    if (imported === 0) {
+      return { ok: false, error: '所选目录及子目录中均未找到 SKILL.md' }
+    }
+    return { ok: true, name: firstName, count: imported }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
+/** 删除指定目录下的 Skill（整个子目录） */
+export async function deleteProjectSkill(dir: string, skillId: string): Promise<{ ok: boolean; error?: string }> {
+  if (!skillId || skillId.includes('/') || skillId.includes('\\') || skillId.includes('..')) {
+    return { ok: false, error: '无效的 Skill id' }
+  }
+  const skillDir = path.join(dir, skillId)
+  // 双重校验：规范化后确保仍在 dir 内（skillId 校验 + 路径前缀）
+  const normDir = path.resolve(dir)
+  const normTarget = path.resolve(skillDir)
+  if (!normTarget.startsWith(normDir + path.sep) && normTarget !== normDir) {
+    return { ok: false, error: '路径越界' }
+  }
+  try {
+    await fsp.rm(skillDir, { recursive: true, force: true })
+    return { ok: true }
+  } catch (e) {
+    return { ok: false, error: String(e) }
+  }
+}
+
+/** 手动解析 YAML frontmatter（避免引入额外依赖）。
+ *  支持：连字符 key、空值行、嵌套对象、多行标量（>/|）。 */
 function parseFrontmatter(raw: string): Frontmatter {
   const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)
   if (!match) return {}
-  const block = match[1]
+  const lines = match[1].split('\n')
   const result: Frontmatter = {}
-  for (const line of block.split('\n')) {
-    const m = line.match(/^(\w+)\s*:\s*(.+)$/)
-    if (!m) continue
-    const key = m[1].trim()
-    let val: string = m[2].trim()
-    // 去引号
-    if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-      val = val.slice(1, -1)
-    }
-    if (key === 'name') result.name = val
-    else if (key === 'description') result.description = val
-    else if (key === 'triggers') {
-      // 支持 [a, b, c] 和单值
-      if (val.startsWith('[') && val.endsWith(']')) {
-        result.triggers = val.slice(1, -1).split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i]
+    // 顶层 key（支持字母、数字、连字符、下划线）
+    const m = line.match(/^([\w-]+)\s*:\s*(.*)$/)
+    if (m) {
+      const key = m[1].trim()
+      let val: string = m[2].trim()
+      // 多行标量：> (folded) 或 | (literal)
+      if (val === '>' || val === '|' || val === '>-' || val === '|-') {
+        const folded = val.startsWith('>')
+        const buf: string[] = []
+        i++
+        while (i < lines.length && /^\s+/.test(lines[i])) {
+          buf.push(lines[i].replace(/^  /, ''))
+          i++
+        }
+        val = folded ? buf.join(' ').replace(/\n\s+/g, ' ').trim() : buf.join('\n').trim()
       } else {
-        result.triggers = [val]
+        // 去引号
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1)
+        }
+        i++
       }
+      if (key === 'name') result.name = val || undefined
+      else if (key === 'description') result.description = val || undefined
+      else if (key === 'triggers') {
+        if (val.startsWith('[') && val.endsWith(']')) {
+          result.triggers = val.slice(1, -1).split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
+        } else if (val) {
+          result.triggers = [val]
+        }
+      }
+      continue
     }
+    // 缩进行（嵌套对象子字段 / 漏网的多行续行）→ 跳过
+    i++
   }
   return result
 }

@@ -13,6 +13,7 @@ import { api } from './desktop'
 import { TOOL_DEFS } from './ai'
 import { useProjectStore } from '@/store/useProjectStore'
 import { useSettingsStore } from '@/store/useSettingsStore'
+import { useAppStore } from '@/store/useAppStore'
 import { useStartupStore } from '@/store/useStartupStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useBuildStore } from '@/store/useBuildStore'
@@ -129,6 +130,25 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         return {
           result: `已写入 ${display}（${content.split('\n').length} 行），文件树与编辑器已刷新。`,
           summary: `已写入 ${display}`,
+        }
+      }
+
+      case 'edit_file': {
+        const display = String(args.path ?? '')
+        const path = resolve(root, display)
+        const oldString = String(args.old_string ?? '')
+        const newString = String(args.new_string ?? '')
+        if (!oldString) {
+          return { result: '错误：old_string 不能为空。', summary: 'old_string 为空' }
+        }
+        const sessionId = (project ? useChatStore.getState().byProject[project]?.sessionId : selectCurrentChat(useChatStore.getState()).sessionId) ?? ''
+        await api.snapshotFile(root, sessionId, path).catch(() => {})
+        const r = await api.editTextFile(root, path, oldString, newString)
+        await useFileStore.getState().notifyExternalChange([path])
+        useFileStore.getState().addSnapshot(path, sessionId)
+        return {
+          result: `已在 ${display} 中替换 ${r.replaced} 处（${r.lineCount} 行），文件树与编辑器已刷新。`,
+          summary: `已编辑 ${display}`,
         }
       }
 
@@ -317,13 +337,17 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
           return { result: '错误：skill_id 不能为空。', summary: 'skill_id 为空' }
         }
         const { skillMetas, skillsDirs } = useSettingsStore.getState()
-        if (!skillsDirs.length) {
+        const projectSkillsDirs = useAppStore.getState().projectSkillsDirs
+        // 合并三源：项目默认 + 项目自定义 + 全局
+        const allDirs = [...projectSkillsDirs, ...skillsDirs.filter((d) => !projectSkillsDirs.includes(d))]
+        if (!allDirs.length) {
           return { result: '错误：未配置 Skills 目录。请在设置 → 系统设置中配置。', summary: '未配置 Skills 目录' }
         }
         // 多目录按序查找首个命中（去重/查找序规则统一在主进程 skills.ts，单次 IPC）
-        const content = await api.readSkill(skillsDirs, skillId)
+        const content = await api.readSkill(allDirs, skillId)
         if (content === null) {
-          const known = skillMetas.map((m) => m.id).join('、') || '（无）'
+          const projectMetas = useAppStore.getState().projectSkillMetas
+          const known = [...projectMetas, ...skillMetas].map((m) => m.id).join('、') || '（无）'
           return { result: `错误：Skill「${skillId}」不存在或无法读取。可用 Skills：${known}`, summary: `Skill 不存在：${skillId}` }
         }
         return { result: content, summary: `已加载 Skill：${skillId}` }

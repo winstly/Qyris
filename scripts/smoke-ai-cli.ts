@@ -9,6 +9,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:f
 import os from 'node:os'
 import path from 'node:path'
 import { serializeConversation, buildCliSystemPrompt, buildCliArgs, claudeCliChatStream, setCliCommandForTest, extractNextSkill, extractStartCommands, extractSkillIds, resolveSkillBlock, buildSkillIndex } from '../electron/lib/ai-cli'
+import { parseAgentJson } from '../electron/lib/memory/parse'
 import { registerWindow } from '../electron/lib/emitter'
 
 let failures = 0
@@ -99,14 +100,22 @@ async function main(): Promise<void> {
   assert(autoArgs.includes('--include-partial-messages'), '--include-partial-messages 增量分片')
   assert(autoArgs.includes('--max-turns') && autoArgs.includes('60'), 'max-turns=60 防失控')
   assert(!autoArgs.includes('--model'), '不传 --model（CLI 自带模型配置）')
-  assert(autoArgs.includes('--dangerously-skip-permissions'), 'auto 档跳过权限确认')
+  assert(autoArgs.includes('--dangerously-skip-permissions'), 'auto 档 --dangerously-skip-permissions 完全跳过审批')
+  assert(!autoArgs.includes('--bare'), '默认不传 --bare（需显式 opts.bare）')
   assert(autoArgs.every((a) => !a.includes(' ')), 'argv 全部无空格（cmd.exe /C 拼接零引号风险）')
+  // chat 模式：appendSystemPrompt（注入 adapter 指令，不用 --bare 保留 CLI 模型配置）
+  const chatArgs = buildCliArgs('sonnet', 'auto', { appendSystemPrompt: '你是轻驭 agent' })
+  assert(!chatArgs.includes('--bare'), 'chat 档不用 --bare（保留 CLI 模型配置）')
+  const asp = chatArgs.indexOf('--append-system-prompt')
+  assert(asp >= 0 && chatArgs[asp + 1] === '你是轻驭 agent', '--append-system-prompt 注入 adapter 指令')
+  assert(!chatArgs.includes('--system-prompt'), 'appendSystemPrompt 不触发 --system-prompt')
   const roArgs = buildCliArgs('sonnet', 'readonly')
   const ai = roArgs.indexOf('--allowedTools')
   assert(ai >= 0 && roArgs[ai + 1] === 'Read,Glob,Grep,LS,TodoWrite,WebSearch,WebFetch', 'readonly 档白名单逗号单参数')
   assert(!roArgs.includes('--dangerously-skip-permissions'), 'readonly 档不跳权限')
-  // mem agent 蒸馏直调（callCliJson）：readonly + json 输出 + 单轮
-  const distillArgs = buildCliArgs('sonnet', 'readonly', { systemPrompt: '蒸馏指令', outputFormat: 'json', maxTurns: 1 })
+  // mem agent 蒸馏直调（callCliJson）：bare + readonly + json 输出 + 单轮
+  const distillArgs = buildCliArgs('sonnet', 'readonly', { bare: true, systemPrompt: '蒸馏指令', outputFormat: 'json', maxTurns: 1 })
+  assert(distillArgs.includes('--bare'), '蒸馏档 --bare 跳过 hooks/skills/MCP')
   const di = distillArgs.indexOf('--max-turns')
   assert(di >= 0 && distillArgs[di + 1] === '1', 'max-turns 可覆盖（蒸馏 headless 单轮）')
   assert(distillArgs.includes('--system-prompt') && distillArgs.includes('蒸馏指令'), 'system-prompt 注入蒸馏指令')
@@ -198,11 +207,39 @@ async function main(): Promise<void> {
     rmSync(skillDir, { recursive: true, force: true })
   }
 
+  console.log('parseAgentJson：LLM 偏差兼容')
+  // 标准格式
+  const std = parseAgentJson('{"ops":[{"op":"create","scope":"user","tier":"long","category":"preference","title":"t","content":"c","importance":0.8,"sources":["#1"]}],"summary":"s"}')
+  assert(std !== null && std.ops.length === 1 && std.ops[0].op === 'create' && std.summary === 's', '标准 ops 格式正常解析')
+  // LLM 偏差：actions 替代 ops + add 替代 create（真实案例）
+  const actionsAdd = parseAgentJson('```json\n{"actions":[{"op":"add","category":"fact","title":"编码习惯","content":"用户偏好规范化编程","importance":0.7,"sources":["#13"]}]}\n```')
+  assert(actionsAdd !== null && actionsAdd.ops.length === 1 && actionsAdd.ops[0].op === 'create', 'actions+add 偏差：映射为 ops+create')
+  assert(actionsAdd!.ops[0].title === '编码习惯' && actionsAdd!.ops[0].category === 'fact', 'actions+add 偏差：字段值正确提取')
+  // LLM 偏差：operations 替代 ops + update 替代 patch
+  const opsUpdate = parseAgentJson('{"operations":[{"op":"update","targetId":"mem_1","content":"新内容","reason":"合并"}]}')
+  assert(opsUpdate !== null && opsUpdate.ops.length === 1 && opsUpdate.ops[0].op === 'patch', 'operations+update 偏差：映射为 ops+patch')
+  // LLM 偏差：delete 替代 archive
+  const delArchive = parseAgentJson('{"ops":[{"op":"delete","targetId":"mem_2","reason":"过时"}]}')
+  assert(delArchive !== null && delArchive.ops.length === 1 && delArchive.ops[0].op === 'archive', 'delete 偏差：映射为 archive')
+  // CLI --json-schema 结构化输出（structured_output 包装）
+  const schemaOut = parseAgentJson('{"result":"ok","structured_output":{"ops":[{"op":"create","title":"t2","content":"c2"}],"summary":"schema"}}')
+  assert(schemaOut !== null && schemaOut.ops.length === 1 && schemaOut.summary === 'schema', 'structured_output 包装正确解包')
+  // code fence 剥离
+  const fenced = parseAgentJson('```json\n{"ops":[{"op":"create","title":"t3","content":"c3"}]}\n```')
+  assert(fenced !== null && fenced.ops.length === 1, 'markdown code fence 正确剥离')
+  // 纯文本无 JSON → null
+  assert(parseAgentJson('这是一段纯文本回复') === null, '纯文本无 JSON 返回 null')
+  // ops 为空数组
+  const emptyOps = parseAgentJson('{"ops":[],"summary":null}')
+  assert(emptyOps !== null && emptyOps.ops.length === 0 && emptyOps.summary === null, '空 ops 合法返回')
+
   console.log('假 claude 全链路（罐装 NDJSON）：')
   const dir = mkdtempSync(path.join(os.tmpdir(), 'qyris-cli-smoke-'))
   try {
     const canned = [
       JSON.stringify({ type: 'system', subtype: 'init', session_id: 'sess-test-1' }),
+      // api_retry 事件：模拟 API 可重试错误（rate_limit）
+      JSON.stringify({ type: 'system', subtype: 'api_retry', attempt: 1, max_retries: 3, retry_delay_ms: 2000, error: 'rate_limit', error_status: 429, uuid: 'retry-1', session_id: 'sess-test-1' }),
       JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: 'step1 ' } } }),
       JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello ' } } }),
       JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'world' } } }),
@@ -265,6 +302,13 @@ async function main(): Promise<void> {
     assert((completion.reasoning ?? '').includes('step1 '), 'thinking 增量进 reasoning')
     // 工具指令/结果与子 agent 转录经 cli-tool-event / cli-tool-result / cli-agent-event 分离，见下方断言
     assert((completion.reasoning ?? '').includes('3 轮') && (completion.reasoning ?? '').includes('$0.0042'), '完成元信息（轮数/费用）')
+
+    console.log('cli-retry（api_retry 事件）：')
+    const retries = events.filter((e) => e.channel === 'cli-retry' && e.payload.requestId === 'req-smoke-1')
+    assert(retries.length === 1, `cli-retry 事件数=1（实际 ${retries.length}）`)
+    const r = retries[0].payload
+    assert(r.attempt === 1 && r.maxRetries === 3 && r.retryDelayMs === 2000, 'api_retry 字段透传（attempt/maxRetries/retryDelayMs）')
+    assert(r.error === 'rate_limit' && r.errorStatus === 429, 'api_retry 错误类型与状态码透传')
 
     console.log('cli-tool-event / cli-tool-result / cli-agent-event：')
     const toolEvents = events.filter((e) => e.channel === 'cli-tool-event' && e.payload.requestId === 'req-smoke-1')

@@ -27,6 +27,7 @@ const desktopAPI = {
     ipcRenderer.invoke('search_files', { projectRoot, query }) as Promise<{ files: string[]; truncated: boolean }>,
   readTextFile: (projectRoot: string, filePath: string) => ipcRenderer.invoke('read_text_file', { projectRoot, path: filePath }),
   writeTextFile: (projectRoot: string, filePath: string, content: string) => ipcRenderer.invoke('write_text_file', { projectRoot, path: filePath, content }),
+  editTextFile: (projectRoot: string, filePath: string, oldString: string, newString: string) => ipcRenderer.invoke('edit_text_file', { projectRoot, path: filePath, oldString, newString }) as Promise<{ replaced: number; lineCount: number }>,
   snapshotFile: (projectRoot: string, sessionId: string, path: string) => ipcRenderer.invoke('snapshot_file', { projectRoot, sessionId, path }),
   listSnapshots: (projectRoot: string) =>
     ipcRenderer.invoke('list_snapshots', { projectRoot }) as Promise<Record<string, { ts: number; sessionId: string }>>,
@@ -37,6 +38,8 @@ const desktopAPI = {
   // 会话消息持久化（SQLite；载荷类型与 electron/lib/messages 对齐）
   messagesRecent: (projectRoot: string, limit?: number) =>
     ipcRenderer.invoke('messages_recent', { projectRoot, limit: limit ?? null }) as Promise<MessagesRecentPage>,
+  saveCurrentSession: (projectRoot: string, sessionId: string) =>
+    ipcRenderer.invoke('save_current_session', { projectRoot, sessionId }) as Promise<void>,
   messagesBefore: (projectRoot: string, sessionId: string, beforeSeq: number, limit?: number) =>
     ipcRenderer.invoke('messages_before', { projectRoot, sessionId, beforeSeq, limit: limit ?? null }) as Promise<MessagesPage>,
   messageAppend: (projectRoot: string, sessionId: string, message: unknown) =>
@@ -135,6 +138,11 @@ const desktopAPI = {
   scanSkills: (dirs: string[]) => ipcRenderer.invoke('scan_skills', { dirs }) as Promise<{ id: string; name: string; description: string; triggers: string[] }[]>,
   readSkill: (dirs: string[], skillId: string) => ipcRenderer.invoke('read_skill', { dirs, skillId }) as Promise<string | null>,
   pickSkillsDir: () => ipcRenderer.invoke('pick_skills_dir') as Promise<string | null>,
+  projectSkillImportZip: (dir: string, zipPath: string) => ipcRenderer.invoke('project_skill_import_zip', { dir, zipPath }) as Promise<{ ok: boolean; name?: string; error?: string }>,
+  projectSkillImportDir: (dir: string, srcDir: string) => ipcRenderer.invoke('project_skill_import_dir', { dir, srcDir }) as Promise<{ ok: boolean; name?: string; count?: number; error?: string }>,
+  projectSkillDelete: (dir: string, skillId: string) => ipcRenderer.invoke('project_skill_delete', { dir, skillId }) as Promise<{ ok: boolean; error?: string }>,
+  projectSkillPickZip: () => ipcRenderer.invoke('project_skill_pick_zip') as Promise<string | null>,
+  projectSkillPickDir: () => ipcRenderer.invoke('project_skill_pick_dir') as Promise<string | null>,
 
   // 创建项目 / Git
   createEmptyProject: (parentDir: string, name: string) => ipcRenderer.invoke('create_empty_project', { parentDir, name }) as Promise<string>,
@@ -185,6 +193,8 @@ const desktopAPI = {
   // 载荷结构与 src/types 的 CliAgentEventPayload 保持一致（electron tsconfig 不含 src，故此处内联）
   onCliAgentEvent: (cb: (payload: { requestId: string; parentId: string; kind: 'text' | 'tool' | 'tool-result'; id?: string; name?: string; arguments?: string; text?: string; content?: string; isError?: boolean }) => void): Unsubscribe =>
     subscribe('cli-agent-event', cb),
+  onCliRetry: (cb: (payload: { requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }) => void): Unsubscribe =>
+    subscribe('cli-retry', cb),
   onMemoryExtractState: (cb: (payload: { projectRoot: string; extracting: boolean }) => void): Unsubscribe =>
     subscribe('memory-extract-state', cb),
   onMemoryChanged: (cb: (payload: { all: boolean; projectKeys: string[] }) => void): Unsubscribe =>

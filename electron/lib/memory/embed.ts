@@ -66,6 +66,10 @@ export async function warmupEmbed(): Promise<boolean> {
 /** 全局嵌入串行队列：单主进程内多工程检索/写入会并发触发 embedTexts，而底层是同一个
  *  WASM pipeline（单飞加载保证唯一）——并发调用在这里排队串行，避免可重入与重复推理。 */
 let embedChain: Promise<unknown> = Promise.resolve()
+/** 当前正在执行 embedTextsInner 的调用数（嵌入繁忙时检索层可跳过向量路避免阻塞 IPC） */
+let embedBusyCount = 0
+/** 是否有嵌入正在执行（检索层据此决定是否跳过向量路） */
+export function isEmbedBusy(): boolean { return embedBusyCount > 0 }
 
 /** 批量嵌入：空输入回空数组；重复文本去重共享；降级态快速失败回 []（调用方按不可用处理）。
  *  并发调用经全局队列串行执行（结果语义与单次调用一致，仅顺序化）。 */
@@ -79,34 +83,39 @@ export async function embedTexts(texts: string[]): Promise<Float32Array[]> {
 async function embedTextsInner(texts: string[]): Promise<Float32Array[]> {
   if (texts.length === 0) return []
   if (state === 'degraded') return []
-  let extractor: Extractor
+  embedBusyCount++
   try {
-    extractor = await loadExtractor()
-  } catch (e) {
-    degrade(`模型加载失败：${String(e)}`)
-    return []
-  }
-  try {
-    // 去重：同文本只算一次，结果按下标共享
-    const unique: string[] = []
-    const indexOf = new Map<string, number>()
-    for (const t of texts) {
-      let i = indexOf.get(t)
-      if (i === undefined) {
-        i = unique.push(t) - 1
-        indexOf.set(t, i)
-      }
+    let extractor: Extractor
+    try {
+      extractor = await loadExtractor()
+    } catch (e) {
+      degrade(`模型加载失败：${String(e)}`)
+      return []
     }
-    const output = await extractor(unique, { pooling: 'cls', normalize: true })
-    if (output.dims.length !== 2) throw new Error(`异常输出维度：[${output.dims.join(',')}]`)
-    const [rows, dim] = output.dims
-    if (rows !== unique.length || dim !== EMBED_DIM) throw new Error(`维度不匹配：期望 ${unique.length}x${EMBED_DIM}，实得 ${output.dims.join('x')}`)
-    // 同文本共享同一份结果引用（paid for once：算一次、处处复用，不做逐份拷贝）
-    const uniqueVecs = unique.map((_, r) => output.data.slice(r * EMBED_DIM, (r + 1) * EMBED_DIM))
-    return texts.map((t) => uniqueVecs[indexOf.get(t) as number])
-  } catch (e) {
-    degrade(`推理失败：${String(e)}`)
-    return []
+    try {
+      // 去重：同文本只算一次，结果按下标共享
+      const unique: string[] = []
+      const indexOf = new Map<string, number>()
+      for (const t of texts) {
+        let i = indexOf.get(t)
+        if (i === undefined) {
+          i = unique.push(t) - 1
+          indexOf.set(t, i)
+        }
+      }
+      const output = await extractor(unique, { pooling: 'cls', normalize: true })
+      if (output.dims.length !== 2) throw new Error(`异常输出维度：[${output.dims.join(',')}]`)
+      const [rows, dim] = output.dims
+      if (rows !== unique.length || dim !== EMBED_DIM) throw new Error(`维度不匹配：期望 ${unique.length}x${EMBED_DIM}，实得 ${output.dims.join('x')}`)
+      // 同文本共享同一份结果引用（paid for once：算一次、处处复用，不做逐份拷贝）
+      const uniqueVecs = unique.map((_, r) => output.data.slice(r * EMBED_DIM, (r + 1) * EMBED_DIM))
+      return texts.map((t) => uniqueVecs[indexOf.get(t) as number])
+    } catch (e) {
+      degrade(`推理失败：${String(e)}`)
+      return []
+    }
+  } finally {
+    embedBusyCount--
   }
 }
 

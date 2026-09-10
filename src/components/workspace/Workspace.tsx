@@ -3,9 +3,10 @@ import { PreviewTab } from './PreviewTab'
 import { FilesTab } from './FilesTab'
 import { CreateProjectDialog } from './CreateProjectDialog'
 import { MemoryPanel } from '@/components/memory/MemoryPanel'
-import { IconEye, IconFile, IconLayers } from '@/components/common/icons'
+import { ProjectSkillsPanel } from './ProjectSkillsSection'
+import { IconEye, IconFile, IconLayers, IconTerminal } from '@/components/common/icons'
 
-/** 工作区：「文件 / 预览 / 记忆（项目记忆）」三个 Tab（项目列表已移至左侧折叠面板） */
+/** 工作区：「文件 / 预览 / 记忆（项目记忆） / 技能（项目 Skill）」四个 Tab（项目列表已移至左侧折叠面板） */
 export function Workspace() {
   const activeTab = useAppStore((s) => s.activeTab)
   const setTab = useAppStore((s) => s.setTab)
@@ -40,6 +41,14 @@ export function Workspace() {
         >
           <IconLayers size={13} /> 记忆
         </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === 'skills'}
+          className={`workspace__tab ${activeTab === 'skills' ? 'workspace__tab--active' : ''}`}
+          onClick={() => setTab('skills')}
+        >
+          <IconTerminal size={13} /> 技能
+        </button>
       </div>
 
       <CreateProjectDialog open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
@@ -53,6 +62,9 @@ export function Workspace() {
         </div>
         <div className={`pane ${activeTab === 'memory' ? 'pane--active' : ''}`}>
           <MemoryPanel />
+        </div>
+        <div className={`pane ${activeTab === 'skills' ? 'pane--active' : ''}`}>
+          <ProjectSkillsPanel />
         </div>
       </div>
     </div>

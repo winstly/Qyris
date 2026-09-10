@@ -104,6 +104,8 @@ export interface SkillMeta {
   description: string
   /** 触发关键词列表 */
   triggers: string[]
+  /** 来源：user=全局用户级（settings 配置目录），project=项目级（.qyris/skills/ 或项目追加目录） */
+  scope?: 'user' | 'project'
 }
 
 export interface AppConfig {
@@ -124,6 +126,8 @@ export interface AppConfig {
   skillsDir?: string | null
   /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「全部运行」直接执行） */
   startupCommands?: Record<string, StartCommand[]>
+  /** 项目绝对路径 → 项目级 Skill 目录列表（用户在技能面板添加的额外目录） */
+  projectSkillsDirsMap?: Record<string, string[]>
   /** 记忆整理触发轮次：累计多少轮 AI 回复后滚动提取（2..60），缺省 6 */
   memExtractRounds?: number
 }

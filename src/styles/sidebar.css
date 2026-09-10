@@ -208,3 +208,68 @@
   font-size: 10px;
   gap: 5px;
 }
+
+/* ============ 项目 Skill 条目（侧边栏内） ============ */
+
+.user-mem__skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: var(--radius-sm);
+  transition: background var(--motion-fast);
+}
+.user-mem__skill-row:hover { background: var(--row-hover); }
+
+.user-mem__skill-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.user-mem__skill-name {
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-mem__skill-desc {
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.user-mem__skill-actions {
+  display: flex;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity var(--motion-fast);
+}
+.user-mem__skill-row:hover .user-mem__skill-actions { opacity: 1; }
+
+.user-mem__skill-dir {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 8px;
+  font-size: 10px;
+  color: var(--muted);
+  border-top: 1px solid var(--edge-hair);
+  margin-top: 4px;
+}
+.user-mem__skill-dir-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

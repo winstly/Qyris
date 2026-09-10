@@ -199,7 +199,7 @@ export async function runProject(projectRoot: string, name: unknown, command: st
   const key = slotKey(projectRoot, svcName)
   takeAndKillOne(key)
 
-  const avail = detectCommand(command)
+  const avail = await detectCommand(command)
   if (avail === false) {
     throw new Error(
       `启动失败：未找到命令「${firstToken(command)}」。该工具可能未安装，或安装后未进入当前 PATH。` +
@@ -273,31 +273,29 @@ export function firstToken(command: string): string {
   return t.split(/\s+/)[0] ?? ''
 }
 
-/** 检测命令是否可找到。null=检测失败 */
-export function detectCommand(command: string): boolean | null {
+/** 检测命令是否可找到（async：避免 spawnSync 阻塞事件循环）。null=检测失败 */
+export async function detectCommand(command: string): Promise<boolean | null> {
   const token = firstToken(command)
   if (!token) return null
-  try {
-    if (process.platform === 'win32') {
-      if (CMD_BUILTINS.has(token.toLowerCase())) return true
-      const res = spawnSync('where.exe', [token], {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: 5000,
-        env: buildChildEnv(),
+  if (process.platform === 'win32' && CMD_BUILTINS.has(token.toLowerCase())) return true
+  return new Promise((resolve) => {
+    try {
+      const isWin = process.platform === 'win32'
+      const child = spawn(
+        isWin ? 'where.exe' : 'sh',
+        isWin ? [token] : ['-c', `command -v -- '${token.replace(/'/g, `'\\''`)}'`],
+        { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: buildChildEnv() },
+      )
+      const timer = setTimeout(() => { child.kill(); resolve(null) }, 5000)
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        resolve(code === 0 ? true : code === 1 ? false : null)
       })
-      if (res.status === 0) return true
-      if (res.status === 1) return false
-      return null
+      child.on('error', () => { clearTimeout(timer); resolve(null) })
+    } catch {
+      resolve(null)
     }
-    const quoted = `'${token.replace(/'/g, `'\\''`)}'`
-    const res = spawnSync('sh', ['-c', `command -v -- ${quoted}`], { encoding: 'utf8', timeout: 5000 })
-    if (res.status === 0) return true
-    if (res.status === 1) return false
-    return null
-  } catch {
-    return null
-  }
+  })
 }
 
 /** HTTP 健康探测：GET 目标地址（3s 超时）。2xx-4xx 都算服务可响应（4xx 常见于需鉴权的管理端），
@@ -319,46 +317,54 @@ export async function checkUrlHealthy(url: string): Promise<boolean> {
 
 // ---------- 端口占用查询 ----------
 
-/** tasklist 查 PID 对应进程名（Windows） */
-function winImageName(pid: number): string {
-  const res = spawnSync('tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], {
-    encoding: 'utf8',
-    windowsHide: true,
-    timeout: 5000,
+/** spawn 捕获 stdout（async，timeout ms 后 kill）；失败回空字符串 */
+function spawnCapture(cmd: string, args: string[], timeout: number): Promise<string> {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn(cmd, args, { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      let out = ''
+      child.stdout?.on('data', (d: string) => { out += d })
+      const timer = setTimeout(() => { child.kill(); resolve('') }, timeout)
+      child.on('close', (code) => {
+        clearTimeout(timer)
+        resolve(code === 0 ? out : '')
+      })
+      child.on('error', () => { clearTimeout(timer); resolve('') })
+    } catch {
+      resolve('')
+    }
   })
-  if (res.status !== 0 || !res.stdout) return 'unknown'
-  const m = res.stdout.match(/^"([^"]+)"/)
+}
+
+/** tasklist 查 PID 对应进程名（async） */
+async function winImageName(pid: number): Promise<string> {
+  const stdout = await spawnCapture('tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'], 5000)
+  if (!stdout) return 'unknown'
+  const m = stdout.match(/^"([^"]+)"/)
   return m ? m[1] : 'unknown'
 }
 
-/** 查询端口的监听进程：Windows 解析 netstat -ano、unix 用 lsof；查不到返回 null */
-export function portOwner(port: number): { pid: number; name: string } | null {
+/** 查询端口的监听进程（async：避免 spawnSync 阻塞事件循环）；查不到返回 null */
+export async function portOwner(port: number): Promise<{ pid: number; name: string } | null> {
   if (!Number.isInteger(port) || port <= 0 || port > 65535) return null
   try {
     if (process.platform === 'win32') {
-      const res = spawnSync('netstat.exe', ['-ano', '-p', 'tcp'], {
-        encoding: 'utf8',
-        windowsHide: true,
-        timeout: 5000,
-      })
-      if (res.status !== 0 || !res.stdout) return null
+      const stdout = await spawnCapture('netstat.exe', ['-ano', '-p', 'tcp'], 5000)
+      if (!stdout) return null
       // 行格式：TCP  0.0.0.0:3000  0.0.0.0:0  LISTENING  1234（IPv6 本地地址形如 [::]:3000，endsWith 同样命中）
-      for (const line of res.stdout.split('\n')) {
+      for (const line of stdout.split('\n')) {
         const cols = line.trim().split(/\s+/)
         if (cols.length < 5 || cols[0] !== 'TCP' || cols[3] !== 'LISTENING') continue
         const pid = Number(cols[4])
         if ((cols[1] ?? '').endsWith(`:${port}`) && Number.isInteger(pid) && pid > 0) {
-          return { pid, name: winImageName(pid) }
+          return { pid, name: await winImageName(pid) }
         }
       }
       return null
     }
-    const res = spawnSync('lsof', ['-i', `:${port}`, '-sTCP:LISTEN', '-P', '-n'], {
-      encoding: 'utf8',
-      timeout: 5000,
-    })
-    if (res.status !== 0 || !res.stdout) return null
-    for (const line of res.stdout.split('\n').slice(1)) {
+    const stdout2 = await spawnCapture('lsof', ['-i', `:${port}`, '-sTCP:LISTEN', '-P', '-n'], 5000)
+    if (!stdout2) return null
+    for (const line of stdout2.split('\n').slice(1)) {
       const cols = line.trim().split(/\s+/)
       const pid = Number(cols[1])
       if (Number.isInteger(pid) && pid > 0) return { pid, name: cols[0] ?? 'unknown' }
@@ -468,7 +474,7 @@ export async function runOnce(projectRoot: string, command: string, cancelToken?
   const cmd = command.trim()
   if (!cmd) throw new Error('命令不能为空')
 
-  const avail = detectCommand(cmd)
+  const avail = await detectCommand(cmd)
   if (avail === false) {
     throw new Error(`工具链缺失：未找到命令「${firstToken(cmd)}」（可能未安装或不在 PATH）。`)
   }

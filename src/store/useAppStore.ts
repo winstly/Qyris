@@ -85,7 +85,7 @@ export type Theme = 'system' | 'light' | 'dark'
 
 interface AppState {
   booted: boolean
-  activeTab: 'preview' | 'files' | 'memory'
+  activeTab: 'preview' | 'files' | 'memory' | 'skills'
   /** 工作区占宽比例（拖拽分割线调节，工作区 ≥ 500px / 对话栏 ≥ 300px 由组件层钳制） */
   splitRatio: number
   /** 文件 Tab 内文件树占比 */
@@ -97,6 +97,7 @@ interface AppState {
   projectName: string
   settingsOpen: boolean
   createProjectOpen: boolean
+  openSelectCount: number
   settings: AiSettings
   hasApiKey: boolean
   dialog: DialogRequest | null
@@ -108,14 +109,20 @@ interface AppState {
   openProjects: string[]
   /** Skills 目录列表（按序扫描，同名取首个） */
   skillsDirs: string[]
-  /** 已扫描的 skill 摘要列表 */
+  /** 已扫描的 skill 摘要列表（用户级，全局目录） */
   skillMetas: SkillMeta[]
+  /** 项目级 Skill 目录列表（默认含 .qyris/skills/，可追加其他目录） */
+  projectSkillsDirs: string[]
+  /** 项目级 Skill 摘要列表 */
+  projectSkillMetas: SkillMeta[]
+  /** 全部项目的 Skill 目录存档（内存缓存，落盘走 config.json） */
+  projectSkillsDirsMap: Record<string, string[]>
   /** 当前项目已识别的启动命令（AI 编译产出，「全部运行」直接执行，零模型） */
   startupCommands: StartCommand[]
   /** 全部项目的启动命令存档（内存缓存，落盘走 config.json） */
   startupCommandsMap: Record<string, StartCommand[]>
 
-  setTab: (t: 'preview' | 'files' | 'memory') => void
+  setTab: (t: 'preview' | 'files' | 'memory' | 'skills') => void
   /** 左侧记忆侧边栏展开/收起（独立于工作区 Tab） */
   memorySidebarOpen: boolean
   toggleMemorySidebar: () => void
@@ -124,6 +131,8 @@ interface AppState {
   setGitPanelRatio: (r: number) => void
   setSettingsOpen: (open: boolean) => void
   setCreateProjectOpen: (open: boolean) => void
+  incOpenSelect: () => void
+  decOpenSelect: () => void
   setTheme: (theme: Theme) => void
   saveSettings: (s: AiSettings) => Promise<void>
   refreshHasApiKey: () => Promise<void>
@@ -133,6 +142,12 @@ interface AppState {
   removeRecentProject: (path: string) => void
   setSkillsDirs: (dirs: string[]) => void
   loadSkills: () => Promise<void>
+  /** 加载当前项目的 Skill（扫描 projectSkillsDirs） */
+  loadProjectSkills: () => Promise<void>
+  /** 添加一个项目级 Skill 目录 */
+  addProjectSkillsDir: (dir: string) => void
+  /** 移除一个项目级 Skill 目录 */
+  removeProjectSkillsDir: (dir: string) => void
   /** 覆盖某项目的启动命令存档（AI 编译结果 / run_project 沉淀），projectPath 缺省取当前工程；同步落盘 */
   setStartupCommands: (cmds: StartCommand[], projectPath?: string) => Promise<void>
   /** 切换到指定工程（驻留：不杀其他工程的进程/文件态） */
@@ -164,6 +179,7 @@ export const useAppStore = create<AppState>()(
       projectName: '',
       settingsOpen: false,
       createProjectOpen: false,
+      openSelectCount: 0,
       settings: DEFAULT_SETTINGS,
       hasApiKey: false,
       dialog: null,
@@ -172,6 +188,9 @@ export const useAppStore = create<AppState>()(
       openProjects: [],
       skillsDirs: [],
       skillMetas: [],
+      projectSkillsDirs: [],
+      projectSkillMetas: [],
+      projectSkillsDirsMap: {},
       startupCommands: [],
       startupCommandsMap: {},
 
@@ -182,6 +201,8 @@ export const useAppStore = create<AppState>()(
       setGitPanelRatio: (r) => set({ gitPanelRatio: Math.min(0.75, Math.max(0.2, r)) }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
       setCreateProjectOpen: (open) => set({ createProjectOpen: open }),
+      incOpenSelect: () => set((s) => ({ openSelectCount: s.openSelectCount + 1 })),
+      decOpenSelect: () => set((s) => ({ openSelectCount: Math.max(0, s.openSelectCount - 1) })),
       setTheme: (theme) => set({ theme }),
 
       saveSettings: async (s) => {
@@ -220,7 +241,8 @@ export const useAppStore = create<AppState>()(
           }
           const scm = cfg.startupCommands ?? {}
           const sd = cfg.skillsDirs ?? []
-          set({ settings: s, recentProjects: cfg.recentProjects ?? [], skillsDirs: sd, startupCommandsMap: scm })
+          const psdm = cfg.projectSkillsDirsMap ?? {}
+          set({ settings: s, recentProjects: cfg.recentProjects ?? [], skillsDirs: sd, startupCommandsMap: scm, projectSkillsDirsMap: psdm })
           useSettingsStore.getState().setSettings(s)
           useSettingsStore.getState().setSkillsDirs(sd)
           useStartupStore.getState().loadFromMap(scm)
@@ -276,7 +298,10 @@ export const useAppStore = create<AppState>()(
         useAgentStore.getState().ensureProject(projectPath)
         useAgentStore.getState().setCurrent(projectPath)
         const scm = get().startupCommandsMap[projectPath] ?? []
-        set({ projectPath: projectPath, projectName: basename(projectPath), startupCommands: scm })
+        const defaultSkillsDir = projectPath + '/.qyris/skills'
+        const savedExtraDirs = get().projectSkillsDirsMap[projectPath] ?? []
+        const allProjectDirs = [defaultSkillsDir, ...savedExtraDirs.filter((d) => d !== defaultSkillsDir)]
+        set({ projectPath: projectPath, projectName: basename(projectPath), startupCommands: scm, projectSkillsDirs: allProjectDirs, projectSkillMetas: [] })
         useProjectStore.getState().setProjectPath(projectPath)
         useStartupStore.getState().setCurrentProject(projectPath)
 
@@ -295,6 +320,9 @@ export const useAppStore = create<AppState>()(
 
         // 构建态：进程由主进程按工程隔离，切走不停；订阅该工程文件变更
         await api.startWatching(projectPath)
+
+        // 项目级 Skill 加载（异步，不阻塞）
+        void get().loadProjectSkills()
 
         // 对话：已驻留（含在途流）不覆盖、从磁盘恢复仅首次——取最新会话的最近 50 条窗口（带 seq），
         // 更早历史由触顶翻页 loadOlder() 按 keyset 游标加载
@@ -381,7 +409,7 @@ export const useAppStore = create<AppState>()(
           } else {
             useFileStore.getState().reset()
             useAgentStore.getState().clear()
-            set({ projectPath: null, projectName: '', startupCommands: [] })
+            set({ projectPath: null, projectName: '', startupCommands: [], projectSkillsDirs: [], projectSkillMetas: [] })
             useProjectStore.getState().setProjectPath(null)
             useStartupStore.getState().setCurrentProject(null)
             api.setWindowTitle('轻驭').catch(() => {})
@@ -431,6 +459,55 @@ export const useAppStore = create<AppState>()(
           set({ skillMetas: [] })
           useSettingsStore.getState().setSkillMetas([])
         }
+      },
+
+      loadProjectSkills: async () => {
+        // 只扫描项目级目录（不含全局 skillsDirs；UI 层 allSkills 合并时已去重）
+        const projectDirs = get().projectSkillsDirs
+        if (!isDesktop || projectDirs.length === 0) {
+          set({ projectSkillMetas: [] })
+          return
+        }
+        try {
+          const metas = await api.scanSkills(projectDirs)
+          set({ projectSkillMetas: metas.map((m) => ({ ...m, scope: 'project' as const })) })
+        } catch {
+          set({ projectSkillMetas: [] })
+        }
+      },
+
+      addProjectSkillsDir: (dir) => {
+        const clean = dir.trim()
+        if (!clean) return
+        const cur = get().projectSkillsDirs
+        if (cur.includes(clean)) return
+        const next = [...cur, clean]
+        const p = get().projectPath
+        set({ projectSkillsDirs: next })
+        // 持久化（存额外目录，不含默认 .qyris/skills）
+        if (p) {
+          const defaultDir = p + '/.qyris/skills'
+          const extraDirs = next.filter((d) => d !== defaultDir)
+          const map = { ...get().projectSkillsDirsMap, [p]: extraDirs }
+          set({ projectSkillsDirsMap: map })
+          void api.mergeConfig({ projectSkillsDirsMap: map }).catch(() => {})
+        }
+        void get().loadProjectSkills()
+      },
+
+      removeProjectSkillsDir: (dir) => {
+        const next = get().projectSkillsDirs.filter((d) => d !== dir)
+        const p = get().projectPath
+        set({ projectSkillsDirs: next })
+        // 持久化
+        if (p) {
+          const defaultDir = p + '/.qyris/skills'
+          const extraDirs = next.filter((d) => d !== defaultDir)
+          const map = { ...get().projectSkillsDirsMap, [p]: extraDirs }
+          set({ projectSkillsDirsMap: map })
+          void api.mergeConfig({ projectSkillsDirsMap: map }).catch(() => {})
+        }
+        void get().loadProjectSkills()
       },
 
       showPrompt: (title, value = '') =>

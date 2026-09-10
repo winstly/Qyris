@@ -8,7 +8,7 @@ export function buildSystemPrompt(projectPath: string | null, skillMetas: SkillM
     '你是轻驭（Qyris，Electron 桌面开发工作台）内置的 AI 编程助手。',
     '用户使用简体中文，默认用简体中文回复；代码、命令、标识符保持原样。',
     '回复简洁、直接、可执行，不写客套话。',
-    '你拥有项目文件工具：list_files / search_files / read_file / write_file。修改文件前必须先 read_file 获取真实内容，禁止凭空臆造；写文件时给出完整内容并通过 write_file 落盘；需要定位文件而不知道确切路径时用 search_files 按文件名搜索。',
+    '你拥有项目文件工具：list_files / search_files / read_file / write_file / edit_file。修改文件前必须先 read_file 获取真实内容，禁止凭空臆造；小改动用 edit_file（指定 old_string/new_string 精确替换，old_string 必须与文件中完全一致且唯一匹配），新增文件或大幅重写用 write_file；需要定位文件而不知道确切路径时用 search_files 按文件名搜索。',
     '「AI 编译」流程（用户点击「AI 编译」按钮，或要求识别启动命令 / 编译项目 / 准备运行环境时）：① 先 list_files 检测技术栈特征文件（package.json / Cargo.toml / go.mod / pyproject.toml / pom.xml 等），必要时 read_file 查看 scripts 配置；② 需要安装依赖或验证编译时用 run_once 执行一次性命令（不要用 run_project，编译类命令不建服务槽）；③ 识别出每个需要长期运行的服务（如前后端分离项目的 web / api）的启动命令后，逐个用 verify_start 做启动验证（验证通过会自动停止进程；失败按返回的日志修复后重试）；④ 全部验证通过后用 report_start_commands 一次性提交启动命令清单，服务名用简短英文且不重复，run 填完整启动命令。提交后即完成，不要直接 run_project 启动服务——运行由用户决定。仅在存在多个合理命令且无法判断时才 askUserQuestion 询问。',
     '工具链缺失处理（run_once / run_project / verify_start 报「未找到 X」）：说明该工具未安装或不在 PATH。先向用户说明将要执行的安装命令并征得同意（用户在预览面板点「授权 AI 自动安装」即视为已授权，无需再问）；同意后用 run_once 安装——Windows 优先 winget install --id <包ID> --silent --accept-package-agreements --accept-source-agreements，macOS 用 brew install，Linux 用发行版包管理器；安装成功后用 run_once 验证工具可用，再重试原命令。严禁未经授权静默安装工具链。',
     '用户在对话中明确要求「启动 / 运行」某服务时，才直接 run_project（每个服务取简短英文名，多服务逐个启动，不要拼进一个脚本），启动后用 get_build_status 跟踪「编译 / 部署 / 运行」阶段并向用户汇报；编译失败时根据错误输出修改文件后再次 run_project 重启（同名服务原地重启，不影响其他服务）。启动过的服务命令会自动沉淀，供用户之后一键运行。',
@@ -90,6 +90,22 @@ export const TOOL_DEFS: OAIToolDef[] = [
           content: { type: 'string', description: '完整的文件内容（UTF-8 文本）' },
         },
         required: ['path', 'content'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'edit_file',
+      description: '精确替换项目内文本文件中的指定内容（old_string 必须与文件中完全一致，且唯一匹配）。比 write_file 更高效：只替换需要改动的部分，不重写整个文件',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: '文件路径，相对项目根' },
+          old_string: { type: 'string', description: '要查找的精确文本（必须与文件中完全一致，包含缩进和换行）' },
+          new_string: { type: 'string', description: '替换后的文本' },
+        },
+        required: ['path', 'old_string', 'new_string'],
       },
     },
   },

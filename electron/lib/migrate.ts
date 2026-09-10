@@ -89,11 +89,11 @@ export async function migrateDataDir(targetDir: string): Promise<MigrateResult> 
 
     // —— 迁移前基线：行数对账 + checkpoint ——
     const db = await getDb()
-    const countOf = (table: string): number =>
-      Number((db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n)
-    const baseMessages = countOf('messages')
-    const baseMem = countOf('mem_items')
-    db.pragma('wal_checkpoint(TRUNCATE)')
+    const countOf = async (table: string): Promise<number> =>
+      Number((await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n)
+    const baseMessages = await countOf('messages')
+    const baseMem = await countOf('mem_items')
+    await db.pragma('wal_checkpoint(TRUNCATE)')
 
     const sourceDb = path.join(sourceNorm, 'qyris.db')
     const sourceSnaps = path.join(sourceNorm, 'snapshots')
@@ -118,8 +118,8 @@ export async function migrateDataDir(targetDir: string): Promise<MigrateResult> 
       try {
         const integrity = vdb.pragma('integrity_check', { simple: true })
         if (integrity !== 'ok') throw new Error(`integrity_check：${String(integrity)}`)
-        const m = Number((vdb.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n)
-        const mem = Number((vdb.prepare('SELECT COUNT(*) AS n FROM mem_items').get() as { n: number }).n)
+        const m = Number((await vdb.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n)
+        const mem = Number((await vdb.prepare('SELECT COUNT(*) AS n FROM mem_items').get() as { n: number }).n)
         if (m !== baseMessages || mem !== baseMem) {
           throw new Error(`行数对账失败：messages ${baseMessages}→${m}，mem_items ${baseMem}→${mem}`)
         }
@@ -164,9 +164,9 @@ export async function migrateDataDir(targetDir: string): Promise<MigrateResult> 
 async function sourceTablesEmpty(): Promise<boolean> {
   try {
     const db = await getDb()
-    const countOf = (table: string): number =>
-      Number((db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n)
-    return countOf('messages') === 0 && countOf('mem_items') === 0
+    const countOf = async (table: string): Promise<number> =>
+      Number((await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n)
+    return (await countOf('messages')) === 0 && (await countOf('mem_items')) === 0
   } catch {
     return false
   }

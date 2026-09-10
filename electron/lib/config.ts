@@ -25,7 +25,7 @@ export interface AppConfig {
   aiProvider: 'openai' | 'anthropic' | null
   /** 任务档位模型（thinking/fast/middle/heavy，空缺回退主模型） */
   aiTiers?: { thinking?: string; fast?: string; middle?: string; heavy?: string }
-  /** 调度模型方式：api=HTTP 直连；claude-cli=本机 Claude Code CLI（白名单归一，垃圾值回 api） */
+  /** 调度模型方式：api=HTTP 直连；claude-cli=本机 Claude Code CLI（垃圾值回 api） */
   aiDispatchMode: 'api' | 'claude-cli'
   /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
   aiCliPermission: 'auto' | 'readonly'
@@ -36,6 +36,8 @@ export interface AppConfig {
   skillsDir?: string | null
   /** 项目绝对路径 → 已识别的启动命令列表（AI 编译产出，「运行」直接执行） */
   startupCommands?: Record<string, StartCommand[]>
+  /** 项目绝对路径 → 项目级 Skill 目录列表（用户在技能面板添加的额外目录） */
+  projectSkillsDirsMap?: Record<string, string[]>
   /** 用户数据根目录（SQLite 库等大件所在），缺省 ~/.qyris/data；P1 出设置项与迁移 */
   dataDir?: string | null
   /** 记忆嵌入模型（transformers.js hub id），缺省 Xenova/bge-small-zh-v1.5 */
@@ -65,12 +67,20 @@ function clampRounds(v: unknown): number | undefined {
   return n
 }
 
+/** 内存缓存：getConfig 被热路径频繁调用（memorySearch / embed / memAgent），避免每次读磁盘+JSON.parse */
+let configCache: AppConfig | null = null
+let configCacheAt = 0
+const CONFIG_CACHE_TTL = 2000 // 2s TTL，mergeConfig/setConfig 时主动清失效
+
+export function invalidateConfigCache(): void { configCache = null; configCacheAt = 0 }
+
 /** 读取失败一律回默认值（get_config 永不 reject） */
 export async function getConfig(): Promise<AppConfig> {
+  if (configCache && Date.now() - configCacheAt < CONFIG_CACHE_TTL) return configCache
   try {
     const raw = await fsp.readFile(configPath(), 'utf8')
     const parsed = JSON.parse(raw) as Partial<AppConfig>
-    return {
+    const cfg: AppConfig = {
       lastProjectPath: parsed.lastProjectPath ?? null,
       aiBaseUrl: parsed.aiBaseUrl ?? null,
       aiModel: parsed.aiModel ?? null,
@@ -89,18 +99,30 @@ export async function getConfig(): Promise<AppConfig> {
         parsed.startupCommands && typeof parsed.startupCommands === 'object' && !Array.isArray(parsed.startupCommands)
           ? parsed.startupCommands
           : undefined,
+      projectSkillsDirsMap:
+        parsed.projectSkillsDirsMap && typeof parsed.projectSkillsDirsMap === 'object' && !Array.isArray(parsed.projectSkillsDirsMap)
+          ? parsed.projectSkillsDirsMap
+          : undefined,
       dataDir: typeof parsed.dataDir === 'string' && parsed.dataDir.trim() ? parsed.dataDir : null,
       embedModel: typeof parsed.embedModel === 'string' && parsed.embedModel.trim() ? parsed.embedModel : null,
       embedRemoteHost:
         typeof parsed.embedRemoteHost === 'string' && parsed.embedRemoteHost.trim() ? parsed.embedRemoteHost : null,
       memExtractRounds: clampRounds(parsed.memExtractRounds),
     }
+    configCache = cfg; configCacheAt = Date.now()
+    return cfg
   } catch {
-    return {
+    const fallback: AppConfig = {
       lastProjectPath: null, aiBaseUrl: null, aiModel: null, aiProvider: null,
+      aiTiers: undefined,
       aiDispatchMode: 'api', aiCliPermission: 'auto',
       recentProjects: [], skillsDirs: [], skillsDir: null,
+      startupCommands: undefined, projectSkillsDirsMap: undefined,
+      dataDir: null, embedModel: null, embedRemoteHost: null,
+      memExtractRounds: undefined,
     }
+    configCache = fallback; configCacheAt = Date.now()
+    return fallback
   }
 }
 
@@ -111,8 +133,9 @@ export async function mergeConfig(patch: Partial<AppConfig>): Promise<void> {
   await setConfig({ ...current, ...patch })
 }
 
-/** 整体覆盖写入，立即落盘（pretty JSON） */
+/** 整体覆盖写入，立即落盘（pretty JSON）；写入后清缓存 */
 export async function setConfig(config: AppConfig): Promise<void> {
+  invalidateConfigCache()
   const file = configPath()
   try {
     await fsp.mkdir(path.dirname(file), { recursive: true })

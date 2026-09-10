@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { IconChevron, IconCheck, IconSearch } from './icons'
+import { useAppStore } from '@/store/useAppStore'
 
 export interface SelectOption {
   value: string
@@ -90,6 +91,14 @@ export function Select({ value, options, onChange, ariaLabel, searchable, size, 
       if (searchable) searchRef.current?.focus()
     }
   }, [open, searchable])
+
+  // 全局下拉计数器：通知 App.tsx 收起 WebContentsView（原生 View 会遮挡 DOM 弹层）
+  useEffect(() => {
+    if (!open) return
+    const { incOpenSelect, decOpenSelect } = useAppStore.getState()
+    incOpenSelect()
+    return () => { decOpenSelect() }
+  }, [open])
 
   const current = options.find((o) => o.value === value)
   const q = query.trim().toLowerCase()

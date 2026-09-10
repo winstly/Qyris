@@ -22,8 +22,9 @@ import { api } from '@/services/desktop'
 import { buildSystemPrompt, TOOL_DEFS } from '@/services/ai'
 import { executeTool } from '@/services/tools'
 import { useSettingsStore } from './useSettingsStore'
+import { useAppStore } from './useAppStore'
 import { useStartupStore } from './useStartupStore'
-import { useAgentStore } from './useAgentStore'
+import { useAgentStore, type AgentEntryTool } from './useAgentStore'
 import { uid, safeParseObject } from '@/utils/id'
 import { estimateTokens } from '@/utils/tokens'
 import { buildHistory } from '@/utils/chatHistory'
@@ -136,13 +137,29 @@ export function patchSlice(project: string, patch: Partial<ChatSlice>): void {
   })
 }
 
-/** 按 requestId 反查工程（事件只带 requestId，据此路由回发起请求的工程切片） */
+/** 按 requestId 反查工程（事件只带 requestId，据此路由回发起请求的工程切片）。
+ *  活跃请求走 activeRequestId 精确匹配；已结束请求走 completedRequestMap 残留映射——
+ *  CLI 子进程 close 后 aiChatStream 立即 resolve，renderer 清空 activeRequestId，
+ *  但子 agent 的 cli-agent-event / cli-tool-result 仍在 IPC 队列里排队，需要靠残留映射找到工程。 */
+const completedRequestMap = new Map<string, string>() // requestId → project
+
+/** 子 agent 线程 finishDebounce 计时器：每次 cli-agent-event 到达重置，停事件 300ms 后 finishThread */
+const agentFinishTimers = new Map<string, ReturnType<typeof setTimeout>>() // threadId → timer
+const COMPLETED_MAP_TTL = 30_000 // 30s 后自动清理
+
 function findProjectByRequest(requestId: string): string | undefined {
   const s = useChatStore.getState()
   for (const [project, slice] of Object.entries(s.byProject)) {
     if (slice.activeRequestId === requestId) return project
   }
-  return undefined
+  // 回退：已结束请求的残留映射
+  return completedRequestMap.get(requestId)
+}
+
+/** 标记请求完成但不立即清除映射（IPC 残留事件仍需路由） */
+function markRequestCompleted(requestId: string, project: string): void {
+  completedRequestMap.set(requestId, project)
+  setTimeout(() => completedRequestMap.delete(requestId), COMPLETED_MAP_TTL)
 }
 
 export const useChatStore = create<ChatState>()((set, get) => ({
@@ -280,17 +297,32 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
   },
 
-  /** CLI 工具结果回填：状态收口 + 结果/摘要入卡并记录 toolResults（供历史重建）；
-   *  若是子 agent 派发卡则同步收口面板线程（tokens 为该子 agent 的 token 账目） */
+  /** CLI 工具结果回填：状态收口 + 结果/摘要入卡并记录 toolResults（供历史重建）。
+   *  Agent/Task 工具结果分两种：
+   *  - async 派发确认（"Async agent launched successfully"）：工具调用本身完成（主卡 done），
+   *    但子 agent 转入后台运行——线程保持 running，等完成通知（同 id 的第二个 tool_result）再收口
+   *  - 同步结果 / async 完成通知：权威完成信号，立即 finishThread + 收口残留 running entry */
   handleCliToolResult: (requestId, id, content, isError, tokens) => {
     const project = findProjectByRequest(requestId)
     if (!project) return
     if (getSlice(project)?.cancelled) return
     const result = content.length > 2000 ? content.slice(0, 2000) + '…' : content
+    const isAsyncLaunch = /^Async agent launched successfully/i.test(content.trim())
     const agentSlice = useAgentStore.getState().byProject[project]
     const thread = agentSlice && Object.values(agentSlice.threads).find((t) => t.cardId === id)
     if (thread) {
-      useAgentStore.getState().finishThread(thread.id, isError ? 'error' : 'done', result, tokens, project)
+      // 清掉可能残留的计时器
+      const stale = agentFinishTimers.get(thread.id)
+      if (stale) { clearTimeout(stale); agentFinishTimers.delete(thread.id) }
+      if (!isAsyncLaunch) {
+        useAgentStore.getState().finishThread(thread.id, isError ? 'error' : 'done', result, tokens, project)
+        // 线程内仍 running 的工具 entry 一并收口（子 agent tool-result 事件丢失时防永久转圈）
+        const staleRunning = thread.entries.filter((e): e is AgentEntryTool => e.kind === 'tool' && e.status === 'running')
+        for (const e of staleRunning) {
+          useAgentStore.getState().patchTool(thread.id, e.id, { status: isError ? 'error' : 'done', summary: '（随子任务收口）' }, project)
+        }
+      }
+      // async 派发确认 → 线程保持 running，等后台完成通知
     }
     let updated: ChatMessage | undefined
     useChatStore.setState((s) => {
@@ -316,7 +348,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (updated) persistAfterSettled(project, updated.id)
   },
 
-  /** CLI 子 agent 实时转录：按 parentId 找到派发卡对应线程，文本/工具/结果分别入账 */
+  /** CLI 子 agent 实时转录：按 parentId 找到派发卡对应线程，文本/工具/结果分别入账。
+   *  ⚠️ 线程 finish 只由 cli-tool-result（Agent 工具结果）驱动——子 agent 执行工具期间
+   *  CLI 不发任何事件，静默 >300ms 是常态，不能作为完成信号（debounce 方案已证伪）。 */
   handleCliAgentEvent: (p) => {
     const project = findProjectByRequest(p.requestId)
     if (!project) return
@@ -325,6 +359,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const thread = agentSlice && Object.values(agentSlice.threads).find((t) => t.cardId === p.parentId)
     if (!thread) return
     const store = useAgentStore.getState()
+    console.log(`[cli-agent] ${p.kind} thread=${thread.id} id=${p.id ?? '-'}`)
+
     if (p.kind === 'text') {
       const text = (p.text ?? '').trim()
       if (text) store.appendText(thread.id, text, project)
@@ -405,13 +441,16 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       // skipFinalExtract（勾选删除记忆时）必须跳过：否则清空记忆后立刻从旧消息蒸出新记忆，等于没删
       void api.sessionEnded(project, cur.sessionId).catch(() => {})
     }
-    // 语义 = 开新会话：只换 sessionId/epoch，历史默认保留在库里（勾选删除历史时由上面 truncate 真删）
+    // 开新会话：换 sessionId/epoch，旧消息保留但不再自动加载（saveCurrentSession 写 meta 表）
+    const newSessionId = uid()
     patchSlice(project, {
       messages: [], status: 'idle', pendingAsk: null, activeRequestId: null,
-      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: uid(), cliSkills: [], epoch: cur.epoch + 1,
+      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: newSessionId, cliSkills: [], epoch: cur.epoch + 1,
       lastSummary: null,
       hasMoreOlder: false, oldestSeq: null, loadingOlder: false,
     })
+    // 持久化新 session ID 到 meta 表：messagesRecent 优先查它，不回退旧会话
+    void api.saveCurrentSession(project, newSessionId).catch(() => {})
   },
 
   loadOlder: async () => {
@@ -724,9 +763,11 @@ async function runAgentLoop(project: string) {
   }
 
   // 工具调用不设轮数上限：由「停止生成」取消（cancelled 每轮检查）兜底
+  let lastRequestId: string | null = null
   for (;;) {
     if (getSlice(project)?.cancelled) {
       finalizeDraft(project, '（已取消）', false, epoch)
+      if (lastRequestId) markRequestCompleted(lastRequestId, project)
       patchSlice(project, { status: 'idle', activeRequestId: null })
       return
     }
@@ -748,11 +789,15 @@ async function runAgentLoop(project: string) {
         return
       }
       const requestId = uid()
+      lastRequestId = requestId
       patchSlice(project, { status: 'streaming', activeRequestId: requestId })
       try {
         const { settings, skillMetas } = useSettingsStore.getState()
+        const projectSkillMetas = useAppStore.getState().projectSkillMetas
+        // 合并用户级 + 项目级 Skill（项目在前，用户在后）
+        const allSkills = [...projectSkillMetas, ...skillMetas]
         // 单 system 消息合并：基础提示词 + 会话摘要（在前）+ 长期记忆（在后）
-        const systemContent = [buildSystemPrompt(project, skillMetas), summaryBlock, memoryBlock]
+        const systemContent = [buildSystemPrompt(project, allSkills), summaryBlock, memoryBlock]
           .filter((b): b is string => !!b)
           .join('\n\n')
         const payload: OAIMessage[] = [
@@ -768,11 +813,13 @@ async function runAgentLoop(project: string) {
         const msg = String(e)
         if (getSlice(project)?.cancelled) {
           finalizeDraft(project, '（已取消）', false, epoch)
+          markRequestCompleted(requestId, project)
           patchSlice(project, { status: 'idle', activeRequestId: null })
           return
         }
         if (!isRetryableError(msg) || attempt >= 10) {
           finalizeDraft(project, msg, true, epoch)
+          markRequestCompleted(requestId, project)
           patchSlice(project, { status: 'error', activeRequestId: null })
           return
         }
@@ -781,6 +828,7 @@ async function runAgentLoop(project: string) {
         const interrupted = await sleepInterruptible(project, 15000)
         if (interrupted || getSlice(project)?.cancelled) {
           finalizeDraft(project, '（已取消）', false, epoch)
+          markRequestCompleted(requestId, project)
           patchSlice(project, { status: 'idle', activeRequestId: null })
           return
         }
@@ -791,7 +839,9 @@ async function runAgentLoop(project: string) {
     history.push(toHistoryEntry(completion))
 
     if (appState.settings.dispatchMode === 'claude-cli') {
-      const knownSkills = new Set(appState.skillMetas.map((m) => m.id))
+      // 合并用户级 + 项目级 Skill 校验
+      const projectMetas = useAppStore.getState().projectSkillMetas
+      const knownSkills = new Set([...appState.skillMetas, ...projectMetas].map((m) => m.id))
       const skillReq = (completion.nextSkill ?? []).map((s) => s.trim()).filter((s) => s && knownSkills.has(s))
       const cmds = (completion.startCommands ?? [])
         .map((s) => ({
@@ -808,12 +858,25 @@ async function runAgentLoop(project: string) {
     }
 
     if (completion.toolCalls.length === 0) {
+      if (lastRequestId) markRequestCompleted(lastRequestId, project)
       patchSlice(project, { status: 'idle', activeRequestId: null })
+      // CLI 会话收尾：扫尾仍在 running 的 CLI 子 agent 线程（async 后台子 agent 的
+      // 完成通知可能在 CLI 退出前未到达，会话结束即视为完成，防面板永久转圈）
+      const agentSlice = useAgentStore.getState().byProject[project]
+      if (agentSlice) {
+        for (const t of Object.values(agentSlice.threads)) {
+          if (t.tier === 'CLI' && t.status === 'running') {
+            useAgentStore.getState().finishThread(t.id, 'done', '（CLI 会话结束，子任务收口）', undefined, project)
+          }
+        }
+      }
       fireMaybeExtract(project, epoch)
       persistTokens(project, epoch)
       return
     }
 
+    // 主 agent 继续执行工具调用：旧 requestId 的子 agent 事件可能还在 IPC 队列
+    if (lastRequestId) markRequestCompleted(lastRequestId, project)
     patchSlice(project, { status: 'tools' })
     for (const tc of completion.toolCalls) {
       patchToolCard(project, tc.id, { status: 'running' }, epoch)

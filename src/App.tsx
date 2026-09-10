@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
@@ -42,7 +42,7 @@ export default function App() {
   }, [theme])
 
   // 弹窗打开时隐藏 WebContentsView（native overlay 遮不住 DOM 弹窗）
-  const hasDialog = useAppStore((s) => !!s.dialog || s.settingsOpen || s.createProjectOpen)
+  const hasDialog = useAppStore((s) => !!s.dialog || s.settingsOpen || s.createProjectOpen || s.openSelectCount > 0)
   useEffect(() => {
     void previewSetVisible(!hasDialog)
   }, [hasDialog])
@@ -97,8 +97,29 @@ export default function App() {
     window.addEventListener('pointerup', onUp)
   }
 
+  // 窗口过小时全屏提示（<1024px 窄屏布局在当前尺寸下无法正确渲染）
+  const [isTooSmall, setIsTooSmall] = useState(false)
+  useEffect(() => {
+    const check = () => {
+      const w = window.innerWidth
+      setIsTooSmall(w < 1024)
+    }
+    check()
+    window.addEventListener('resize', check)
+    return () => window.removeEventListener('resize', check)
+  }, [])
+
   return (
     <div className="app">
+      {isTooSmall && (
+        <div className="size-guard">
+          <div className="size-guard__content">
+            <span className="size-guard__icon">⊞</span>
+            <p>窗口太小，请放大窗口以使用轻驭</p>
+          </div>
+        </div>
+      )}
+
       {!isDesktop && (
         <div className="env-banner">
           <IconAlert size={14} />

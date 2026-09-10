@@ -35,6 +35,8 @@ export const api = {
   readTextFile: (projectRoot: string, path: string) => wrap((d) => d.readTextFile(projectRoot, path)),
   writeTextFile: (projectRoot: string, path: string, content: string) =>
     wrap((d) => d.writeTextFile(projectRoot, path, content)),
+  editTextFile: (projectRoot: string, path: string, oldString: string, newString: string) =>
+    wrap((d) => d.editTextFile(projectRoot, path, oldString, newString)),
   snapshotFile: (projectRoot: string, sessionId: string, path: string) =>
     wrap((d) => d.snapshotFile(projectRoot, sessionId, path)),
   listSnapshots: (projectRoot: string) => wrap((d) => d.listSnapshots(projectRoot)),
@@ -43,6 +45,7 @@ export const api = {
   clearProjectSnapshots: (projectRoot: string) => wrap((d) => d.clearProjectSnapshots(projectRoot)),
   // 消息持久化（稳定点 write-through + keyset 分页）
   messagesRecent: (projectRoot: string, limit?: number) => wrap((d) => d.messagesRecent(projectRoot, limit)),
+  saveCurrentSession: (projectRoot: string, sessionId: string) => wrap((d) => d.saveCurrentSession(projectRoot, sessionId)),
   messagesBefore: (projectRoot: string, sessionId: string, beforeSeq: number, limit?: number) =>
     wrap((d) => d.messagesBefore(projectRoot, sessionId, beforeSeq, limit)),
   messageAppend: (projectRoot: string, sessionId: string, message: ChatMessage) =>
@@ -103,6 +106,11 @@ export const api = {
   scanSkills: (dirs: string[]) => wrap((d) => d.scanSkills(dirs)),
   readSkill: (dirs: string[], skillId: string) => wrap((d) => d.readSkill(dirs, skillId)),
   pickSkillsDir: () => wrap((d) => d.pickSkillsDir()),
+  projectSkillImportZip: (dir: string, zipPath: string) => wrap((d) => d.projectSkillImportZip(dir, zipPath)),
+  projectSkillImportDir: (dir: string, srcDir: string) => wrap((d) => d.projectSkillImportDir(dir, srcDir)) as Promise<{ ok: boolean; name?: string; count?: number; error?: string }>,
+  projectSkillDelete: (dir: string, skillId: string) => wrap((d) => d.projectSkillDelete(dir, skillId)),
+  projectSkillPickZip: () => wrap((d) => d.projectSkillPickZip()),
+  projectSkillPickDir: () => wrap((d) => d.projectSkillPickDir()),
 
   // 创建项目 / Git
   createEmptyProject: (parentDir: string, name: string) => wrap((d) => d.createEmptyProject(parentDir, name)),
@@ -203,6 +211,11 @@ export function onCliToolResult(cb: (payload: { requestId: string; id: string; c
 export function onCliAgentEvent(cb: (payload: CliAgentEventPayload) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onCliAgentEvent(cb)
+}
+
+export function onCliRetry(cb: (payload: { requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onCliRetry(cb)
 }
 
 export function onMemoryExtractState(cb: (payload: { projectRoot: string; extracting: boolean }) => void): () => void {

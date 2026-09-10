@@ -156,6 +156,29 @@ export async function writeTextFile(projectRoot: string, filePath: string, conte
   }
 }
 
+/** 精确替换文本文件中的指定内容：oldString 必须唯一匹配（0 或 >1 均报错） */
+export async function editTextFile(
+  projectRoot: string, filePath: string, oldString: string, newString: string,
+): Promise<{ replaced: number; lineCount: number }> {
+  const target = await ensureInside(projectRoot, filePath)
+  let content: string
+  try {
+    content = await fsp.readFile(target, 'utf8')
+  } catch (e) {
+    throw new Error(`文件不存在或不可读：${errorMessage(e)}`)
+  }
+  const count = content.split(oldString).length - 1
+  if (count === 0) throw new Error('old_string 在文件中未找到，请确认文本完全一致（含缩进和换行）。')
+  if (count > 1) throw new Error(`old_string 在文件中匹配到 ${count} 处，请用更精确的文本确保唯一匹配。`)
+  const replaced = content.replace(oldString, newString)
+  try {
+    await fsp.writeFile(target, replaced, 'utf8')
+  } catch (e) {
+    throw new Error(`写入失败：${errorMessage(e)}`)
+  }
+  return { replaced: 1, lineCount: replaced.split('\n').length }
+}
+
 /** 新建文件/文件夹：单层 mkdir，不递归；已存在报同名错误 */
 export async function createEntry(
   projectRoot: string, parentDir: string, name: string, isDir: boolean,

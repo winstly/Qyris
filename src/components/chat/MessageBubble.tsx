@@ -1,11 +1,12 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import type { ChatMessage, SkillMeta } from '@/types'
-import { IconClose, IconCheck } from '@/components/common/icons'
+import { IconClose } from '@/components/common/icons'
 import { Markdown } from './Markdown'
 import { ToolCallCard } from './ToolCallCard'
 import { AskUserCard } from './AskUserCard'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { useAppStore } from '@/store/useAppStore'
+import { useSlashCommand, SlashMenu } from './SlashMenu'
 
 export function MessageBubble({ msg }: { msg: ChatMessage }) {
   if (msg.role === 'user') {
@@ -68,9 +69,10 @@ function ReasoningBlock({ content }: { content: string }) {
  *  不含前缀的消息整段都是用户文字，原样返回。 */
 function extractUserText(content: string): string {
   let rest = content
-  // 剥 Skill 指令前缀
-  if (rest.startsWith('请先用 load_skill')) {
-    rest = rest.split('\n\n').slice(1).join('\n\n')
+  // 剥 Skill 指令前缀：匹配「请先用 load_skill ...，再执行。」或「请先用 load_skill 依次加载 ...全部加载后再执行：...」
+  const skillMatch = rest.match(/^请先用 load_skill[\s\S]*?再执行[：:]\s*\S*|^请先用 load_skill[\s\S]*?再执行[。.]\s*/)
+  if (skillMatch) {
+    rest = rest.slice(skillMatch[0].length)
   }
   // 剥元素注入前缀
   if (rest.startsWith('[用户选中的预览页元素]')) {
@@ -89,9 +91,9 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
   const [draft, setDraft] = useState(msg.content)
   const [editSkills, setEditSkills] = useState(msg.meta?.skills ?? [])
   const skillMetas = useAppStore((s) => s.skillMetas)
-  const [slashOpen, setSlashOpen] = useState(false)
-  const [slashFilter, setSlashFilter] = useState('')
-  const [slashIndex, setSlashIndex] = useState(0)
+  const projectSkillMetas = useAppStore((s) => s.projectSkillMetas)
+  const allSkills = useMemo(() => [...projectSkillMetas, ...skillMetas], [projectSkillMetas, skillMetas])
+  const { slashOpen, setSlashOpen, setSlashFilter, slashIndex, setSlashIndex, filteredSkills, closeSlash } = useSlashCommand(allSkills)
   const hasLater = useChatStore((s) => {
     const msgs = selectCurrentChat(s).messages
     const i = msgs.findIndex((m) => m.id === msg.id)
@@ -104,23 +106,6 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
 
   const editableText = msg.meta?.projectStart ? '' : extractUserText(msg.content)
   const originalSkills = msg.meta?.skills ?? []
-
-  const filteredSkills = slashOpen
-    ? skillMetas.filter((s) => {
-        if (!slashFilter) return true
-        const q = slashFilter.toLowerCase()
-        return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q)
-          || s.description.toLowerCase().includes(q) || s.triggers.some((t) => t.toLowerCase().includes(q))
-      })
-    : []
-
-  const closeSlash = () => { setSlashOpen(false); setSlashFilter(''); setSlashIndex(0) }
-
-  useEffect(() => {
-    if (!slashOpen) return
-    const el = document.querySelector('.slash-menu--edit .slash-menu__item--active')
-    el?.scrollIntoView({ block: 'nearest' })
-  }, [slashIndex, slashOpen])
 
   /** 编辑态选/取消 skill（toggle）：已选的再选=移除；只剥掉 / 前缀保留原文 */
   const selectSkill = (skill: SkillMeta) => {
@@ -191,7 +176,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
             onChange={(e) => {
               const val = e.target.value
               setDraft(val)
-              if (val.startsWith('/') && !slashOpen && skillMetas.length > 0) {
+              if (val.startsWith('/') && !slashOpen && allSkills.length > 0) {
                 setSlashOpen(true)
                 setSlashFilter('')
               } else if (slashOpen) {
@@ -218,40 +203,19 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
             aria-label="编辑消息"
             autoFocus
           />
-          {/* Slash 菜单：在 textarea 下方正常流，容器自动滚动 */}
-          {slashOpen && filteredSkills.length > 0 && (
-            <div className="slash-menu slash-menu--edit" role="listbox" aria-label="选择 Skill">
-              {filteredSkills.map((skill, i) => (
-                <div
-                  key={skill.id}
-                  className={`slash-menu__item ${i === slashIndex ? 'slash-menu__item--active' : ''}`}
-                  role="option"
-                  aria-selected={i === slashIndex}
-                  onMouseEnter={() => setSlashIndex(i)}
-                  onClick={() => selectSkill(skill)}
-                >
-                  <div className="slash-menu__item-name">
-                    {editSkills.some((s) => s.id === skill.id) ? (
-                      <span className="slash-menu__item-check"><IconCheck size={10} /></span>
-                    ) : (
-                      <span className="slash-menu__item-check-placeholder" />
-                    )}
-                    <span>{skill.name}</span>
-                  </div>
-                  {skill.description && <span className="slash-menu__item-desc">{skill.description}</span>}
-                </div>
-              ))}
-              <div className="slash-menu__hint"><span>↑↓ 导航 · Enter 选择 · Esc 关闭</span></div>
-            </div>
-          )}
-          {slashOpen && filteredSkills.length === 0 && (
-            <div className="slash-menu slash-menu--edit">
-              <div className="slash-menu__empty">无匹配的 Skill</div>
-              <div className="slash-menu__hint"><span>Esc 关闭</span></div>
-            </div>
+          {/* Slash 菜单 */}
+          {slashOpen && (
+            <SlashMenu
+              filteredSkills={filteredSkills}
+              slashIndex={slashIndex}
+              selectedIds={new Set(editSkills.map((s) => s.id))}
+              onSelect={selectSkill}
+              onHoverIndex={setSlashIndex}
+              className="slash-menu--edit"
+            />
           )}
           <div className="msg__edit-actions">
-            <span className="msg__edit-hint">Enter 发送 · Shift+Enter 换行{skillMetas.length > 0 ? ' · / 选 Skill' : ''}</span>
+            <span className="msg__edit-hint">Enter 发送 · Shift+Enter 换行{allSkills.length > 0 ? ' · / 选 Skill' : ''}</span>
             <button className="btn btn--ghost btn--sm" onClick={() => { setDraft(editableText); setEditSkills(msg.meta?.skills ?? []); setEditing(false) }}>取消</button>
             <button className="btn btn--primary btn--sm" onClick={() => void submit()} disabled={!draft.trim() && editSkills.length === 0}>重新发送</button>
           </div>
@@ -271,12 +235,16 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
               <span className="msg__meta-card-name">AI 编译（识别启动命令）</span>
             </div>
           )}
-          {msg.meta!.skills?.map((s) => (
-            <div key={s.id} className="msg__meta-card">
-              <span className="msg__meta-card-label">Skill</span>
-              <span className="msg__meta-card-name">{s.name}</span>
-            </div>
-          ))}
+          {msg.meta!.skills?.map((s) => {
+            const full = allSkills.find((sk) => sk.id === s.id)
+            const isProject = full?.scope === 'project'
+            return (
+              <div key={s.id} className="msg__meta-card">
+                <span className="msg__meta-card-label">{isProject ? '项目' : 'Skill'}</span>
+                <span className="msg__meta-card-name">{s.name}</span>
+              </div>
+            )
+          })}
           {citations.length > 0 && (
             <div
               className="msg__meta-card msg__meta-card--cite"

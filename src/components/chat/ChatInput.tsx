@@ -1,10 +1,11 @@
-import { useRef, useState, useCallback, useEffect, useMemo } from 'react'
+import { useRef, useState, useCallback, useMemo } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { isDesktop } from '@/services/desktop'
 import { fmtTok } from '@/utils/tokens'
 import { skillLoadInstruction } from '@/utils/skillInstruction'
-import { IconSend, IconStop, IconClose, IconCheck } from '@/components/common/icons'
+import { IconSend, IconStop, IconClose } from '@/components/common/icons'
+import { useSlashCommand, SlashMenu } from './SlashMenu'
 import type { SkillMeta } from '@/types'
 
 /** 多行输入：Enter 发送 / Shift+Enter 换行，自动增高；生成中可点「停止」。
@@ -16,13 +17,12 @@ export function ChatInput() {
   const send = useChatStore((s) => s.send)
   const cancel = useChatStore((s) => s.cancel)
   const hasApiKey = useAppStore((s) => s.hasApiKey)
+  const dispatchMode = useAppStore((s) => s.settings.dispatchMode)
   const setPendingElement = useChatStore((s) => s.setPendingElement)
   const skillMetas = useAppStore((s) => s.skillMetas)
+  const projectSkillMetas = useAppStore((s) => s.projectSkillMetas)
 
-  // Slash 命令菜单状态
-  const [slashOpen, setSlashOpen] = useState(false)
-  const [slashFilter, setSlashFilter] = useState('')
-  const [slashIndex, setSlashIndex] = useState(0)
+  // Slash 命令菜单
   const savedTextRef = useRef('')
   const prevTextRef = useRef('')
   const [selectedSkills, setSelectedSkills] = useState<SkillMeta[]>([])
@@ -30,28 +30,13 @@ export function ChatInput() {
   const busy = status === 'streaming' || status === 'tools' || status === 'awaiting-user' || status === 'retrying'
   const disabledHint = !isDesktop
     ? '需在桌面应用内运行（npm run dev）'
-    : !hasApiKey
+    : dispatchMode !== 'claude-cli' && !hasApiKey
       ? '请先在设置中配置 API Key'
       : undefined
 
-  const filteredSkills = useMemo(() => slashOpen
-    ? skillMetas.filter((s) => {
-        if (!slashFilter) return true
-        const q = slashFilter.toLowerCase()
-        return s.name.toLowerCase().includes(q)
-          || s.id.toLowerCase().includes(q)
-          || s.description.toLowerCase().includes(q)
-          || s.triggers.some((t) => t.toLowerCase().includes(q))
-      })
-    : [], [slashOpen, slashFilter, skillMetas])
-
-  useEffect(() => { setSlashIndex(0) }, [slashFilter])
-
-  useEffect(() => {
-    if (!slashOpen) return
-    const el = document.querySelector('.slash-menu__item--active')
-    el?.scrollIntoView({ block: 'nearest' })
-  }, [slashIndex, slashOpen])
+  // 合并项目 Skill + 用户 Skill，项目在前
+  const allSkills = useMemo(() => [...projectSkillMetas, ...skillMetas], [projectSkillMetas, skillMetas])
+  const { slashOpen, setSlashOpen, setSlashFilter, slashIndex, setSlashIndex, filteredSkills, closeSlash } = useSlashCommand(allSkills)
 
   const resize = () => {
     const ta = taRef.current
@@ -60,16 +45,11 @@ export function ChatInput() {
     ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`
   }
 
-  const closeSlash = useCallback(() => {
-    setSlashOpen(false)
-    setSlashFilter('')
-    setSlashIndex(0)
-  }, [])
-
   /** 选中一个 skill：删除 / 和关键字，恢复暂存文本，光标移到末尾 */
   const selectSkill = useCallback((skill: SkillMeta) => {
     const restored = savedTextRef.current
     closeSlash()
+
     savedTextRef.current = ''
     setText(restored)
     prevTextRef.current = restored  // 同步更新，否则下次检测 prev 还是 /xxx
@@ -126,7 +106,7 @@ export function ChatInput() {
     setText(val)
     resize()
     // 触发 slash 菜单
-    if (val.startsWith('/') && !prev.startsWith('/') && !slashOpen && skillMetas.length > 0) {
+    if (val.startsWith('/') && !prev.startsWith('/') && allSkills.length > 0) {
       savedTextRef.current = prev
       setSlashOpen(true)
       setSlashFilter('')
@@ -170,40 +150,14 @@ export function ChatInput() {
   return (
     <div className="chat__inputwrap">
       {/* Slash 命令菜单 */}
-      {slashOpen && filteredSkills.length > 0 && (
-        <div className="slash-menu" role="listbox" aria-label="选择 Skill">
-          {filteredSkills.map((skill, i) => (
-            <div
-              key={skill.id}
-              className={`slash-menu__item ${i === slashIndex ? 'slash-menu__item--active' : ''}`}
-              role="option"
-              aria-selected={selectedSkills.some((s) => s.id === skill.id)}
-              onMouseEnter={() => setSlashIndex(i)}
-              onClick={() => void selectSkill(skill)}
-            >
-              <div className="slash-menu__item-name">
-                {selectedSkills.some((s) => s.id === skill.id) ? (
-                  <span className="slash-menu__item-check"><IconCheck size={10} /></span>
-                ) : (
-                  <span className="slash-menu__item-check-placeholder" />
-                )}
-                <span>{skill.name}</span>
-              </div>
-              {skill.description && <span className="slash-menu__item-desc">{skill.description}</span>}
-            </div>
-          ))}
-          <div className="slash-menu__hint">
-            <span>↑↓ 导航 · Enter 选择 · Esc 关闭</span>
-          </div>
-        </div>
-      )}
-      {slashOpen && filteredSkills.length === 0 && (
-        <div className="slash-menu">
-          <div className="slash-menu__empty">无匹配的 Skill</div>
-          <div className="slash-menu__hint">
-            <span>Esc 关闭</span>
-          </div>
-        </div>
+      {slashOpen && (
+        <SlashMenu
+          filteredSkills={filteredSkills}
+          slashIndex={slashIndex}
+          selectedIds={new Set(selectedSkills.map((s) => s.id))}
+          onSelect={selectSkill}
+          onHoverIndex={setSlashIndex}
+        />
       )}
 
       {/* 已选中的 Skills 引用 chips */}
@@ -211,7 +165,7 @@ export function ChatInput() {
         <div className="chat__skill-chips">
           {selectedSkills.map((skill) => (
             <div key={skill.id} className="chat__skill-chip">
-              <span className="chat__skill-chip-label">Skill</span>
+              <span className="chat__skill-chip-label">{skill.scope === 'project' ? '项目' : 'Skill'}</span>
               <span className="chat__skill-chip-name">{skill.name}</span>
               <button
                 className="chat__skill-chip-clear"
@@ -253,7 +207,7 @@ export function ChatInput() {
           placeholder={
             disabledHint ?? (selectedSkills.length > 0
               ? '补充你的具体需求，Enter 发送…'
-              : skillMetas.length > 0
+              : allSkills.length > 0
                 ? '输入 / 唤起 Skill 菜单，或直接对话…'
                 : '让 AI 读取、修改项目文件，或回答你的问题…')
           }

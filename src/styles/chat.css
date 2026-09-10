@@ -969,3 +969,21 @@
   height: 15px;
   flex-shrink: 0;
 }
+
+/* slash 菜单：项目 Skill 徽标 */
+.slash-menu__item-scope {
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+/* slash 菜单：项目/用户 Skill 分隔线 */
+.slash-menu__sep {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--edge-hair);
+}

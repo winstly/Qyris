@@ -257,20 +257,27 @@ export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Pro
   return lines.join('\n')
 }
 
-/** @internal CLI 启动参数（prompt 走 stdin）。不传 --model：CLI 自带模型配置，指定不在白名单的模型反而报错。
- *  maxTurns 可覆盖轮数上限（mem agent 蒸馏传 1：headless 单轮，不给工具循环留口子） */
+/** @internal CLI 启动参数（prompt 走 stdin）。不传 --model：CLI 自带模型配置。
+ *  maxTurns 可覆盖轮数上限（mem agent 蒸馏传 1：headless 单轮，不给工具循环留口子）。 */
 export function buildCliArgs(
   _model: string,
   permissionMode: 'auto' | 'readonly',
-  opts?: { systemPrompt?: string; outputFormat?: string; maxTurns?: number },
+  opts?: {
+    systemPrompt?: string; appendSystemPrompt?: string;
+    outputFormat?: string; maxTurns?: number; jsonSchema?: string;
+    bare?: boolean;
+  },
 ): string[] {
   const format = opts?.outputFormat ?? 'stream-json'
   const args = ['-p', '--output-format', format]
   if (format === 'stream-json') {
     args.push('--verbose', '--include-partial-messages')
   }
+  if (opts?.bare) args.push('--bare')
   args.push('--max-turns', String(opts?.maxTurns ?? CLI_MAX_TURNS))
   if (opts?.systemPrompt) args.push('--system-prompt', opts.systemPrompt)
+  else if (opts?.appendSystemPrompt) args.push('--append-system-prompt', opts.appendSystemPrompt)
+  if (opts?.jsonSchema) args.push('--json-schema', opts.jsonSchema)
   if (permissionMode === 'readonly') args.push('--allowedTools', READONLY_TOOLS)
   else args.push('--dangerously-skip-permissions')
   return args
@@ -299,12 +306,22 @@ export async function claudeCliChatStream(
   }
 
   const cfg = cfgIn ?? await getConfig().catch(() => null)
-  const skillDirs = cfg?.skillsDirs ?? []
+  // 合并三源：项目默认目录 + 项目自定义目录 + 全局目录
+  const defaultProjectDir = projectRoot ? projectRoot + '/.qyris/skills' : null
+  const extraProjectDirs = projectRoot ? (cfg?.projectSkillsDirsMap?.[projectRoot] ?? []) : []
+  const globalDirs = cfg?.skillsDirs ?? []
+  const skillDirs = [
+    ...(defaultProjectDir ? [defaultProjectDir] : []),
+    ...extraProjectDirs,
+    ...globalDirs.filter((d) => d !== defaultProjectDir && !extraProjectDirs.includes(d)),
+  ]
   const referencedIds = extractSkillIds(messages)
   const [skillBlock, skillIndex] = await Promise.all([
     resolveSkillBlock(skillDirs, referencedIds),
     buildSkillIndex(skillDirs, referencedIds),
   ])
+  // 系统提示走 stdin（adapter 指令 + <conversation>），不用 --append-system-prompt / --bare。
+  // mem agent 用 --system-prompt 完全替换（蒸馏是纯文本→JSON 单轮任务）。
   const prompt = opts?.systemPrompt
     ? `<conversation>\n${serializeConversation(messages, opts?.sessionSummary ?? null, opts?.memoryBlock ?? null)}\n</conversation>`
     : `${buildCliSystemPrompt(projectRoot, skillBlock, skillIndex, skillDirs)}\n\n<conversation>\n${serializeConversation(messages, opts?.sessionSummary ?? null, opts?.memoryBlock ?? null)}\n</conversation>`
@@ -374,6 +391,19 @@ export async function claudeCliChatStream(
         return
       }
 
+      if (type === 'system' && json.subtype === 'api_retry') {
+        // API 可重试错误（rate_limit / overloaded / server_error 等）：通知渲染层展示重试进度
+        emit('cli-retry', {
+          requestId,
+          attempt: Number(json.attempt) || 0,
+          maxRetries: Number(json.max_retries) || 0,
+          retryDelayMs: Number(json.retry_delay_ms) || 0,
+          error: typeof json.error === 'string' ? json.error : 'unknown',
+          errorStatus: json.error_status ?? null,
+        })
+        return
+      }
+
       // 事件归属：子 agent 的事件带 parent_tool_use_id（主线程为 null 或缺省）
       const parentId = typeof json.parent_tool_use_id === 'string' && json.parent_tool_use_id ? json.parent_tool_use_id : null
 
@@ -407,6 +437,7 @@ export async function claudeCliChatStream(
       if (type === 'assistant') {
         // 主线程完整消息已由 stream_event 流式覆盖，跳过防重复；子 agent 只有完整事件，这里转发转录
         if (!parentId) return
+        if (process.env.QYRIS_CLI_DEBUG) console.log(`[ai-cli] assistant (sub-agent) parentId=${parentId}`)
         const contentArr = (json.message as Json | undefined)?.content
         for (const block of Array.isArray(contentArr) ? (contentArr as Json[]) : []) {
           if (block?.type === 'text' && typeof block.text === 'string' && block.text.trim()) {
@@ -435,6 +466,7 @@ export async function claudeCliChatStream(
           if (block?.type !== 'tool_result') continue
           const id = String(block.tool_use_id ?? '')
           if (!id) continue
+          if (process.env.QYRIS_CLI_DEBUG) console.log(`[ai-cli] user tool_result id=${id} parentId=${parentId ?? 'null'}`)
           const text = toolResultText(block.content)
           const isError = block.is_error === true
           if (parentId) {
@@ -495,8 +527,11 @@ export async function claudeCliChatStream(
       settle(() => reject(new Error(`Claude CLI 启动失败：${errorMessage(e)}`)))
     })
 
-    // 等 close 而非 exit：确保 stdio 冲刷完毕
-    child.on('close', (code, signal) => {
+    // 等 close 而非 exit：确保 stdio 冲刷完毕。
+    // 但 Windows 下孙进程（子 agent / 工具命令）可能继承 stdout 管道句柄——CLI 已退出而
+    // 管道不关 → close 永不触发 → 主 agent 永久卡 streaming。exit 后 3s 强制收口兜底。
+    let closeFallback: NodeJS.Timeout | null = null
+    const finalizeAndSettle = (code: number | null, signal: NodeJS.Signals | null): void => {
       settle(() => {
         const finalizeContent = (): {
           content: string | null
@@ -557,11 +592,24 @@ export async function claudeCliChatStream(
         const detail = translateCliError(stderrTail) ?? clip(stderrTail.trim(), 400)
         reject(new Error(`Claude CLI 异常退出（exit ${code ?? -1}）：${detail || '无错误输出'}`))
       })
+    }
+    child.on('close', (code, signal) => {
+      if (closeFallback) { clearTimeout(closeFallback); closeFallback = null }
+      finalizeAndSettle(code, signal)
+    })
+    child.on('exit', (code) => {
+      // exit 已触发而 close 迟迟不来 → 孙进程持有 stdio 管道。3s 后销毁流强制收口。
+      closeFallback = setTimeout(() => {
+        closeFallback = null
+        child.stdout?.destroy()
+        child.stderr?.destroy()
+        finalizeAndSettle(code, null)
+      }, 3000)
     })
   })
 }
 
-/** stderr 转译 */
+/** stderr 转译（覆盖官方 api_retry 事件的 error 枚举对应模式） */
 function translateCliError(stderrTail: string): string | null {
   if (/not logged in|please (run )?\/login|Invalid API key|authentication|unauthorized/i.test(stderrTail)) {
     return 'Claude CLI 未登录或凭据失效：请在终端运行 claude 完成登录（或设置 ANTHROPIC_API_KEY 环境变量）'
@@ -571,6 +619,21 @@ function translateCliError(stderrTail: string): string | null {
   }
   if (/Unknown model|invalid model|not found.*model/i.test(stderrTail)) {
     return 'Claude CLI 不认识当前主模型名：请在设置中把主模型改为 sonnet / opus / haiku 或完整模型 ID'
+  }
+  if (/rate.?limit|429|too many requests/i.test(stderrTail)) {
+    return 'Claude CLI 触发速率限制（rate_limit）：请稍后重试，或检查 API 账户配额'
+  }
+  if (/overloaded|529|capacity/i.test(stderrTail)) {
+    return 'Claude CLI 服务过载（overloaded）：Anthropic 服务暂时繁忙，将自动重试'
+  }
+  if (/billing|payment|insufficient.?funds|quota.?exceeded/i.test(stderrTail)) {
+    return 'Claude CLI 账户计费问题（billing_error）：请检查 API 账户余额或订阅状态'
+  }
+  if (/max.?output.?tokens|output.?limit/i.test(stderrTail)) {
+    return 'Claude CLI 输出 token 超限（max_output_tokens）：回复过长被截断，请尝试拆分任务'
+  }
+  if (/invalid.?request|400|bad.?request/i.test(stderrTail)) {
+    return 'Claude CLI 请求格式错误（invalid_request）：可能是参数不兼容，请检查 CLI 版本'
   }
   return null
 }
