@@ -153,7 +153,7 @@ const CURSOR_META_PREFIX = 'mem_cursor:'
 
 /** 读持久化游标：无记录回 null（从未蒸馏），有记录回 seq 数值（含 0） */
 async function loadPersistedCursor(db: SqliteDb, ck: string): Promise<number | null> {
-  const row = db
+  const row = await db
     .prepare('SELECT value FROM meta WHERE key = ?')
     .get(CURSOR_META_PREFIX + ck) as { value: string } | undefined
   if (!row?.value) return null
@@ -178,10 +178,10 @@ async function deletePersistedCursor(db: SqliteDb, ck: string): Promise<void> {
 }
 
 async function maxSeqOf(db: SqliteDb, key: string, sessionId: string): Promise<number> {
-  const row = db
+  const row = await db
     .prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM messages WHERE project_key = ? AND session_id = ?')
     .get(key, sessionId) as { seq: number }
-  return Number(row.seq)
+  return Number(row?.seq ?? 0)
 }
 
 // ---------- 测试钩子 ----------
@@ -225,7 +225,7 @@ export async function memoryMaybeExtract(projectRoot: string, sessionId: string)
     cur = { cursor: (await loadPersistedCursor(db, ck)) ?? 0, lastRunAt: 0 }
     cursors.set(ck, cur)
   }
-  const row = db
+  const row = await db
     .prepare(
       "SELECT COUNT(*) AS n FROM messages WHERE project_key = ? AND session_id = ? AND seq > ? AND role = 'assistant'",
     )
@@ -271,7 +271,7 @@ export async function sessionEnded(projectRoot: string, sessionId: string): Prom
 /** 从 messages 表查该工程最新 session_id（lastSession 缓存未命中时兜底） */
 async function latestSessionId(projectRoot: string): Promise<string | null> {
   const db = await getDb()
-  const row = db
+  const row = await db
     .prepare('SELECT session_id FROM messages WHERE project_key = ? ORDER BY created_at DESC LIMIT 1')
     .get(projectKey(projectRoot)) as { session_id: string } | undefined
   return row?.session_id ?? null
@@ -357,7 +357,7 @@ async function runExtractionInner(projectRoot: string, sessionId: string, trigge
   const cur = cursors.get(ck)
   if (!cur) return 0
   const db = await getDb()
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT id, seq, role, content, tool_json FROM messages
        WHERE project_key = ? AND session_id = ? AND seq > ? ORDER BY seq ASC`,
@@ -369,7 +369,7 @@ async function runExtractionInner(projectRoot: string, sessionId: string, trigge
       //（重复内容由 applyOps 的去重护栏折叠为 patch，不会产生重复行）
       cursors.set(ck, { cursor: 0, lastRunAt: clock() })
       await persistCursor(db, ck, 0)
-      const allRows = db
+      const allRows = await db
         .prepare(`SELECT id, seq, role, content, tool_json FROM messages WHERE project_key = ? AND session_id = ? ORDER BY seq ASC`)
         .all(projectKey(projectRoot), sessionId) as TranscriptRow[]
       if (allRows.length === 0) return 0

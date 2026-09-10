@@ -67,12 +67,12 @@ async function appendTurn(root: string, sessionId: string, tag: string, n: numbe
 
 async function messageCount(): Promise<number> {
   const db = await getDb()
-  return Number((db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n)
+  return Number((await db.prepare('SELECT COUNT(*) AS n FROM messages').get() as { n: number }).n)
 }
 
 async function memRowCount(): Promise<number> {
   const db = await getDb()
-  return Number((db.prepare('SELECT COUNT(*) AS n FROM mem_items').get() as { n: number }).n)
+  return Number((await db.prepare('SELECT COUNT(*) AS n FROM mem_items').get() as { n: number }).n)
 }
 
 /** 确定性假嵌入：字符 trigram 词袋 → 512 维并 L2 归一化（与 smoke-memory 同款） */
@@ -295,7 +295,7 @@ async function main(): Promise<void> {
     await noteLesson(root, 'S1', { title: '另一个教训', content: 'x' })
     await checkAsync('不同 title 照常新建', async () => {
       const db = await getDb()
-      const n = (db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE category = 'lesson'").get() as { n: number }).n
+      const n = (await db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE category = 'lesson'").get() as { n: number }).n
       assert.equal(Number(n), 2)
     })
 
@@ -358,18 +358,18 @@ async function main(): Promise<void> {
 
     console.log('⑫ 嵌入模型指纹（P1 遗留修复②）：')
     const dbFp = await getDb()
-    const readFp = (): string | undefined =>
-      (dbFp.prepare("SELECT value FROM meta WHERE key = 'embed_model_fingerprint'").get() as { value: string } | undefined)?.value
-    const fp = readFp()
+    const readFp = async (): Promise<string | undefined> =>
+      (await dbFp.prepare("SELECT value FROM meta WHERE key = 'embed_model_fingerprint'").get() as { value: string } | undefined)?.value
+    const fp = await readFp()
     check('首嵌已写入指纹（模型id|维度）', () => {
       assert.ok(fp)
       assert.match(fp as string, /\|\d+$/)
     })
-    dbFp.prepare("UPDATE meta SET value = 'other-model|999' WHERE key = 'embed_model_fingerprint'").run()
+    await dbFp.prepare("UPDATE meta SET value = 'other-model|999' WHERE key = 'embed_model_fingerprint'").run()
     const d1 = await memorySearch('部署流程约定', root)
     check('指纹不符 → 向量路停用（degraded=true）', () => assert.equal(d1.degraded, true))
     check('指纹不符时关键词路不受影响', () => assert.ok(d1.hits.length >= 1))
-    dbFp.prepare('UPDATE meta SET value = ? WHERE key = ?').run(fp, 'embed_model_fingerprint')
+    await dbFp.prepare('UPDATE meta SET value = ? WHERE key = ?').run(fp, 'embed_model_fingerprint')
     const d2 = await memorySearch('部署流程约定', root)
     check('指纹恢复 → 向量路恢复（degraded=false）', () => assert.equal(d2.degraded, false))
 

@@ -117,30 +117,21 @@ export async function messageAppend(
 ): Promise<{ seq: number }> {
   const db = await getDb()
   const key = projectKey(projectRoot)
+  // 事务内用子查询 INSERT：SELECT MAX + INSERT 原子执行，消灭并发竞态窗口
   const results = await db.transaction([
-    { sql: 'SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM messages WHERE project_key = ? AND session_id = ?', params: [key, sessionId] },
     {
-      sql: `INSERT INTO messages (id, project_key, session_id, seq, role, content, reasoning, meta_json, tool_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO messages (id, project_key, session_id, seq, role, content, reasoning, meta_json, tool_json, created_at)
+            VALUES (?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE project_key = ? AND session_id = ?), ?, ?, ?, ?, ?, ?)`,
       params: [
-        message.id, key, sessionId, /* seq placeholder */ 0, message.role, message.content ?? '',
+        message.id, key, sessionId, key, sessionId, message.role, message.content ?? '',
         message.reasoning ?? null, toJson(message.meta), toolJson(message), Date.now(),
       ],
     },
+    { sql: 'SELECT seq FROM messages WHERE id = ?', params: [message.id] },
   ])
-  // 第一条返回 seq，第二条是 INSERT
-  const maxRow = ((results[0] as unknown[]) ?? [])[0] as { seq: number } | undefined
-  const nextSeq = maxRow ? Number(maxRow.seq) : 1
-  // 用正确的 seq 重跑 INSERT（事务已回滚，需重新执行）
-  // 优化：改为单条 SQL 用子查询
-  await db.run(
-    `INSERT INTO messages (id, project_key, session_id, seq, role, content, reasoning, meta_json, tool_json, created_at)
-     VALUES (?, ?, ?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM messages WHERE project_key = ? AND session_id = ?), ?, ?, ?, ?, ?, ?)`,
-    message.id, key, sessionId, key, sessionId, message.role, message.content ?? '',
-    message.reasoning ?? null, toJson(message.meta), toolJson(message), Date.now(),
-  )
-  // 读回实际分配的 seq
-  const row = await db.get('SELECT seq FROM messages WHERE id = ?', message.id) as { seq: number } | undefined
-  return { seq: row?.seq ?? nextSeq }
+  // 第一条是 INSERT，第二条读回实际分配的 seq
+  const seqRow = ((results[1] as unknown[]) ?? [])[0] as { seq: number } | undefined
+  return { seq: seqRow?.seq ?? 1 }
 }
 
 export async function messagePatch(

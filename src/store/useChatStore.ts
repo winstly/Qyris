@@ -567,6 +567,8 @@ function persistUpsert(project: string, msg: ChatMessage): void {
     void persistPatchLatest(project, sessionId, msg)
     return
   }
+  // 防重复：同一 msgId 的 append 已在途则跳过（finalizeAssistant + handleCliToolResult 竞态防护）
+  if (inflightAppends.has(msg.id)) return
   const p = api.messageAppend(project, sessionId, msg)
     .then((r) => {
       // 回挂 seq：按 id 定位（切片可能已被流式更新）；切片已换代找不到该消息则只当落库成功

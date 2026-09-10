@@ -208,9 +208,9 @@ export async function memorySearch(
   const headroom = limit * 3 // 融合前多捞，补偿 scope/status 过滤与两路交叉
 
   // 关键词路：≥3 字走 FTS5 trigram 短语查询；1-2 字 trigram 无法成串，走 LIKE 兜底
-  const kwRows = q.length >= 3
+  const kwRows = await (q.length >= 3
     ? searchFts(db, q, key, includeArchived, headroom)
-    : searchLike(db, q, key, includeArchived, headroom)
+    : searchLike(db, q, key, includeArchived, headroom))
 
   // 向量路：KNN 召回（embed 失败/超维不阻断，降级关键词路）
   let vecRows: { row: MemRow; distance: number }[] = []
@@ -226,10 +226,10 @@ export async function memorySearch(
         if (!nonzero) vec = null
       }
       if (vec) {
-        const near = db
+        const near = await db
           .prepare('SELECT item_id, distance FROM mem_vec WHERE embedding MATCH ? ORDER BY distance LIMIT ?')
           .all(vec, headroom) as { item_id: string; distance: number }[]
-        const byId = fetchRowsByIds(db, near.map((n) => n.item_id))
+        const byId = await fetchRowsByIds(db, near.map((n) => n.item_id))
         for (const n of near) {
           if (Number(n.distance) > VEC_DISTANCE_CAP) continue
           const row = byId.get(n.item_id)
@@ -271,7 +271,7 @@ export async function memorySearch(
     setImmediate(() => {
       try {
         const touch = db.prepare('UPDATE mem_items SET access_count = access_count + 1, last_accessed_at = ? WHERE id = ?')
-        for (const id of ids) touch.run(ts, id)
+        for (const id of ids) void touch.run(ts, id)
       } catch { /* 静默：不阻塞检索主链路 */ }
     })
   }
@@ -283,7 +283,7 @@ export async function memorySearch(
  *  embed 期间条目被并发删除时 UPDATE 影响 0 行 → 向量一并放弃，不留孤儿。 */
 export async function memoryUpdate(id: string, patch: MemoryPatch): Promise<MemoryItem> {
   const db = await getDb()
-  const row = getRow(db, id)
+  const row = await getRow(db, id)
   if (!row) throw new Error(`记忆不存在：${id}`)
   const nextTitle = typeof patch.title === 'string' ? patch.title : row.title
   const nextContent = typeof patch.content === 'string' ? patch.content : row.content
@@ -338,7 +338,7 @@ export async function memoryMoveScope(
   id: string, target: 'project' | 'user', projectRoot?: string,
 ): Promise<MemoryItem> {
   const db = await getDb()
-  const row = getRow(db, id)
+  const row = await getRow(db, id)
   if (!row) throw new Error(`记忆不存在：${id}`)
   if (row.category === 'summary') throw new Error('会话滚动摘要不支持 scope 转换')
   const toUser = target === 'user'
@@ -546,7 +546,7 @@ const SUMMARY_TITLE = '会话滚动摘要'
 /** 该 session 的 active 滚动摘要正文（无则 null）——memory_session_context 通道 */
 export async function sessionSummary(projectRoot: string, sessionId: string): Promise<string | null> {
   const db = await getDb()
-  const row = db
+  const row = await db
     .prepare(
       `SELECT content FROM mem_items
        WHERE project_key = ? AND session_id = ? AND tier = 'short' AND category = 'summary' AND status = 'active'
@@ -657,7 +657,7 @@ export async function listContextTitles(
 ): Promise<{ id: string; category: string; title: string }[]> {
   const db = await getDb()
   const key = projectKey(projectRoot)
-  return db
+  return await db
     .prepare(
       `SELECT id, category, title FROM mem_items
        WHERE status = 'active'
@@ -702,14 +702,14 @@ const ARCHIVE_SHORT_MAX_ACCESS = 1
 export async function runDecayJob(): Promise<DecayStats> {
   const db = await getDb()
   const now = Date.now()
-  const decayed = db
+  const decayed = await db
     .prepare(
       `UPDATE mem_items SET importance = MAX(importance - ?, ?)
        WHERE tier = 'long' AND status = 'active'
          AND COALESCE(last_accessed_at, created_at) < ?`,
     )
     .run(DECAY_IMPORTANCE_STEP, DECAY_IMPORTANCE_FLOOR, now - DECAY_LONG_STALE_MS)
-  const archived = db
+  const archived = await db
     .prepare(
       `UPDATE mem_items SET status = 'archived'
        WHERE tier = 'short' AND status = 'active' AND created_at < ? AND access_count <= ?`,
@@ -767,7 +767,7 @@ export async function maybeStartReembedJob(): Promise<void> {
  *  期间指纹闸门继续封锁向量路，半新半旧的向量不会被检索到）。 */
 async function runReembedJob(expected: string): Promise<void> {
   const db = await getDb()
-  const items = db
+  const items = await db
     .prepare("SELECT id, title, content FROM mem_items WHERE status = 'active' ORDER BY rowid")
     .all() as { id: string; title: string; content: string }[]
   if (items.length === 0) {
@@ -795,7 +795,7 @@ async function runReembedJob(expected: string): Promise<void> {
     }
     // 补漏：作业期间新建的条目被指纹闸门挡在向量路外、又不在上面的快照里——
     // 按「active 但无向量行」补嵌一轮，否则它们要等下一次指纹变更才进得了向量路
-    const missing = db
+    const missing = await db
       .prepare("SELECT id, title, content FROM mem_items WHERE status = 'active' AND id NOT IN (SELECT item_id FROM mem_vec)")
       .all() as { id: string; title: string; content: string }[]
     for (let i = 0; i < missing.length; i += REEMBED_BATCH) {
@@ -863,7 +863,7 @@ function activeDialog(): MemoryDialogAdapter {
 export async function memoryExportData(scope: 'project' | 'global' | 'all', projectRoot?: string): Promise<MemoryExportPayload> {
   const db = await getDb()
   const { where, params } = scopeWhere(scope, projectRoot)
-  const rows = db
+  const rows = await db
     .prepare(`SELECT * FROM mem_items WHERE ${where} ORDER BY created_at ASC`)
     .all(...params) as MemRow[]
   return { version: 1, exportedAt: Date.now(), items: rows.map(rowToItem) }
