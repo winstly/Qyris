@@ -92,6 +92,8 @@ interface AppState {
   filesSplitRatio: number
   /** 文件 Tab 内 Git 工作区面板高度占左栏比例 */
   gitPanelRatio: number
+  /** 文件 Tab 内搜索面板高度占左栏比例 */
+  searchPanelRatio: number
 
   projectPath: string | null
   projectName: string
@@ -126,9 +128,13 @@ interface AppState {
   /** 左侧记忆侧边栏展开/收起（独立于工作区 Tab） */
   memorySidebarOpen: boolean
   toggleMemorySidebar: () => void
+  /** 文件 Tab 内搜索面板展开/收起 */
+  searchOpen: boolean
+  toggleSearch: () => void
   setSplitRatio: (r: number) => void
   setFilesSplitRatio: (r: number) => void
   setGitPanelRatio: (r: number) => void
+  setSearchPanelRatio: (r: number) => void
   setSettingsOpen: (open: boolean) => void
   setCreateProjectOpen: (open: boolean) => void
   incOpenSelect: () => void
@@ -137,6 +143,8 @@ interface AppState {
   saveSettings: (s: AiSettings) => Promise<void>
   refreshHasApiKey: () => Promise<void>
   boot: () => Promise<void>
+  /** 拉取盘上配置并刷新本窗口镜像（boot 与 config:changed 多窗口同步共用） */
+  refreshRemoteConfig: () => Promise<void>
   openProjectDialog: () => Promise<void>
   openProject: (path: string) => Promise<void>
   removeRecentProject: (path: string) => void
@@ -164,6 +172,8 @@ interface AppState {
   resolveDialog: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
   /** 直接关闭当前对话框（不触发 resolve）。holdOpen 异步任务完成后由调用方调用 */
   closeDialog: () => void
+  /** 更新当前对话框的消息/进度文案（不关闭、不触发 resolve），holdOpen 场景用于展示异步进度 */
+  patchDialog: (patch: { message?: string; confirmingText?: string }) => void
 }
 
 export const useAppStore = create<AppState>()(
@@ -172,9 +182,11 @@ export const useAppStore = create<AppState>()(
       booted: false,
       activeTab: 'preview',
       memorySidebarOpen: false,
+      searchOpen: false,
       splitRatio: 0.74,
       filesSplitRatio: 0.26,
       gitPanelRatio: 0.45,
+      searchPanelRatio: 0.35,
       projectPath: null,
       projectName: '',
       settingsOpen: false,
@@ -196,9 +208,11 @@ export const useAppStore = create<AppState>()(
 
       setTab: (t) => set({ activeTab: t }),
       toggleMemorySidebar: () => set((s) => ({ memorySidebarOpen: !s.memorySidebarOpen })),
+      toggleSearch: () => set((s) => ({ searchOpen: !s.searchOpen })),
       setSplitRatio: (r) => set({ splitRatio: Math.min(0.85, Math.max(0.5, r)) }),
       setFilesSplitRatio: (r) => set({ filesSplitRatio: Math.min(0.5, Math.max(0.15, r)) }),
       setGitPanelRatio: (r) => set({ gitPanelRatio: Math.min(0.75, Math.max(0.2, r)) }),
+      setSearchPanelRatio: (r) => set({ searchPanelRatio: Math.min(0.75, Math.max(0.15, r)) }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
       setCreateProjectOpen: (open) => set({ createProjectOpen: open }),
       incOpenSelect: () => set((s) => ({ openSelectCount: s.openSelectCount + 1 })),
@@ -212,7 +226,7 @@ export const useAppStore = create<AppState>()(
         try {
           await api.mergeConfig({
             aiBaseUrl: s.baseUrl, aiModel: s.model, aiProvider: s.provider, aiTiers: s.tiers,
-            aiDispatchMode: s.dispatchMode, aiCliPermission: s.cliPermission,
+            aiDispatchMode: s.dispatchMode, aiCliPermission: s.cliPermission, aiCliCommand: s.cliCommand ?? null,
           })
         } catch { /* 配置盘写失败不阻塞界面 */ }
       },
@@ -224,11 +238,9 @@ export const useAppStore = create<AppState>()(
         } catch { /* keychain 不可用时不阻塞 */ }
       },
 
-      boot: async () => {
-        if (!isDesktop) {
-          set({ booted: true })
-          return
-        }
+      /** 拉取盘上配置并刷新本窗口镜像（boot 与 config:changed 事件共用；不触发项目恢复） */
+      refreshRemoteConfig: async () => {
+        if (!isDesktop) return
         try {
           const cfg = await api.getConfig()
           const s: AiSettings = {
@@ -237,6 +249,7 @@ export const useAppStore = create<AppState>()(
             provider: cfg.aiProvider || DEFAULT_SETTINGS.provider,
             dispatchMode: cfg.aiDispatchMode ?? DEFAULT_SETTINGS.dispatchMode,
             cliPermission: cfg.aiCliPermission ?? DEFAULT_SETTINGS.cliPermission,
+            cliCommand: cfg.aiCliCommand ?? null,
             tiers: cfg.aiTiers,
           }
           const scm = cfg.startupCommands ?? {}
@@ -246,6 +259,17 @@ export const useAppStore = create<AppState>()(
           useSettingsStore.getState().setSettings(s)
           useSettingsStore.getState().setSkillsDirs(sd)
           useStartupStore.getState().loadFromMap(scm)
+        } catch { /* 配置读取失败沿用现有镜像 */ }
+      },
+
+      boot: async () => {
+        if (!isDesktop) {
+          set({ booted: true })
+          return
+        }
+        try {
+          await get().refreshRemoteConfig()
+          const cfg = await api.getConfig()
           // 扫描 skills 目录（异步，不阻塞启动）
           if ((cfg.skillsDirs ?? []).length > 0) {
             void get().loadSkills()
@@ -547,6 +571,12 @@ export const useAppStore = create<AppState>()(
       },
 
       closeDialog: () => set({ dialog: null }),
+
+      patchDialog: (patch) => {
+        const d = get().dialog
+        if (!d) return
+        set({ dialog: { ...d, ...patch } })
+      },
     }),
     {
       name: 'fw-ui',
@@ -555,6 +585,7 @@ export const useAppStore = create<AppState>()(
         splitRatio: s.splitRatio,
         filesSplitRatio: s.filesSplitRatio,
         gitPanelRatio: s.gitPanelRatio,
+        searchPanelRatio: s.searchPanelRatio,
         theme: s.theme,
       }),
     },

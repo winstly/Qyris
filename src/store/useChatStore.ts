@@ -26,8 +26,10 @@ import { useAppStore } from './useAppStore'
 import { useStartupStore } from './useStartupStore'
 import { useAgentStore, type AgentEntryTool } from './useAgentStore'
 import { uid, safeParseObject } from '@/utils/id'
-import { estimateTokens } from '@/utils/tokens'
-import { buildHistory } from '@/utils/chatHistory'
+import { estimateTokens, estimateMessagesTokens } from '@/utils/tokens'
+import { buildHistory, HISTORY_WINDOW } from '@/utils/chatHistory'
+import { CancellationTokenSource } from '@base/cancellation'
+import { sleepInterruptible as tokenSleep } from '@base/async'
 import type {
   AiCompletion, ChatMessage, CliAgentEventPayload, MemoryHit, OAIMessage, ToolCall,
 } from '@/types'
@@ -197,6 +199,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       : trimmed
     const userMsg: ChatMessage = { id: uid(), role: 'user', content, meta }
     patchSlice(project, { messages: [...cur.messages, userMsg], status: 'streaming', cancelled: false, pendingElement: null })
+    resetCancelSource(project)
     // 稳定点：用户消息立即落库，seq 由 append 返回后回挂
     persistUpsert(project, userMsg)
     await runAgentLoop(project)
@@ -399,6 +402,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const cur = getSlice(project)
     if (!cur) return
     patchSlice(project, { cancelled: true })
+    // 统一取消：token 事件即时唤醒 sleepInterruptible 等所有等待者（重试退避不再空等）
+    cancelTokenOf(project).cancel()
     // 硬取消：通知主进程 abort 该请求的流（网络层中断，不再消耗响应）
     if (cur.status === 'streaming' && cur.activeRequestId) {
       void api.aiCancel(cur.activeRequestId).catch(() => {})
@@ -441,6 +446,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       // skipFinalExtract（勾选删除记忆时）必须跳过：否则清空记忆后立刻从旧消息蒸出新记忆，等于没删
       void api.sessionEnded(project, cur.sessionId).catch(() => {})
     }
+    // 清除压缩缓存（换会话后旧压缩结果不适用）
+    clearCompressCache(cur.sessionId)
     // 开新会话：换 sessionId/epoch，旧消息保留但不再自动加载（saveCurrentSession 写 meta 表）
     const newSessionId = uid()
     patchSlice(project, {
@@ -485,6 +492,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const idx = cur.messages.findIndex((m) => m.id === messageId)
     if (idx === -1) return
     const finalMeta = meta ?? cur.messages[idx].meta
+    // 清除压缩缓存（编辑重发后历史变化，需要重新评估）
+    clearCompressCache(cur.sessionId)
     // 内存与库同构：库侧覆写会清空 toolCalls/toolResults/reasoning（见下方 messagePatch），
     // 切片同步清空——否则重启前内存视图残留旧工具卡，与库不一致
     const messages = [
@@ -533,6 +542,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       hasMoreOlder: session.hasMoreOlder,
       oldestSeq: session.oldestSeq,
     })
+    resetCancelSource(project)
     // 恢复会话 token 用量（异步，不阻塞渲染）
     void api.loadSessionTokens(project, session.sessionId).then((t) => {
       const s = getSlice(project)
@@ -635,22 +645,29 @@ function isRetryableError(msg: string): boolean {
   return /无法连接|连接中断|ENOTFOUND|ECONNRESET|ETIMEDOUT|ECONNREFUSED|econnreset|fetch failed|网络|超时/i.test(msg)
 }
 
-/** 分片 sleep：每 500ms 检查一次取消，返回 true 表示被「停止」中断 */
+// ---------- 统一取消（vscode CancellationToken 纪律） ----------
+
+/** 工程 → 取消源：send 时重建，cancelProject 时 cancel——token 事件即时唤醒所有等待者 */
+const cancelSources = new Map<string, CancellationTokenSource>()
+
+/** 工程切片的取消 token（惰性：首次取用时创建） */
+function cancelTokenOf(project: string): CancellationTokenSource {
+  let cts = cancelSources.get(project)
+  if (!cts) {
+    cts = new CancellationTokenSource()
+    cancelSources.set(project, cts)
+  }
+  return cts
+}
+
+/** 重置工程取消状态（send 重发时调用）：旧 source 作废（取消态清零） */
+function resetCancelSource(project: string): void {
+  cancelSources.delete(project)
+}
+
+/** 分片 sleep：token 事件驱动即时唤醒（替代旧 500ms 轮询），返回 true 表示被「停止」中断 */
 function sleepInterruptible(project: string, ms: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const step = 500
-    let elapsed = 0
-    const tick = (): void => {
-      if (getSlice(project)?.cancelled) {
-        resolve(true)
-        return
-      }
-      elapsed += step
-      if (elapsed >= ms) resolve(false)
-      else setTimeout(tick, step)
-    }
-    setTimeout(tick, step)
-  })
+  return tokenSleep(ms, cancelTokenOf(project).token).then((full) => !full)
 }
 
 /** project → ask 的挂起 resolver（多工程并存时各自独立） */
@@ -736,14 +753,106 @@ async function fetchMemoryContext(project: string, epoch: number, messages: Chat
 function fireMaybeExtract(project: string, epoch: number): void {
   const s = getSlice(project)
   if (!s || s.epoch !== epoch) return
-  void api.memoryMaybeExtract(project, s.sessionId).catch(() => {})
+  void api.memoryMaybeExtract(project, s.sessionId).catch((e) => {
+    console.warn(`[chat] memoryMaybeExtract IPC 失败：${String(e)}`)
+  })
+}
+
+// ---------- 上下文压缩（P2：token 超阈值时压缩旧消息为摘要） ----------
+
+/** 压缩结果缓存：sessionId → { summaryBlock, compressedAt }，同一个会话只压缩一次旧部分 */
+const compressCache = new Map<string, { summaryBlock: string; messageCount: number }>()
+
+/** 清除某工程的压缩缓存（clear / editAndResend 时调用） */
+function clearCompressCache(sessionId: string): void {
+  compressCache.delete(sessionId)
+}
+
+/** 默认上下文压缩阈值（token） */
+const DEFAULT_CONTEXT_COMPRESS_THRESHOLD = 256_000
+
+/**
+ * 压缩旧消息：当 buildHistory 产出的历史总 token 超过阈值时，
+ * 对窗口外的旧消息做 LLM 摘要压缩，压缩结果注入 system 区。
+ *
+ * 策略：
+ *  - 窗口内（最近 HISTORY_WINDOW 条）保留原文
+ *  - 窗口外的旧消息交给 LLM 生成精简摘要（保留关键事实、决策、待办）
+ *  - 压缩结果按 sessionId 缓存——同一会话不重复压缩（新增消息由窗口自然滚动处理）
+ *  - 压缩失败静默降级：回退到纯 windowSlice（不阻塞对话主链路）
+ */
+async function maybeCompressContext(
+  project: string, epoch: number, messages: ChatMessage[], history: OAIMessage[],
+): Promise<{ history: OAIMessage[]; contextSummary: string | null }> {
+  // 阈值：读配置，缺省 256k
+  let threshold = DEFAULT_CONTEXT_COMPRESS_THRESHOLD
+  try {
+    const cfg = await api.getConfig()
+    if (cfg.contextCompressThreshold) threshold = cfg.contextCompressThreshold
+  } catch { /* 用默认值 */ }
+
+  const totalTokens = estimateMessagesTokens(history)
+  if (totalTokens < threshold) return { history, contextSummary: null }
+
+  // 已有缓存且消息数未显著增加（新增 <5 条 → 窗口自然滚动，无需重压缩）→ 复用
+  const slice = getSlice(project)
+  const sessionId = slice?.sessionId ?? ''
+  const cached = compressCache.get(sessionId)
+  if (cached && messages.length - cached.messageCount < 5) {
+    return { history, contextSummary: cached.summaryBlock }
+  }
+
+  // 取窗口外的旧消息（windowSlice 切掉的那部分）
+  const windowStart = Math.max(0, messages.length - HISTORY_WINDOW)
+  // 确保窗口起始在 user 边界
+  let safeStart = windowStart
+  while (safeStart > 0 && messages[safeStart].role !== 'user') safeStart--
+  if (safeStart === 0) return { history, contextSummary: null } // 没有足够旧消息可压缩
+
+  const oldMessages = messages.slice(0, safeStart)
+  // 组装压缩请求的转录文本（纯 user/assistant 内容，不付工具细节 token）
+  const transcript: string[] = []
+  for (const m of oldMessages) {
+    if (m.role === 'user') transcript.push(`用户：${m.content}`)
+    else if (m.role === 'assistant' && m.content) transcript.push(`助手：${m.content}`)
+  }
+  const transcriptText = transcript.join('\n')
+  if (transcriptText.length < 200) return { history, contextSummary: null } // 太短不值得压缩
+
+  // LLM 压缩：复用主对话的 provider/settings（单次 headless 调用）
+  try {
+    const requestId = `ctx-compress-${Date.now()}`
+    const settings = useSettingsStore.getState().settings
+    const compressSystem = '你是上下文压缩器。请将以下对话历史压缩为精简摘要（200-500字），保留：①关键事实与决策 ②用户偏好与约束 ③未完成的任务与待办 ④重要的技术细节（文件路径、配置值、版本号）。不要保留寒暄、确认性回复、已完成的中间步骤。输出纯文本摘要，不要加任何前缀或格式标记。'
+    const completion = await api.aiChatStream(
+      requestId, settings.provider, settings.baseUrl, settings.model,
+      [
+        { role: 'system', content: compressSystem },
+        { role: 'user', content: `请压缩以下对话历史（${oldMessages.length} 条消息）：\n\n${transcriptText.slice(0, 20000)}` },
+      ],
+      undefined, // 不给工具
+      settings.dispatchMode, project, undefined,
+    )
+    // 压缩 LLM 调用期间会话已换代：丢弃结果
+    if (getSlice(project)?.epoch !== epoch) return { history, contextSummary: null }
+    const summary = (completion.content ?? '').trim()
+    if (!summary) return { history, contextSummary: null }
+
+    // 缓存并返回
+    compressCache.set(sessionId, { summaryBlock: summary, messageCount: messages.length })
+    console.info(`[chat] 上下文压缩：${oldMessages.length} 条旧消息 → ${summary.length} 字摘要（原 ${totalTokens} token，阈值 ${threshold}）`)
+    return { history, contextSummary: summary }
+  } catch (e) {
+    console.warn(`[chat] 上下文压缩失败，降级为纯窗口切片：${String(e)}`)
+    return { history, contextSummary: null }
+  }
 }
 
 async function runAgentLoop(project: string) {
   const slice0 = getSlice(project)
   const epoch = slice0?.epoch ?? 0
   const messages = slice0?.messages ?? []
-  const history = buildHistory(messages)
+  const history0 = buildHistory(messages)
   const appState = useSettingsStore.getState()
   // 记忆上下文每轮循环只取一次：摘要/记忆块跨迭代复用，请求失败静默
   const { summary, summaryBlock, memoryBlock } = await fetchMemoryContext(project, epoch, messages)
@@ -752,6 +861,11 @@ async function runAgentLoop(project: string) {
   // 摘要存切片（跨工具轮迭代复用 + 可观测）；CLI 模式经 opts.sessionSummary/memoryBlock 透传主进程
   // （CLI 路径丢 system 消息，二者由 serializeConversation 前置进正文）；API 模式忽略 opts（已在 system）
   patchSlice(project, { lastSummary: summary })
+
+  // 上下文压缩：token 超阈值时压缩旧消息为摘要（每轮循环只取一次，跨工具轮迭代复用）
+  const { history: historyMessages, contextSummary } = await maybeCompressContext(project, epoch, messages, history0)
+  if (getSlice(project)?.epoch !== epoch) return
+  const history = historyMessages
 
   // CLI 模式：把上一轮模型请求附带的 Skill 以标记注入本轮首条 user 历史
   if (appState.settings.dispatchMode === 'claude-cli' && slice0 && slice0.cliSkills.length > 0) {
@@ -798,8 +912,9 @@ async function runAgentLoop(project: string) {
         const projectSkillMetas = useAppStore.getState().projectSkillMetas
         // 合并用户级 + 项目级 Skill（项目在前，用户在后）
         const allSkills = [...projectSkillMetas, ...skillMetas]
-        // 单 system 消息合并：基础提示词 + 会话摘要（在前）+ 长期记忆（在后）
-        const systemContent = [buildSystemPrompt(project, allSkills), summaryBlock, memoryBlock]
+        // 单 system 消息合并：基础提示词 + 会话摘要（在前）+ 上下文压缩摘要 + 长期记忆（在后）
+        const contextSummaryBlock = contextSummary ? `【早期对话摘要（原始历史已压缩）】\n${contextSummary}` : null
+        const systemContent = [buildSystemPrompt(project, allSkills), summaryBlock, contextSummaryBlock, memoryBlock]
           .filter((b): b is string => !!b)
           .join('\n\n')
         const payload: OAIMessage[] = [
@@ -884,22 +999,25 @@ async function runAgentLoop(project: string) {
       patchToolCard(project, tc.id, { status: 'running' }, epoch)
       let result: string
       let summary: string
+      let ok: boolean
       try {
         const args = safeParseObject(tc.arguments)
         if (tc.name === 'askUserQuestion') {
           const answer = await askUser(project, tc.id, String(args.question ?? '请回答'), parseOptions(args.options))
           result = `用户回答：${answer}`
           summary = answer
+          ok = true
         } else {
           const out = await executeTool(tc.name, args, tc.id, project)
           result = out.result
           summary = out.summary
+          ok = out.ok
         }
       } catch (e) {
         result = `工具执行失败：${String(e)}`
         summary = '执行失败'
+        ok = false
       }
-      const ok = !result.startsWith('错误') && !result.startsWith('工具执行失败')
       patchToolCard(project, tc.id, {
         status: ok ? 'done' : 'error',
         resultSummary: summary,

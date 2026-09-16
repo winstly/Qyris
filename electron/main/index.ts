@@ -2,7 +2,25 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { registerWindow, removeWindow, getAllWindows } from '../lib/emitter'
+import { registerWindow, removeWindow, getAllWindows, emitToAllWindows } from '../lib/emitter'
+import { setUnexpectedErrorHandler, isCancellationError } from '../../shared/base/errors'
+import { format as logFormat } from '../../shared/base/log'
+import { mainLog, attachFileLogging } from '../lib/log-file'
+
+// 全局兜底：未捕获异常不崩主进程，统一进日志。
+// （vscode onUnexpectedError 语义：取消不是错误，静默）
+setUnexpectedErrorHandler((e) => {
+  if (isCancellationError(e)) return
+  mainLog.error(`[unexpected] ${logFormat(e)}`)
+})
+process.on('uncaughtException', (e) => {
+  if (isCancellationError(e)) return
+  mainLog.error(`[uncaughtException] ${logFormat(e)}`)
+})
+process.on('unhandledRejection', (reason) => {
+  if (isCancellationError(reason)) return
+  mainLog.error(`[unhandledRejection] ${logFormat(reason)}`)
+})
 import * as fsops from '../lib/fsops'
 import * as config from '../lib/config'
 import * as watcher from '../lib/watcher'
@@ -75,20 +93,44 @@ function registerIpc(): void {
 
   // 文件系统（projectRoot 来自渲染层，主进程做 ensureInside 校验）
   handle('list_dir', (_e, p) => fsops.listDir(p.projectRoot, p.dir))
+  handle('list_dir_batch', (_e, p) => fsops.listDirBatch(p.projectRoot, p.dirs))
   handle('search_files', (_e, p) => fsops.searchFiles(p.projectRoot, p.query))
+  handle('grep_files', (_e, p) =>
+    fsops.grepFiles(p.projectRoot, String(p?.pattern ?? ''), {
+      glob: p?.glob ?? undefined,
+      maxResults: p?.maxResults ?? undefined,
+      caseSensitive: p?.caseSensitive === true,
+    }))
   handle('read_text_file', (_e, p) => fsops.readTextFile(p.projectRoot, p.path))
-  handle('write_text_file', (_e, p) => fsops.writeTextFile(p.projectRoot, p.path, p.content))
+  handle('write_text_file', (_e, p) =>
+    fsops.writeTextFile(p.projectRoot, p.path, p.content, {
+      expectedMtimeMs: p?.expectedMtimeMs ?? null,
+      force: p?.force === true,
+    }))
   handle('edit_text_file', (_e, p) => fsops.editTextFile(p.projectRoot, p.path, p.oldString, p.newString))
   handle('create_entry', (_e, p) => fsops.createEntry(p.projectRoot, p.parentDir, p.name, p.isDir))
   handle('rename_entry', (_e, p) => fsops.renameEntry(p.projectRoot, p.path, p.newName))
   handle('delete_entry', (_e, p) => fsops.deleteEntry(p.projectRoot, p.path))
   handle('copy_entry', (_e, p) => fsops.copyEntry(p.projectRoot, p.srcPath, p.destDir))
   handle('move_entry', (_e, p) => fsops.moveEntry(p.projectRoot, p.srcPath, p.destDir))
-  handle('delete_project_files', (_e, p) => fsops.deleteProjectFiles(p.projectRoot))
+  handle('delete_project_files', (_e, p) => {
+    // 真超时：fsp.rm 在 EBUSY 下可能卡住重试很久，前端 30s flag 杀不掉 IPC。
+    // 主进程侧用 AbortSignal.timeout 强制 reject，保证前端一定能收到响应。
+    return Promise.race([
+      fsops.deleteProjectFiles(p.projectRoot),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error('删除超时（15s），文件被其他程序占用。请关闭占用程序后手动删除，或重启电脑后重试。')), 15_000),
+      ),
+    ])
+  })
 
-  // 文件快照
-  handle('snapshot_file', (_e, p) => snapshot.snapshotFile(p.projectRoot, p.sessionId, p.path))
+  // 文件快照（v2：版本快照 + diff 预览 + 定点回退）
+  handle('snapshot_file', (_e, p) => snapshot.snapshotFile(p.projectRoot, p.sessionId, p.path, { version: p?.version === true }))
   handle('list_snapshots', (_e, p) => snapshot.listSnapshots(p.projectRoot))
+  handle('snapshot_versions', (_e, p) => snapshot.listFileSnapshotVersions(p.projectRoot, p.path))
+  handle('snapshot_read', (_e, p) => snapshot.readSnapshotContent(p.projectRoot, p.sessionId, p.path, p?.versionKey ?? null))
+  handle('snapshot_diff', (_e, p) => snapshot.snapshotDiff(p.projectRoot, p.sessionId, p.path, p?.versionKey ?? null))
+  handle('snapshot_restore_at', (_e, p) => snapshot.restoreSnapshotAt(p.projectRoot, p.sessionId, p.path, p?.versionKey ?? null))
   handle('restore_file', (_e, p) => snapshot.restoreFile(p.projectRoot, p.path))
   handle('restore_session', (_e, p) => snapshot.restoreSession(p.projectRoot, p.sessionId))
   handle('clear_project_snapshots', (_e, p) => snapshot.clearProjectSnapshots(p.projectRoot))
@@ -264,6 +306,9 @@ function registerIpc(): void {
     }
     return shell.openExternal(url)
   })
+  handle('open_in_explorer', (_e, { filePath }: { filePath: string }) => {
+    return shell.showItemInFolder(filePath)
+  })
   handle('start_element_pick', () => {
     void inspect.startElementPick(preview.getPreviewWebContents())
   })
@@ -342,17 +387,25 @@ function createWindow(): void {
   }
 }
 
-app.whenReady().then(() => {
-  // 清理上次异常退出遗留的服务进程树
+app.whenReady().then(async () => {
+  // 文件日志就绪（此前日志进 BufferLogger 缓冲，此刻回放）
+  attachFileLogging()
+  mainLog.info('[boot] 轻驭主进程启动')
+  // 配置变更广播：任一窗口/主进程写配置后，所有窗口收到变化的顶层键
+  config.onConfigChanged((keys) => {
+    emitToAllWindows('config:changed', [...keys])
+  })
+
+  // 清理上次异常退出遗留的服务进程树（异步校验命令行，不再阻塞启动）
   try {
-    const killed = proc.cleanupOrphanServices()
-    if (killed > 0) console.log(`[cleanup] 已清理 ${killed} 个上次遗留的服务进程`)
+    const killed = await proc.cleanupOrphanServices()
+    if (killed > 0) mainLog.info(`[cleanup] 已清理 ${killed} 个上次遗留的服务进程`)
   } catch { /* 清理失败不阻塞启动 */ }
 
   // 嵌入模型预热 + 蒸馏 token 恢复 + 记忆维护作业（fire-and-forget 不阻塞启动）：
   //  预热成功后跑指纹自愈（不符 → 全量重嵌）；衰减/归档作业 boot 调度（30s 首跑 + 每 6h）
   void warmupEmbed().then((ready) => {
-    if (ready) void memory.maybeStartReembedJob().catch((e) => console.warn(`[memory] 重嵌自愈失败：${String(e)}`))
+    if (ready) void memory.maybeStartReembedJob().catch((e) => mainLog.warn(`[memory] 重嵌自愈失败：${String(e)}`))
   })
   void memory.loadDistillTokens().catch(() => {})
   memory.startDecayJob()

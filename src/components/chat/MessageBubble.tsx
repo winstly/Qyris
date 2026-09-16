@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useRef, useMemo, memo } from 'react'
 import type { ChatMessage, SkillMeta } from '@/types'
 import { IconClose } from '@/components/common/icons'
 import { Markdown } from './Markdown'
@@ -8,7 +8,8 @@ import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { useAppStore } from '@/store/useAppStore'
 import { useSlashCommand, SlashMenu } from './SlashMenu'
 
-export function MessageBubble({ msg }: { msg: ChatMessage }) {
+// memo：流式增量只替换末条消息对象，历史气泡引用不变即可跳过重渲染（长会话滚动保帧关键）
+export const MessageBubble = memo(function MessageBubble({ msg }: { msg: ChatMessage }) {
   if (msg.role === 'user') {
     return <UserMessage msg={msg} />
   }
@@ -33,7 +34,7 @@ export function MessageBubble({ msg }: { msg: ChatMessage }) {
       {askCalls.map((tc) => <AskUserCard key={tc.id} call={tc} />)}
     </div>
   )
-}
+})
 
 function ReasoningBlock({ content }: { content: string }) {
   const [open, setOpen] = useState(false)

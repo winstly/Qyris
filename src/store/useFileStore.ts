@@ -7,6 +7,7 @@ import { create } from 'zustand'
 import { api } from '@/services/desktop'
 import { basename } from '@/utils/path'
 import type { TreeNode } from '@/types'
+import type { SnapshotVersion } from '../../shared/types'
 
 const MAX_REFRESH_DIRS = 40
 /** expandAll 的目录数上限：深/宽树防失控（node_modules 等已被主进程过滤，正常项目远达不到） */
@@ -23,6 +24,8 @@ interface FileState {
   activePath: string | null
   contents: Record<string, string>
   dirty: Record<string, true>
+  /** 打开/保存时的磁盘 mtime 基线：保存前回传主进程比对，外部改动不再被静默覆盖 */
+  mtimes: Record<string, number>
   binaryFiles: Record<string, true>
   truncatedFiles: Record<string, true>
   cursor: { line: number; col: number }
@@ -30,6 +33,8 @@ interface FileState {
   lastSavedAt: number | null
   /** 文件快照：绝对路径 → { ts, sessionId }（AI 写文件前的回退点，按会话分组） */
   snapshots: Record<string, { ts: number; sessionId: string }>
+  /** 快照历史弹层：当前查看的文件 + 其全部版本（null = 关闭） */
+  snapshotHistory: { path: string; versions: SnapshotVersion[] } | null
   /** 剪贴板：文件树剪切/复制操作 */
   clipboard: { srcPath: string; mode: 'cut' | 'copy' } | null
 
@@ -48,6 +53,8 @@ interface FileState {
   collapseAll: (dir: string) => void
   refreshExpanded: () => Promise<void>
   openFile: (path: string) => Promise<void>
+  /** 展开文件树到目标文件所在目录（从根到文件的每一级目录都展开 + 懒加载） */
+  revealPath: (path: string) => Promise<void>
   closeTab: (path: string) => Promise<void>
   /** 批量关闭原语：页签右键菜单（关闭其他/左侧/右侧/全部）共用 */
   closeTabs: (paths: string[]) => Promise<void>
@@ -57,6 +64,13 @@ interface FileState {
   closeAll: () => Promise<void>
   setContent: (path: string, content: string) => void
   saveFile: (path?: string) => Promise<boolean>
+  /** 丢弃本地未保存编辑，强制从磁盘重读（保存冲突对话框的「重新加载」动作） */
+  reloadFile: (path: string) => Promise<void>
+  /** 打开快照历史弹层（拉取该文件全部版本） */
+  openSnapshotHistory: (path: string) => Promise<void>
+  closeSnapshotHistory: () => void
+  /** 回退到指定版本（版本 key 为 null = 会话基线） */
+  restoreSnapshotVersion: (version: SnapshotVersion) => Promise<void>
   /** AI 写文件 / watcher 事件 共用的外部变更入口 */
   notifyExternalChange: (paths: string[]) => Promise<void>
   parentOf: (path: string) => string | null
@@ -74,12 +88,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
   activePath: null,
   contents: {},
   dirty: {},
+  mtimes: {},
   binaryFiles: {},
   truncatedFiles: {},
   cursor: { line: 1, col: 1 },
   savingPath: null,
   lastSavedAt: null,
   snapshots: {},
+  snapshotHistory: null,
   clipboard: null,
 
   openProject: async (root) => {
@@ -92,11 +108,13 @@ export const useFileStore = create<FileState>()((set, get) => ({
       activePath: null,
       contents: {},
       dirty: {},
+      mtimes: {},
       clipboard: null,
       binaryFiles: {},
       truncatedFiles: {},
       cursor: { line: 1, col: 1 },
       snapshots: {},
+      snapshotHistory: null,
     })
     await get().loadChildren(root)
     void get().loadSnapshots()
@@ -112,10 +130,12 @@ export const useFileStore = create<FileState>()((set, get) => ({
       activePath: null,
       contents: {},
       dirty: {},
+      mtimes: {},
       binaryFiles: {},
       truncatedFiles: {},
       cursor: { line: 1, col: 1 },
       snapshots: {},
+      snapshotHistory: null,
       clipboard: null,
     })
   },
@@ -187,27 +207,45 @@ export const useFileStore = create<FileState>()((set, get) => ({
   expandAll: async (dir) => {
     const { rootPath } = get()
     if (!rootPath) return
-    const load = async (d: string): Promise<TreeNode[]> => {
-      try {
-        return await api.listDir(rootPath, d)
-      } catch {
-        return []
-      }
-    }
-    // 逐层 BFS：每层先落一次 expanded/childrenMap，用户能看到渐进展开而不是长时间白等
     const expanded: Record<string, true> = { ...get().expanded, [dir]: true }
-    const queue: TreeNode[] = []
-    const first = await load(dir)
+    // 第一层：直接加载
+    let first: TreeNode[]
+    try {
+      first = await api.listDir(rootPath, dir)
+    } catch {
+      first = []
+    }
     set((s) => ({ childrenMap: { ...s.childrenMap, [dir]: first }, expanded: { ...expanded } }))
-    for (const n of first) if (n.kind === 'folder') queue.push(n)
+    const queue: TreeNode[] = first.filter((n) => n.kind === 'folder')
     let visited = 1
+    // 逐层 BFS，每批 20 个目录用批量 IPC 并发取，每批后 yield 让出主线程
+    const BATCH_SIZE = 20
     while (queue.length && visited < MAX_EXPAND_DIRS) {
-      const cur = queue.shift()!
-      visited++
-      expanded[cur.path] = true
-      const kids = await load(cur.path)
-      set((s) => ({ childrenMap: { ...s.childrenMap, [cur.path]: kids }, expanded: { ...expanded } }))
-      for (const n of kids) if (n.kind === 'folder') queue.push(n)
+      const batch = queue.splice(0, Math.min(BATCH_SIZE, MAX_EXPAND_DIRS - visited))
+      visited += batch.length
+      for (const n of batch) expanded[n.path] = true
+      // 批量 IPC：一次取多个目录内容
+      let results: Record<string, TreeNode[]>
+      try {
+        results = await api.listDirBatch(rootPath, batch.map((n) => n.path))
+      } catch {
+        // fallback: 逐个加载
+        results = {}
+        for (const n of batch) {
+          try { results[n.path] = await api.listDir(rootPath, n.path) } catch { results[n.path] = [] }
+        }
+      }
+      // 更新状态
+      set((s) => {
+        const childrenMap = { ...s.childrenMap }
+        for (const [d, kids] of Object.entries(results)) {
+          childrenMap[d] = kids
+          for (const n of kids) if (n.kind === 'folder') queue.push(n)
+        }
+        return { childrenMap, expanded: { ...expanded } }
+      })
+      // yield：让出主线程让 React 渲染
+      await new Promise<void>((r) => setTimeout(r, 0))
     }
   },
 
@@ -242,16 +280,53 @@ export const useFileStore = create<FileState>()((set, get) => ({
         set((s) => ({
           binaryFiles: { ...s.binaryFiles, [path]: true },
           contents: { ...s.contents, [path]: '' },
+          mtimes: { ...s.mtimes, [path]: fc.mtimeMs },
         }))
       } else {
         set((s) => ({
           contents: { ...s.contents, [path]: fc.content },
+          mtimes: { ...s.mtimes, [path]: fc.mtimeMs },
           truncatedFiles: fc.truncated ? { ...s.truncatedFiles, [path]: true } : s.truncatedFiles,
         }))
       }
     } catch (e) {
       console.error('读取文件失败：', e)
     }
+  },
+
+  revealPath: async (path) => {
+    const { rootPath } = get()
+    if (!rootPath) return
+    // 收集从文件父目录到根的每一级目录
+    const dirs: string[] = []
+    let dir = get().parentOf(path)
+    while (dir && dir !== rootPath && dir.length > rootPath.length) {
+      dirs.push(dir)
+      dir = get().parentOf(dir)
+    }
+    if (dirs.length === 0) return
+    dirs.reverse()
+
+    // 需要加载的目录（子项未缓存且未展开）
+    const toLoad = dirs.filter((d) => !get().childrenMap[d] && !get().expanded[d])
+    // 一次 IPC 批量加载，避免逐层串行等待
+    if (toLoad.length > 0) {
+      try {
+        const results = await api.listDirBatch(rootPath, toLoad)
+        set((s) => {
+          const childrenMap = { ...s.childrenMap }
+          for (const [d, kids] of Object.entries(results)) childrenMap[d] = kids
+          return { childrenMap }
+        })
+      } catch { /* 加载失败不阻塞展开 */ }
+    }
+
+    // 一次性展开所有层级
+    set((s) => {
+      const expanded = { ...s.expanded }
+      for (const d of dirs) expanded[d] = true
+      return { expanded }
+    })
   },
 
   closeTabs: async (paths) => {
@@ -313,8 +388,12 @@ export const useFileStore = create<FileState>()((set, get) => ({
     if (!target || !rootPath || contents[target] === undefined) return false
     const content = contents[target]
     set({ savingPath: target })
-    try {
-      await api.writeTextFile(rootPath, target, content)
+
+    const doSave = async (force: boolean): Promise<boolean> => {
+      const res = await api.writeTextFile(rootPath, target, content, {
+        expectedMtimeMs: get().mtimes[target] ?? null,
+        force,
+      })
       set((s) => {
         const dirty = { ...s.dirty }
         delete dirty[target]
@@ -324,14 +403,94 @@ export const useFileStore = create<FileState>()((set, get) => ({
         // 当前文件的兜底由 notifyExternalChange（watcher）在切文件时触发。
         const nextContents = { ...s.contents }
         if (target !== activePath) delete nextContents[target]
-        return { dirty, contents: nextContents, lastSavedAt: Date.now() }
+        return { dirty, contents: nextContents, mtimes: { ...s.mtimes, [target]: res.mtimeMs }, lastSavedAt: Date.now() }
       })
       return true
+    }
+
+    try {
+      return await doSave(false)
     } catch (e) {
-      console.error('保存失败：', e)
+      const msg = String(e)
+      if (!msg.startsWith('FILE_CONFLICT')) {
+        console.error('保存失败：', e)
+        return false
+      }
+      // 冲突：磁盘版本比打开/上次保存时的基线新（AI 写入或外部程序改动）——交还用户决策
+      const { useAppStore } = await import('./useAppStore')
+      const choice = await useAppStore.getState().showChoices(
+        '文件已被外部修改',
+        `${basename(target)} 在你编辑期间被外部修改（AI 写入或其他程序）。请选择如何处理：`,
+        [
+          { id: 'overwrite', label: '覆盖保存（保留我的编辑，丢弃外部修改）' },
+          { id: 'reload', label: '重新加载（保留外部修改，丢弃我的编辑）' },
+          { id: 'cancel', label: '取消（稍后手动处理）' },
+        ],
+      )
+      try {
+        if (choice === 'overwrite') return await doSave(true)
+        if (choice === 'reload') {
+          await get().reloadFile(target)
+          return false
+        }
+      } catch (e2) {
+        console.error('冲突处理失败：', e2)
+        return false
+      }
       return false
     } finally {
       set({ savingPath: null })
+    }
+  },
+
+  reloadFile: async (path) => {
+    const { rootPath } = get()
+    if (!rootPath) return
+    try {
+      const fc = await api.readTextFile(rootPath, path)
+      set((s) => {
+        const dirty = { ...s.dirty }
+        delete dirty[path]
+        return {
+          contents: { ...s.contents, [path]: fc.content },
+          dirty,
+          mtimes: { ...s.mtimes, [path]: fc.mtimeMs },
+        }
+      })
+    } catch (e) {
+      console.error('重新加载失败：', e)
+    }
+  },
+
+  openSnapshotHistory: async (path) => {
+    const { rootPath } = get()
+    if (!rootPath) return
+    try {
+      const versions = await api.snapshotVersions(rootPath, path)
+      if (versions.length === 0) {
+        const { useAppStore } = await import('./useAppStore')
+        void useAppStore.getState().showAlert('快照历史', '该文件没有可回退的快照。')
+        return
+      }
+      set({ snapshotHistory: { path, versions } })
+    } catch (e) {
+      console.error('读取快照历史失败：', e)
+    }
+  },
+
+  closeSnapshotHistory: () => set({ snapshotHistory: null }),
+
+  restoreSnapshotVersion: async (version) => {
+    const { rootPath, snapshotHistory } = get()
+    if (!rootPath || !snapshotHistory) return
+    try {
+      await api.snapshotRestoreAt(rootPath, version.sessionId, snapshotHistory.path, version.versionKey)
+      await get().notifyExternalChange([snapshotHistory.path])
+      await get().loadSnapshots()
+      set({ snapshotHistory: null })
+    } catch (e) {
+      const { useAppStore } = await import('./useAppStore')
+      void useAppStore.getState().showAlert('回退失败', String(e))
     }
   },
 
@@ -340,12 +499,16 @@ export const useFileStore = create<FileState>()((set, get) => ({
     const { rootPath, contents, dirty } = get()
     if (!rootPath) return
     // 未 dirty 的已打开文件自动重载；dirty 的保留用户编辑
+    //（mtime 基线刻意不更新：dirty 文件被 AI 改过后，保存时会触发冲突对话框兜底）
     for (const p of paths) {
       if (!(p in contents) || dirty[p]) continue
       try {
         const fc = await api.readTextFile(rootPath, p)
         if (!fc.isBinary) {
-          set((s) => ({ contents: { ...s.contents, [p]: fc.content } }))
+          set((s) => ({
+            contents: { ...s.contents, [p]: fc.content },
+            mtimes: { ...s.mtimes, [p]: fc.mtimeMs },
+          }))
         }
       } catch { /* 文件可能刚被删除 */ }
     }

@@ -25,6 +25,7 @@ export default defineConfig({
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
+        '@base': fileURLToPath(new URL('./shared/base', import.meta.url)),
       },
     },
     clearScreen: false,

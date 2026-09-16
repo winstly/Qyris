@@ -51,8 +51,18 @@ export function unregisterRequestWindow(requestId: string): void {
   requestWindowMap.delete(requestId)
 }
 
+/** 请求定向事件：按 requestId 路由到发起窗口；未登记（旧路径/异常）回退全窗口广播 */
+export function emitToRequestWindow(requestId: string, event: string, payload: unknown): void {
+  const winId = requestWindowMap.get(requestId)
+  if (winId != null) {
+    emitToWindow(winId, event, payload)
+  } else {
+    emitToAllWindows(event, payload)
+  }
+}
+
 /**
- * 向渲染进程广播事件。@deprecated 新代码用 emitToAllWindows
+ * 向渲染进程广播事件。@deprecated 新代码按窗口定向（emitToWindow / emitToRequestWindow）
  */
 export function emitToRenderer(event: string, payload: unknown): void {
   emitToAllWindows(event, payload)

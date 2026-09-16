@@ -3,7 +3,7 @@
  * 前端统一用 OpenAI 格式的 messages/tools；选 Anthropic 时在此做协议转换。
  * Key 在主进程内解密直用，明文不经过渲染层。
  */
-import { emitToRenderer } from './emitter'
+import { emitToRequestWindow } from './emitter'
 import { getSecretInternal } from './secrets'
 import { errorMessage } from './util'
 import type { AiCompletion, AiToolCall } from './ai'
@@ -92,7 +92,7 @@ export async function openaiChatStream(
     const text = delta.content
     if (typeof text === 'string' && text.length > 0) {
       content += text
-      emitToRenderer('ai-delta', { requestId, delta: text })
+      emitToRequestWindow(requestId, 'ai-delta', { requestId, delta: text })
     }
     // 思考过程：兼容 DeepSeek 系 `reasoning_content` 与 OpenAI o 系 `reasoning`
     const think =
@@ -103,7 +103,7 @@ export async function openaiChatStream(
           : ''
     if (think) {
       reasoning += think
-      emitToRenderer('ai-reasoning', { requestId, delta: think })
+      emitToRequestWindow(requestId, 'ai-reasoning', { requestId, delta: think })
     }
     if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason
 
@@ -295,10 +295,10 @@ export async function anthropicChatStream(
       const delta = json.delta as Json | undefined
       if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text.length > 0) {
         content += delta.text
-        emitToRenderer('ai-delta', { requestId, delta: delta.text })
+        emitToRequestWindow(requestId, 'ai-delta', { requestId, delta: delta.text })
       } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking.length > 0) {
         reasoning += delta.thinking
-        emitToRenderer('ai-reasoning', { requestId, delta: delta.thinking })
+        emitToRequestWindow(requestId, 'ai-reasoning', { requestId, delta: delta.thinking })
       } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string' && currentTool) {
         currentTool.arguments += delta.partial_json
       }

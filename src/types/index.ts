@@ -10,6 +10,8 @@ export interface FileContent {
   content: string
   isBinary: boolean
   truncated: boolean
+  /** 磁盘 mtime（保存前回传做冲突检测基线；与 electron/lib/fsops 的 FileContent 对齐） */
+  mtimeMs: number
 }
 
 // ---------- Git 工作区 ----------
@@ -76,6 +78,8 @@ export interface AiSettings {
   dispatchMode: 'api' | 'claude-cli'
   /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
   cliPermission: 'auto' | 'readonly'
+  /** CLI 可执行文件名/路径（缺省 'claude'） */
+  cliCommand?: string | null
   /** 可选档位模型 */
   tiers?: ModelTiers
 }
@@ -119,6 +123,8 @@ export interface AppConfig {
   aiDispatchMode?: 'api' | 'claude-cli'
   /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
   aiCliPermission?: 'auto' | 'readonly'
+  /** CLI 可执行文件名/路径（缺省 'claude'） */
+  aiCliCommand?: string | null
   recentProjects?: RecentProject[]
   /** Skills 目录列表（兼容旧单目录 skillsDir 字段，读取时合并去重） */
   skillsDirs?: string[]
@@ -130,6 +136,8 @@ export interface AppConfig {
   projectSkillsDirsMap?: Record<string, string[]>
   /** 记忆整理触发轮次：累计多少轮 AI 回复后滚动提取（2..60），缺省 6 */
   memExtractRounds?: number
+  /** 上下文压缩阈值（token 数）：历史超过此值时自动压缩旧消息为摘要，缺省 256000 */
+  contextCompressThreshold?: number
 }
 
 export interface AiToolCall {

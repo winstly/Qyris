@@ -1,5 +1,6 @@
 /** 子进程管理 —— 多槽版本：每个命名服务一个槽，互不干扰；同名槽重启 = 先杀旧再启 */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { SequencerByKey } from '../../shared/base/async'
 import { promises as fsp, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import type { Readable } from 'node:stream'
@@ -116,11 +117,12 @@ function stripAnsi(s: string): string {
     .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
 }
 
-/** Windows spawn taskkill 同步等结果，结果忽略 */
+/** 杀进程树。Windows 用 taskkill（spawn 异步发炮不等结果——杀进程无需等待，同步版会卡事件循环） */
 function killTree(pid: number): void {
   if (process.platform === 'win32') {
     try {
-      spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true })
+      const killer = spawn('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true })
+      killer.on('error', () => { /* 进程已不在 */ })
     } catch {
       /* 进程已不在 */
     }
@@ -212,7 +214,7 @@ export async function runProject(projectRoot: string, name: unknown, command: st
   try {
     proc = spawn(isWin ? 'cmd.exe' : 'sh', isWin ? ['/C', command] : ['-c', command], {
       cwd: projectRoot,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe'] as const,
       windowsHide: true,
       detached: !isWin,
       env: {
@@ -284,7 +286,7 @@ export async function detectCommand(command: string): Promise<boolean | null> {
       const child = spawn(
         isWin ? 'where.exe' : 'sh',
         isWin ? [token] : ['-c', `command -v -- '${token.replace(/'/g, `'\\''`)}'`],
-        { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], env: buildChildEnv() },
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] as const, env: buildChildEnv() },
       )
       const timer = setTimeout(() => { child.kill(); resolve(null) }, 5000)
       child.on('close', (code) => {
@@ -321,9 +323,9 @@ export async function checkUrlHealthy(url: string): Promise<boolean> {
 function spawnCapture(cmd: string, args: string[], timeout: number): Promise<string> {
   return new Promise((resolve) => {
     try {
-      const child = spawn(cmd, args, { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+      const child = spawn(cmd, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] as const })
       let out = ''
-      child.stdout?.on('data', (d: string) => { out += d })
+      child.stdout?.on('data', (d: Buffer) => { out += d.toString('utf8') })
       const timer = setTimeout(() => { child.kill(); resolve('') }, timeout)
       child.on('close', (code) => {
         clearTimeout(timer)
@@ -422,20 +424,20 @@ export function unregisterServiceProc(pid: number): void {
   writeOrphans(list.filter((r) => r.pid !== pid))
 }
 
-/** 校验 pid 的命令行确实包含项目根目录（防 PID 复用误杀），确认则整树强杀 */
-function killIfMatches(pid: number, root: string): boolean {
+/** 校验 pid 的命令行确实包含项目根目录（防 PID 复用误杀），确认则整树强杀（async：不阻塞事件循环） */
+async function killIfMatches(pid: number, root: string): Promise<boolean> {
   try {
     let cmdline = ''
     if (process.platform === 'win32') {
-      const res = spawnSync(
-        'powershell.exe',
-        ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`],
-        { encoding: 'utf8', windowsHide: true, timeout: 8000 },
-      )
-      cmdline = (res.stdout ?? '').trim()
+      cmdline = (
+        await spawnCapture(
+          'powershell.exe',
+          ['-NoProfile', '-Command', `(Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}').CommandLine`],
+          8000,
+        )
+      ).trim()
     } else {
-      const res = spawnSync('ps', ['-p', String(pid), '-o', 'command='], { encoding: 'utf8', timeout: 5000 })
-      cmdline = (res.stdout ?? '').trim()
+      cmdline = (await spawnCapture('ps', ['-p', String(pid), '-o', 'command='], 5000)).trim()
     }
     if (!cmdline || !cmdline.toLowerCase().includes(root.toLowerCase())) return false
     killTree(pid)
@@ -446,12 +448,12 @@ function killIfMatches(pid: number, root: string): boolean {
 }
 
 /** 应用启动时清理上次异常退出遗留的服务进程；返回杀掉的个数 */
-export function cleanupOrphanServices(): number {
+export async function cleanupOrphanServices(): Promise<number> {
   const list = readOrphans().slice(0, 10) // 单次最多校验 10 条，防止极端残留拖慢启动
   writeOrphans([])
   let killed = 0
   for (const rec of list) {
-    if (killIfMatches(rec.pid, rec.root)) killed++
+    if (await killIfMatches(rec.pid, rec.root)) killed++
   }
   return killed
 }
@@ -461,9 +463,18 @@ export function cleanupOrphanServices(): number {
 const RUN_ONCE_TIMEOUT = 10 * 60_000
 const RUN_ONCE_TAIL_LINES = 200
 
+/** 同工程 runOnce 串行排队（SequencerByKey，空闲自清）：装依赖→构建类命令不再并发互踩（npm 锁竞争），
+ *  不同工程互不阻塞。 */
+const runOnceSequencer = new SequencerByKey<string>()
+
 /** 执行一条跑完即退的命令：不建服务槽、不产生 build-output 事件，返回退出码与尾部输出（回传 AI）。
- *  cancelToken：在途期间登记进 onceProcs，供 cancelRunOnce 硬中断（命令挂死时「停止生成」能立即杀掉） */
-export async function runOnce(projectRoot: string, command: string, cancelToken?: unknown): Promise<{ code: number | null; output: string }> {
+ *  同工程并发调用按到达顺序排队执行。cancelToken：在途期间登记进 onceProcs，供 cancelRunOnce 硬中断 */
+export function runOnce(projectRoot: string, command: string, cancelToken?: unknown): Promise<{ code: number | null; output: string }> {
+  const key = projectRoot.replace(/[\\/]+$/, '').toLowerCase()
+  return runOnceSequencer.queue(key, () => runOnceInner(projectRoot, command, cancelToken))
+}
+
+async function runOnceInner(projectRoot: string, command: string, cancelToken?: unknown): Promise<{ code: number | null; output: string }> {
   try {
     const st = await fsp.stat(projectRoot)
     if (!st.isDirectory()) throw new Error(`项目目录不存在：${projectRoot}`)

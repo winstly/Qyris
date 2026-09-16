@@ -148,10 +148,10 @@ async function runOne(task: SubTask, threadId: string, project: string): Promise
         status: 'running',
       }, project)
       const out = tc.name === 'dispatch_subtasks'
-        // 「错误：」前缀是成败协议（下方 startsWith 判定 + 主对话侧同口径），不可去掉
-        ? { result: '错误：子任务内不能再派发子任务（禁止嵌套），请自行完成该工作。', summary: '禁止嵌套派发' }
+        // 结构化成败协议（与主对话侧 executeTool 同口径）
+        ? { ok: false, result: '错误：子任务内不能再派发子任务（禁止嵌套），请自行完成该工作。', summary: '禁止嵌套派发' }
         : await executeTool(tc.name, args, project)
-      const ok = !out.result.startsWith('错误') && !out.result.startsWith('工具执行失败')
+      const ok = out.ok
       useAgentStore.getState().patchTool(threadId, tc.id, {
         status: ok ? 'done' : 'error',
         summary: out.summary,

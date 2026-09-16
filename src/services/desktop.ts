@@ -3,6 +3,7 @@
  * 前端所有文件操作都经由这里走主进程，绝不在渲染层直接碰文件系统。
  */
 import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, MemoryHit, MemoryItem, MemoryStats, PreviewConsoleEntry } from '@/types'
+import type { SnapshotVersion } from '../../shared/types'
 
 /** 是否运行在 Electron 桌面壳内（浏览器直接跑 vite 时为 false，界面会给出提示） */
 export const isDesktop = typeof window !== 'undefined' && !!window.desktopAPI
@@ -31,14 +32,25 @@ function wrap<T>(fn: (d: DesktopAPI) => Promise<T>): Promise<T> {
 export const api = {
   // 文件系统
   listDir: (projectRoot: string, dir: string) => wrap((d) => d.listDir(projectRoot, dir)),
+  listDirBatch: (projectRoot: string, dirs: string[]) => wrap((d) => d.listDirBatch(projectRoot, dirs)) as Promise<Record<string, import('@/types').TreeNode[]>>,
   searchFiles: (projectRoot: string, query: string) => wrap((d) => d.searchFiles(projectRoot, query)),
+  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean }) =>
+    wrap((d) => d.grepFiles(projectRoot, pattern, opts)),
   readTextFile: (projectRoot: string, path: string) => wrap((d) => d.readTextFile(projectRoot, path)),
-  writeTextFile: (projectRoot: string, path: string, content: string) =>
-    wrap((d) => d.writeTextFile(projectRoot, path, content)),
+  writeTextFile: (projectRoot: string, path: string, content: string, opts?: { expectedMtimeMs?: number | null; force?: boolean }) =>
+    wrap((d) => d.writeTextFile(projectRoot, path, content, opts)),
   editTextFile: (projectRoot: string, path: string, oldString: string, newString: string) =>
     wrap((d) => d.editTextFile(projectRoot, path, oldString, newString)),
-  snapshotFile: (projectRoot: string, sessionId: string, path: string) =>
-    wrap((d) => d.snapshotFile(projectRoot, sessionId, path)),
+  snapshotFile: (projectRoot: string, sessionId: string, path: string, version?: boolean) =>
+    wrap((d) => d.snapshotFile(projectRoot, sessionId, path, version)),
+  snapshotVersions: (projectRoot: string, path: string) =>
+    wrap((d) => d.snapshotVersions(projectRoot, path)) as Promise<SnapshotVersion[]>,
+  snapshotRead: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) =>
+    wrap((d) => d.snapshotRead(projectRoot, sessionId, path, versionKey)) as Promise<string | null>,
+  snapshotDiff: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) =>
+    wrap((d) => d.snapshotDiff(projectRoot, sessionId, path, versionKey)) as Promise<string>,
+  snapshotRestoreAt: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) =>
+    wrap((d) => d.snapshotRestoreAt(projectRoot, sessionId, path, versionKey)) as Promise<void>,
   listSnapshots: (projectRoot: string) => wrap((d) => d.listSnapshots(projectRoot)),
   restoreFile: (projectRoot: string, path: string) => wrap((d) => d.restoreFile(projectRoot, path)),
   restoreSession: (projectRoot: string, sessionId: string) => wrap((d) => d.restoreSession(projectRoot, sessionId)),
@@ -174,6 +186,7 @@ export const api = {
   setWindowTitle: (title: string) => wrap((d) => d.setWindowTitle(title)),
   startElementPick: (url: string) => wrap((d) => d.startElementPick(url)),
   openExternal: (url: string) => wrap((d) => d.openExternal(url)),
+  openInExplorer: (filePath: string) => wrap((d) => d.openInExplorer(filePath)),
 }
 
 // ---------- 事件订阅（main → renderer，同步返回取消函数） ----------
@@ -238,6 +251,11 @@ export function onElementPicked(cb: (payload: { selector: string; tag: string; i
 export function onFsChanged(cb: (payload: { paths: string[]; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onFsChanged(cb)
+}
+
+export function onConfigChanged(cb: (affectedKeys: string[]) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onConfigChanged(cb)
 }
 
 export function previewSetUrl(url: string): Promise<void> {

@@ -19,9 +19,6 @@ import { Worker } from 'node:worker_threads'
 import { getConfig } from './config'
 import { storageDir } from './storage'
 
-/** Worker 线程持有的 better-sqlite3 实例类型（仅 Worker 内部使用，主进程不直接碰） */
-type RawSqliteDb = import('better-sqlite3').Database
-
 /** 预编译语句的 async 代理（内部通过 Worker 执行） */
 export interface PreparedStatement {
   get(...params: unknown[]): Promise<Record<string, unknown> | null | undefined>

@@ -7,6 +7,8 @@ interface Props {
   setDispatchMode: (v: 'api' | 'claude-cli') => void
   cliPermission: 'auto' | 'readonly'
   setCliPermission: (v: 'auto' | 'readonly') => void
+  cliCommand: string
+  setCliCommand: (v: string) => void
   provider: 'openai' | 'anthropic'
   setProvider: (v: 'openai' | 'anthropic') => void
   baseUrl: string
@@ -56,18 +58,25 @@ export function ModelSettingsTab(p: Props) {
         </label>
 
         {p.dispatchMode === 'claude-cli' && (
-          <label className="field">
-            <span className="field__label">CLI 权限模式</span>
-            <Select
-              value={p.cliPermission}
-              onChange={(v) => p.setCliPermission(v as 'auto' | 'readonly')}
-              options={[
-                { value: 'auto', label: '全自动（跳过权限确认）' },
-                { value: 'readonly', label: '受限只读（仅检索类工具）' },
-              ]}
-            />
-            <span className="field__hint">全自动下 CLI 可直接改文件、执行命令；受限只读仅允许检索/浏览类工具，更安全但能力受限</span>
-          </label>
+          <>
+            <label className="field">
+              <span className="field__label">CLI 命令</span>
+              <input className="field__input mono" value={p.cliCommand} onChange={(e) => p.setCliCommand(e.target.value)} placeholder="claude" />
+              <span className="field__hint">Claude CLI 执行指令，留空默认 "claude"</span>
+            </label>
+            <label className="field">
+              <span className="field__label">CLI 权限模式</span>
+              <Select
+                value={p.cliPermission}
+                onChange={(v) => p.setCliPermission(v as 'auto' | 'readonly')}
+                options={[
+                  { value: 'auto', label: '全自动（跳过权限确认）' },
+                  { value: 'readonly', label: '受限只读（仅检索类工具）' },
+                ]}
+              />
+              <span className="field__hint">全自动下 CLI 可直接改文件、执行命令；受限只读仅允许检索/浏览类工具，更安全但能力受限</span>
+            </label>
+          </>
         )}
 
         {p.dispatchMode === 'api' && (

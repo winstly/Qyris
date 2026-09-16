@@ -3,7 +3,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useChatStore } from '@/store/useChatStore'
-import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onCliToolResult, onCliAgentEvent, onFsChanged, onElementPicked, previewSetVisible, isDesktop } from '@/services/desktop'
+import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onCliToolResult, onCliAgentEvent, onFsChanged, onElementPicked, onConfigChanged, previewSetVisible, isDesktop } from '@/services/desktop'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useIsWide } from '@/hooks/useMediaQuery'
 import { Workspace } from '@/components/workspace/Workspace'
@@ -52,16 +52,41 @@ export default function App() {
   // 全局事件接线：编译输出 / 退出码 / AI 增量 / 文件变更
   useEffect(() => {
     if (!isDesktop) return
+    // AI 增量微任务批合：同一微任务内到达的 N 个 delta 合并为每 requestId 一次 store 更新
+    //（流式每 token 触发全列表渲染是长会话卡顿主因；配合 MessageBubble 的 memo 生效）
+    const deltaBuf = new Map<string, string>()
+    const reasoningBuf = new Map<string, string>()
+    let deltasScheduled = false
+    const flushDeltas = () => {
+      deltasScheduled = false
+      if (deltaBuf.size === 0 && reasoningBuf.size === 0) return
+      const ds = [...deltaBuf.entries()]
+      const rs = [...reasoningBuf.entries()]
+      deltaBuf.clear()
+      reasoningBuf.clear()
+      const chat = useChatStore.getState()
+      for (const [rid, text] of ds) chat.appendDelta(rid, text)
+      for (const [rid, text] of rs) chat.appendReasoning(rid, text)
+    }
+    const bufferChunk = (buf: Map<string, string>, requestId: string, text: string) => {
+      buf.set(requestId, (buf.get(requestId) ?? '') + text)
+      if (!deltasScheduled) {
+        deltasScheduled = true
+        queueMicrotask(flushDeltas)
+      }
+    }
     const offs = [
       onBuildOutput((p) => useBuildStore.getState().onOutput(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.stream, p.line)),
       onBuildExit((p) => useBuildStore.getState().onExit(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.code)),
-      onAiDelta((p) => useChatStore.getState().appendDelta(p.requestId, p.delta)),
-      onAiReasoning((p) => useChatStore.getState().appendReasoning(p.requestId, p.delta)),
+      onAiDelta((p) => bufferChunk(deltaBuf, p.requestId, p.delta)),
+      onAiReasoning((p) => bufferChunk(reasoningBuf, p.requestId, p.delta)),
       onCliToolEvent((p) => useChatStore.getState().handleCliToolEvent(p.requestId, p.id, p.name, p.phase, p.arguments)),
       onCliToolResult((p) => useChatStore.getState().handleCliToolResult(p.requestId, p.id, p.content, p.isError, p.tokens)),
       onCliAgentEvent((p) => useChatStore.getState().handleCliAgentEvent(p)),
       onFsChanged((p) => { scheduleFsRefresh(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.paths) }),
       onElementPicked((p) => useChatStore.getState().setPendingElement(p)),
+      // 多窗口配置同步：任一窗口/主进程改配置后，本窗口按变化键刷新镜像
+      onConfigChanged(() => { void useAppStore.getState().refreshRemoteConfig() }),
     ]
     return () => { offs.forEach((f) => f()) }
   }, [])

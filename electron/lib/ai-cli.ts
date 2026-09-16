@@ -33,12 +33,28 @@ const READONLY_TOOLS = 'Read,Glob,Grep,LS,TodoWrite,WebSearch,WebFetch'
 
 const NOT_INSTALLED_MSG = '未找到 claude 命令：请先安装 Claude Code CLI（npm install -g @anthropic-ai/claude-code）并在终端完成登录后重试'
 
-/** CLI 解析名：默认 'claude'（Windows 经 cmd 自查 PATH → claude.cmd，unix 经 PATH 直启） */
-let cliCommand = 'claude'
+/** CLI 解析名：默认 'claude'（Windows 经 cmd 自查 PATH → claude.cmd，unix 经 PATH 直启）。
+ *  运行时从 config.aiCliCommand 读取，缺省 'claude'；测试可注入覆盖。 */
+const DEFAULT_CLI_COMMAND = 'claude'
+let cliCommandOverride: string | null = null
 
-/** 冒烟测试用：注入假 CLI 路径 */
-export function setCliCommandForTest(cmd: string): void {
-  cliCommand = cmd
+/** 当前生效的 CLI 命令（测试注入 > 配置 > 默认值） */
+export async function resolveCliCommand(): Promise<string> {
+  if (cliCommandOverride) return cliCommandOverride
+  try {
+    const cfg = await getConfig()
+    if (cfg.aiCliCommand) return cfg.aiCliCommand
+  } catch { /* 配置不可读，用默认 */ }
+  return DEFAULT_CLI_COMMAND
+}
+
+/** 同步取命令（仅供已 await resolveCliCommand 后的闭包内复用，不在首次调用处使用） */
+let cachedCliCommand = DEFAULT_CLI_COMMAND
+
+/** 冒烟测试用：注入假 CLI 路径；null 恢复从配置读取 */
+export function setCliCommandForTest(cmd: string | null): void {
+  cliCommandOverride = cmd
+  if (cmd) cachedCliCommand = cmd
 }
 
 /** 请求级取消：CLI 子进程登记在 onceProcs（token=requestId），复用统一取消链 */
@@ -301,7 +317,9 @@ export async function claudeCliChatStream(
     if (windowId != null) emitToWindow(windowId, event, payload)
     else emitToRenderer(event, payload)
   }
-  if (cliCommand === 'claude' && detectCommand('claude') === false) {
+  const cliCommand = await resolveCliCommand()
+  cachedCliCommand = cliCommand
+  if (cliCommand === DEFAULT_CLI_COMMAND && (await detectCommand(cliCommand)) === false) {
     throw new Error(NOT_INSTALLED_MSG)
   }
 
@@ -642,11 +660,12 @@ function translateCliError(stderrTail: string): string | null {
 
 /** 异步执行 CLI 探测命令 */
 async function runCli(args: string[], timeoutMs = 10_000): Promise<{ status: number | null; stdout: string; stderr: string; error: string | null }> {
+  const cliCmd = cachedCliCommand
   return new Promise((resolve) => {
     const isWin = process.platform === 'win32'
     let child: ChildProcess
     try {
-      child = spawn(isWin ? 'cmd.exe' : cliCommand, isWin ? ['/C', cliCommand, ...args] : args, {
+      child = spawn(isWin ? 'cmd.exe' : cliCmd, isWin ? ['/C', cliCmd, ...args] : args, {
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         env: buildChildEnv(),
@@ -679,7 +698,9 @@ async function runCli(args: string[], timeoutMs = 10_000): Promise<{ status: num
 }
 
 export async function testCliConnection(): Promise<string> {
-  if (cliCommand === 'claude' && detectCommand('claude') === false) {
+  const cliCommand = await resolveCliCommand()
+  cachedCliCommand = cliCommand
+  if (cliCommand === DEFAULT_CLI_COMMAND && (await detectCommand(cliCommand)) === false) {
     throw new Error(NOT_INSTALLED_MSG)
   }
   const version = await runCli(['--version'])

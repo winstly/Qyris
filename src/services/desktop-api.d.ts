@@ -11,11 +11,21 @@ declare global {
   interface DesktopAPI {
     // 文件系统
     listDir: (projectRoot: string, dir: string) => Promise<TreeNode[]>
+    /** 批量目录列表：一次 IPC 取多个目录内容（主进程并发 fs.readdir） */
+    listDirBatch: (projectRoot: string, dirs: string[]) => Promise<Record<string, TreeNode[]>>
     searchFiles: (projectRoot: string, query: string) => Promise<{ files: string[]; truncated: boolean }>
+    /** 内容搜索（JS 正则；跳过 node_modules 与二进制；有界遍历） */
+    grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean }) =>
+      Promise<{ matches: { path: string; line: number; text: string }[]; fileCount: number; truncated: boolean }>
     readTextFile: (projectRoot: string, filePath: string) => Promise<FileContent>
-    writeTextFile: (projectRoot: string, filePath: string, content: string) => Promise<void>
+    /** expectedMtimeMs：调用方持有的磁盘基线；磁盘更新且未 force 时抛 FILE_CONFLICT:: 前缀错误 */
+    writeTextFile: (projectRoot: string, filePath: string, content: string, opts?: { expectedMtimeMs?: number | null; force?: boolean }) => Promise<{ mtimeMs: number }>
     editTextFile: (projectRoot: string, filePath: string, oldString: string, newString: string) => Promise<{ replaced: number; lineCount: number }>
-    snapshotFile: (projectRoot: string, sessionId: string, path: string) => Promise<void>
+    snapshotFile: (projectRoot: string, sessionId: string, path: string, version?: boolean) => Promise<void>
+    snapshotVersions: (projectRoot: string, path: string) => Promise<SnapshotVersion[]>
+    snapshotRead: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) => Promise<string | null>
+    snapshotDiff: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) => Promise<string>
+    snapshotRestoreAt: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) => Promise<void>
     listSnapshots: (projectRoot: string) => Promise<Record<string, { ts: number; sessionId: string }>>
     restoreFile: (projectRoot: string, path: string) => Promise<void>
     restoreSession: (projectRoot: string, sessionId: string) => Promise<number>
@@ -135,6 +145,7 @@ declare global {
     setWindowTitle: (title: string) => Promise<void>
     startElementPick: (url: string) => Promise<void>
     openExternal: (url: string) => Promise<void>
+    openInExplorer: (filePath: string) => Promise<void>
 
     // 事件订阅（返回取消函数）
     onBuildOutput: DesktopEventSub<{ name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }>
@@ -149,6 +160,8 @@ declare global {
     /** 记忆数据变更广播（any 写路径完成后主进程发，all=true 表示 clear('all') 等全库变更） */
     onMemoryChanged: DesktopEventSub<{ all: boolean; projectKeys: string[] }>
     onFsChanged: DesktopEventSub<{ paths: string[]; projectRoot?: string }>
+    /** 盘上配置变更广播（载荷 = 实际变化的顶层键，多窗口设置同步用） */
+    onConfigChanged: DesktopEventSub<string[]>
     onElementPicked: DesktopEventSub<{ selector: string; tag: string; id: string; text: string }>
     onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>
   }

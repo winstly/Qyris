@@ -39,29 +39,50 @@ export function ProjectsTab() {
       return
     }
 
+    const patch = useAppStore.getState().patchDialog
     let failed = ''
     try {
       if (checks.session) {
-        // 交给主进程统一清该项目数据（含全部历史会话消息与快照），历史会话一并清除
+        patch({ confirmingText: '正在删除对话数据…' })
         try { await api.projectDataDelete(proj.path) } catch { /* 忽略 */ }
       }
       if (checks.memory) {
+        patch({ confirmingText: '正在清除记忆…' })
         try { await api.memoryClear('project', proj.path) } catch { /* 忽略 */ }
       }
+      let deleteFailed = ''
       if (checks.files) {
+        patch({ confirmingText: '删除中…' })
+        // 停 watcher + 服务（不单独展示状态，统一"删除中"）
+        await api.stopProject(proj.path).catch(() => {})
+        await api.stopWatchingProject(proj.path).catch(() => {})
         if (useAppStore.getState().openProjects.includes(proj.path)) {
           await useAppStore.getState().closeProject(proj.path)
         }
-        await api.deleteProjectFiles(proj.path)
+        await new Promise((r) => setTimeout(r, 500))
+        try {
+          await api.deleteProjectFiles(proj.path)
+        } catch (e) {
+          deleteFailed = String(e)
+        }
         await useAppStore.getState().clearStartupCommands(proj.path)
         await api.clearProjectSnapshots(proj.path).catch(() => {})
       }
-      removeRecentProject(proj.path)
+      if (deleteFailed) {
+        // 删除失败：保留在列表，提示用户
+        useAppStore.getState().closeDialog()
+        void showAlert('删除失败', deleteFailed)
+      } else {
+        // 删除成功：从列表移除
+        removeRecentProject(proj.path)
+        useAppStore.getState().closeDialog()
+      }
+      return
     } catch (e) {
       failed = String(e)
     }
     useAppStore.getState().closeDialog()
-    if (failed) void showAlert('删除项目文件失败', failed)
+    if (failed) void showAlert('移除失败', failed)
   }
 
   const empty = recentProjects.length === 0 && openProjects.length === 0
@@ -145,6 +166,14 @@ export function ProjectsTab() {
                       <span className="history__item-path mono">{proj.path}</span>
                     </div>
                     <span className="history__item-time">{timeAgo(proj.lastOpened)}</span>
+                    <button
+                      className="history__item-newwin"
+                      onClick={(e) => { e.stopPropagation(); void api.openInExplorer(proj.path) }}
+                      aria-label={`打开 ${proj.name} 所在目录`}
+                      title="在资源管理器中打开"
+                    >
+                      <IconFolder size={12} />
+                    </button>
                     <button
                       className="history__item-delete"
                       onClick={(e) => { e.stopPropagation(); void removeFromHistory(proj) }}

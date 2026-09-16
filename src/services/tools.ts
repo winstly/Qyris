@@ -2,11 +2,8 @@
  * 工具执行器：把模型的 function call 落到桌面后端命令上，
  * 并联动左侧文件树 / 编辑器刷新。
  *
- * ⚠️ 结果文本前缀即成败协议（消费方用 startsWith 判定，见 useChatStore / subagent）：
- *   - 工具级失败一律以「错误：」开头
- *   - 执行器抛错的兜底统一「工具执行失败：」
- *   已知残留风险：成功结果本身以「错误」开头时会被误判为失败（如文件首行恰好如此），
- *   结构化成败字段是后续演进方向，本轮不做。
+ * 成败协议：ToolOutcome.ok 结构化字段（此前是「错误：」前缀 + startsWith 判定，
+ * 成功结果恰好以「错误」开头会被误判——已随结构化改造移除）。
  * 可用工具清单以 TOOL_DEFS（services/ai.ts）为唯一来源，禁止手抄。
  */
 import { api } from './desktop'
@@ -33,6 +30,8 @@ const PHASE_LABEL: Record<string, string> = {
 }
 
 export interface ToolOutcome {
+  /** 结构化成败（渲染层消费；替代旧的「错误：」前缀 startsWith 协议） */
+  ok: boolean
   /** 回传给模型的内容（字符串，OpenAI tool role） */
   result: string
   /** 卡片上的一句话摘要 */
@@ -67,7 +66,7 @@ function noteCommandFailure(projectRoot: string, command: string, code: number |
 export async function executeTool(name: string, args: Record<string, unknown>, cardId = '', project = ''): Promise<ToolOutcome> {
   const root = project || useProjectStore.getState().projectPath
   if (!root) {
-    return { result: '错误：当前没有打开的项目，请让用户先点击「打开项目」再进行文件操作。', summary: '未打开项目' }
+    return { ok: false, result: '错误：当前没有打开的项目，请让用户先点击「打开项目」再进行文件操作。', summary: '未打开项目' }
   }
 
   try {
@@ -76,28 +75,57 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         const dir = typeof args.dir === 'string' && args.dir.trim() ? args.dir.trim() : '.'
         const nodes = await api.listDir(root, resolve(root, dir))
         if (nodes.length === 0) {
-          return { result: `目录 ${dir} 为空（或只包含被忽略的目录，如 node_modules）。`, summary: `${dir} 为空` }
+          return { ok: true, result: `目录 ${dir} 为空（或只包含被忽略的目录，如 node_modules）。`, summary: `${dir} 为空` }
         }
         const lines = nodes
           .slice(0, LIST_CAP)
           .map((n) => `${n.kind === 'folder' ? '[目录]' : '[文件]'} ${n.name}`)
         const result = lines.join('\n') +
           (nodes.length > LIST_CAP ? `\n…（共 ${nodes.length} 项，已截断到前 ${LIST_CAP} 项）` : '')
-        return { result, summary: `已列出 ${dir}（${nodes.length} 项）` }
+        return { ok: true, result, summary: `已列出 ${dir}（${nodes.length} 项）` }
       }
 
       case 'search_files': {
         const q = String(args.query ?? '').trim()
         if (!q) {
-          return { result: '错误：query 不能为空。', summary: '关键字为空' }
+          return { ok: false, result: '错误：query 不能为空。', summary: '关键字为空' }
         }
         const r = await api.searchFiles(root, q)
         if (r.files.length === 0) {
-          return { result: `项目中没有文件名包含「${q}」的文件（node_modules 等目录已跳过）。`, summary: `无匹配「${q}」` }
+          return { ok: true, result: `项目中没有文件名包含「${q}」的文件（node_modules 等目录已跳过）。`, summary: `无匹配「${q}」` }
         }
         const result = r.files.join('\n') +
           (r.truncated ? '\n…（已达 200 条上限，请用更具体的关键字缩小范围）' : '')
-        return { result, summary: `找到 ${r.files.length} 个匹配「${q}」的文件` }
+        return { ok: true, result, summary: `找到 ${r.files.length} 个匹配「${q}」的文件` }
+      }
+
+      case 'grep_files': {
+        const pattern = String(args.pattern ?? '').trim()
+        if (!pattern) {
+          return { ok: false, result: '错误：pattern 不能为空。', summary: 'pattern 为空' }
+        }
+        const glob = typeof args.glob === 'string' && args.glob.trim() ? args.glob.trim() : undefined
+        const r = await api.grepFiles(root, pattern, { glob, maxResults: 120 })
+        if (r.matches.length === 0) {
+          return {
+            ok: true,
+            result: `项目中没有内容匹配「${pattern}」${glob ? `（限 ${glob} 文件）` : ''}。提示：换更短的关键字、检查大小写，或用 search_files 按文件名找。`,
+            summary: `无匹配「${pattern}」`,
+          }
+        }
+        // 按文件分组输出：路径 → 行号:文本；截断时提示缩小范围
+        const byFile = new Map<string, string[]>()
+        for (const m of r.matches) {
+          const list = byFile.get(m.path) ?? []
+          list.push(`${m.line}: ${m.text}`)
+          byFile.set(m.path, list)
+        }
+        const body = [...byFile.entries()]
+          .map(([file, lines]) => `${file}\n  ${lines.join('\n  ')}`)
+          .join('\n')
+        const result = `内容匹配「${pattern}」（${r.fileCount} 个文件，${r.matches.length} 处命中${r.truncated ? '，已达上限截断' : ''}）：\n${body}` +
+          (r.truncated ? '\n…（命中过多，请用更具体的关键字或 glob 参数缩小范围）' : '')
+        return { ok: true, result, summary: `内容命中「${pattern}」${r.matches.length} 处` }
       }
 
       case 'read_file': {
@@ -105,7 +133,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         const path = resolve(root, display)
         const fc = await api.readTextFile(root, path)
         if (fc.isBinary) {
-          return { result: `错误：${display} 是二进制文件，无法按文本读取。`, summary: '二进制文件' }
+          return { ok: false, result: `错误：${display} 是二进制文件，无法按文本读取。`, summary: '二进制文件' }
         }
         const lineCount = fc.content.split('\n').length
         let content = fc.content
@@ -113,7 +141,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
           content = content.slice(0, READ_TRUNCATE) + '\n…（内容过长，已截断）'
         }
         if (fc.truncated) content += '\n…（文件超过 2MB，仅返回前 2MB）'
-        return { result: content, summary: `已读取 ${display}（${lineCount} 行）` }
+        return { ok: true, result: content, summary: `已读取 ${display}（${lineCount} 行）` }
       }
 
       case 'write_file': {
@@ -121,13 +149,15 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         const path = resolve(root, display)
         const content = String(args.content ?? '')
         const sessionId = (project ? useChatStore.getState().byProject[project]?.sessionId : selectCurrentChat(useChatStore.getState()).sessionId) ?? ''
-        // 写前快照：绑定当前会话，保留会话开始前的原始内容，可整会话回退
+        // 写前快照双轨：会话基线（幂等，整会话回退用）+ 版本快照（每次写入各留一份，可回退到任意中间版本）
         await api.snapshotFile(root, sessionId, path).catch(() => {})
+        await api.snapshotFile(root, sessionId, path, true).catch(() => {})
         await api.writeTextFile(root, path, content)
         // 联动刷新：文件树 + 打开的编辑器（未编辑状态下自动重载）
         await useFileStore.getState().notifyExternalChange([path])
         useFileStore.getState().addSnapshot(path, sessionId)
         return {
+          ok: true,
           result: `已写入 ${display}（${content.split('\n').length} 行），文件树与编辑器已刷新。`,
           summary: `已写入 ${display}`,
         }
@@ -139,14 +169,16 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         const oldString = String(args.old_string ?? '')
         const newString = String(args.new_string ?? '')
         if (!oldString) {
-          return { result: '错误：old_string 不能为空。', summary: 'old_string 为空' }
+          return { ok: false, result: '错误：old_string 不能为空。', summary: 'old_string 为空' }
         }
         const sessionId = (project ? useChatStore.getState().byProject[project]?.sessionId : selectCurrentChat(useChatStore.getState()).sessionId) ?? ''
         await api.snapshotFile(root, sessionId, path).catch(() => {})
+        await api.snapshotFile(root, sessionId, path, true).catch(() => {})
         const r = await api.editTextFile(root, path, oldString, newString)
         await useFileStore.getState().notifyExternalChange([path])
         useFileStore.getState().addSnapshot(path, sessionId)
         return {
+          ok: true,
           result: `已在 ${display} 中替换 ${r.replaced} 处（${r.lineCount} 行），文件树与编辑器已刷新。`,
           summary: `已编辑 ${display}`,
         }
@@ -155,7 +187,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
       case 'run_once': {
         const command = String(args.command ?? '').trim()
         if (!command) {
-          return { result: '错误：command 不能为空。', summary: '命令为空' }
+          return { ok: false, result: '错误：command 不能为空。', summary: '命令为空' }
         }
         // cancelToken：无卡片 id 时（子 agent 路径）现配一个，保证在途进程可被「停止生成」硬中断
         const out = await api.runOnce(root, command, cardId || uid())
@@ -163,6 +195,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         if (!ok) noteCommandFailure(root, command, out.code, out.output)
         const tail = (out.output || '（无输出）').slice(0, RUN_ONCE_TAIL_CHARS)
         return {
+          ok: true,
           result: ok
             ? `命令执行成功（exit 0）。输出（尾部）：\n${tail}`
             : `命令执行失败（exit ${out.code ?? -1}）。输出（尾部）：\n${tail}`,
@@ -180,11 +213,12 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
           }))
           .filter((s) => s.name && s.run)
         if (services.length === 0) {
-          return { result: '错误：services 不能为空，每项需包含 name（服务名）与 run（启动命令）。', summary: '启动清单为空' }
+          return { ok: false, result: '错误：services 不能为空，每项需包含 name（服务名）与 run（启动命令）。', summary: '启动清单为空' }
         }
         await useStartupStore.getState().setStartupCommands(services, root)
         const list = services.map((s) => `- ${s.name}：${s.run}${s.url ? `（预览地址 ${s.url}）` : ''}`).join('\n')
         return {
+          ok: true,
           result: `已保存 ${services.length} 个服务的启动命令：\n${list}\n用户可在预览面板点击「全部运行」直接启动（无需再次识别）。`,
           summary: `已保存 ${services.length} 条启动命令`,
         }
@@ -193,12 +227,13 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
       case 'update_start_command': {
         const name = String(args.name ?? '').trim()
         const command = String(args.command ?? '').trim()
-        if (!name) return { result: '错误：name 不能为空。', summary: '服务名为空' }
-        if (!command) return { result: '错误：command 不能为空。', summary: '命令为空' }
+        if (!name) return { ok: false, result: '错误：name 不能为空。', summary: '服务名为空' }
+        if (!command) return { ok: false, result: '错误：command 不能为空。', summary: '命令为空' }
         const cmds = useStartupStore.getState().startupCommandsMap[root] ?? []
         const exists = cmds.some((c) => c.name.trim().toLowerCase() === name.trim().toLowerCase())
         await useStartupStore.getState().updateStartCommand(name, { run: command }, root)
         return {
+          ok: true,
           result: exists
             ? `已更新服务「${name}」的启动命令为：${command}。用户下次点「全部运行」或「运行」时将使用新命令。`
             : `已添加新服务「${name}」：${command}。用户可在预览面板点击「全部运行」启动。`,
@@ -210,13 +245,14 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         const command = String(args.command ?? '').trim()
         const name = String(args.name ?? '').trim() || 'default'
         if (!command) {
-          return { result: '错误：command 不能为空。', summary: '命令为空' }
+          return { ok: false, result: '错误：command 不能为空。', summary: '命令为空' }
         }
         // 每个服务名独立成槽：同名重启只替换该槽，不影响其他已运行的服务
         await useBuildStore.getState().start(name, command, root)
         // 启动命令沉淀进存档（fire-and-forget）：AI 直接启动的服务也会被「全部运行」按钮记住
         persistStartCommand(name, command, root)
         return {
+          ok: true,
           result: `已启动服务「${name}」：${command}。输出实时流入预览面板，稍等片刻后用 get_build_status 查看「${name}」的编译/启动状态（首次编译可能需要几秒到几十秒）。`,
           summary: `已启动 ${name}`,
         }
@@ -231,13 +267,13 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
           const st = s.slots[key]
           if (!st) {
             const known = s.slotOrder.join('、') || '（无）'
-            return { result: `错误：服务「${nameArg}」不存在。当前服务：${known}`, summary: `未知服务 ${nameArg}` }
+            return { ok: false, result: `错误：服务「${nameArg}」不存在。当前服务：${known}`, summary: `未知服务 ${nameArg}` }
           }
-          return { result: formatSlotDetail(st), summary: `${key}：${PHASE_LABEL[st.phase] ?? st.phase}` }
+          return { ok: true, result: formatSlotDetail(st), summary: `${key}：${PHASE_LABEL[st.phase] ?? st.phase}` }
         }
         // 不指定 → 全部服务的总览（每槽一行）
         if (s.slotOrder.length === 0) {
-          return { result: '当前没有任何服务启动记录。', summary: '无服务' }
+          return { ok: true, result: '当前没有任何服务启动记录。', summary: '无服务' }
         }
         const lines = s.slotOrder.map((k) => {
           const st = s.slots[k]
@@ -246,28 +282,29 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
           return `- ${k}：${PHASE_LABEL[st.phase] ?? st.phase} · 命令 ${st.command || '（未知）'} · 地址 ${url}${exit}${st.detectedUrls.length > 1 ? `（共 ${st.detectedUrls.length} 个地址）` : ''}`
         })
         const result = `共 ${s.slotOrder.length} 个服务：\n${lines.join('\n')}\n（用 get_build_status 传 name 查看单个服务的三阶段状态与日志尾部）`
-        return { result, summary: `${s.slotOrder.length} 个服务` }
+        return { ok: true, result, summary: `${s.slotOrder.length} 个服务` }
       }
 
       case 'stop_project': {
         const nameArg = String(args.name ?? '').trim()
         if (nameArg) {
           await useBuildStore.getState().stop(nameArg, root)
-          return { result: `已停止服务「${nameArg}」。`, summary: `已停止 ${nameArg}` }
+          return { ok: true, result: `已停止服务「${nameArg}」。`, summary: `已停止 ${nameArg}` }
         }
         await useBuildStore.getState().stopAll(root)
-        return { result: '已停止全部服务进程。', summary: '已停止全部进程' }
+        return { ok: true, result: '已停止全部服务进程。', summary: '已停止全部进程' }
       }
 
       case 'verify_start': {
         const command = String(args.command ?? '').trim()
         const name = String(args.name ?? '').trim() || 'default'
         if (!command) {
-          return { result: '错误：command 不能为空。', summary: '命令为空' }
+          return { ok: false, result: '错误：command 不能为空。', summary: '命令为空' }
         }
         const existing = useBuildStore.getState().byProject[root]?.slots[name.toLowerCase()]
         if (existing?.processAlive) {
           return {
+            ok: false,
             result: `错误：服务「${name}」已在运行中，无法重复验证。请先 stop_project 停止该服务再验证。`,
             summary: `${name} 运行中`,
           }
@@ -293,7 +330,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
             tier: (TIERS.includes(t.tier) ? t.tier : 'main') as SubTask['tier'],
           }))
         if (tasks.length === 0) {
-          return { result: '错误：tasks 不能为空，每项需包含 title（标题）与 instruction（完整指令）。', summary: '子任务清单为空' }
+          return { ok: false, result: '错误：tasks 不能为空，每项需包含 title（标题）与 instruction（完整指令）。', summary: '子任务清单为空' }
         }
         // 动态 import：subagent 依赖本模块的 executeTool，避免静态循环依赖
         const sub = await import('./subagent')
@@ -328,36 +365,36 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
           })
           .join('\n\n')
         const result = `共 ${results.length} 个子任务已并行执行（完整过程与结果全文存于各 agent 线程，可在对话面板切换查看）。结果摘要：\n\n${body}`
-        return { result, summary: `已执行 ${results.length} 个子任务` }
+        return { ok: true, result, summary: `已执行 ${results.length} 个子任务` }
       }
 
       case 'load_skill': {
         const skillId = String(args.skill_id ?? '').trim()
         if (!skillId) {
-          return { result: '错误：skill_id 不能为空。', summary: 'skill_id 为空' }
+          return { ok: false, result: '错误：skill_id 不能为空。', summary: 'skill_id 为空' }
         }
         const { skillMetas, skillsDirs } = useSettingsStore.getState()
         const projectSkillsDirs = useAppStore.getState().projectSkillsDirs
         // 合并三源：项目默认 + 项目自定义 + 全局
         const allDirs = [...projectSkillsDirs, ...skillsDirs.filter((d) => !projectSkillsDirs.includes(d))]
         if (!allDirs.length) {
-          return { result: '错误：未配置 Skills 目录。请在设置 → 系统设置中配置。', summary: '未配置 Skills 目录' }
+          return { ok: false, result: '错误：未配置 Skills 目录。请在设置 → 系统设置中配置。', summary: '未配置 Skills 目录' }
         }
         // 多目录按序查找首个命中（去重/查找序规则统一在主进程 skills.ts，单次 IPC）
         const content = await api.readSkill(allDirs, skillId)
         if (content === null) {
           const projectMetas = useAppStore.getState().projectSkillMetas
           const known = [...projectMetas, ...skillMetas].map((m) => m.id).join('、') || '（无）'
-          return { result: `错误：Skill「${skillId}」不存在或无法读取。可用 Skills：${known}`, summary: `Skill 不存在：${skillId}` }
+          return { ok: false, result: `错误：Skill「${skillId}」不存在或无法读取。可用 Skills：${known}`, summary: `Skill 不存在：${skillId}` }
         }
-        return { result: content, summary: `已加载 Skill：${skillId}` }
+        return { ok: true, result: content, summary: `已加载 Skill：${skillId}` }
       }
 
       default:
-        return { result: `错误：未知工具 ${name}。可用工具：${TOOL_DEFS.map((t) => t.function.name).join(' / ')}。`, summary: `未知工具 ${name}` }
+        return { ok: false, result: `错误：未知工具 ${name}。可用工具：${TOOL_DEFS.map((t) => t.function.name).join(' / ')}。`, summary: `未知工具 ${name}` }
     }
   } catch (e) {
-    return { result: `工具执行失败：${String(e)}`, summary: '执行失败' }
+    return { ok: false, result: `工具执行失败：${String(e)}`, summary: '执行失败' }
   }
 }
 
@@ -379,7 +416,7 @@ async function verifyStartup(name: string, command: string, project: string): Pr
     await new Promise((r) => setTimeout(r, VERIFY_POLL))
     if (useChatStore.getState().byProject[project]?.cancelled) {
       await useBuildStore.getState().stop(name, project)
-      return { result: '启动验证已取消（用户停止生成），验证进程已停止。', summary: '验证取消' }
+      return { ok: true, result: '启动验证已取消（用户停止生成），验证进程已停止。', summary: '验证取消' }
     }
     const st = useBuildStore.getState().byProject[project]?.slots[key]
     if (!st) break
@@ -387,6 +424,7 @@ async function verifyStartup(name: string, command: string, project: string): Pr
     if (st.phase === 'error') {
       await useBuildStore.getState().stop(name, project)
       return {
+        ok: false,
         result: `启动验证失败：进程异常退出（编译通过但启动失败，常见原因：端口被占用、配置缺失、依赖不完整）。\n错误输出：\n${st.errorText || tail.join('\n')}`,
         summary: `${key} 启动失败`,
       }
@@ -400,6 +438,7 @@ async function verifyStartup(name: string, command: string, project: string): Pr
           if (ok) {
             await useBuildStore.getState().stop(name, project)
             return {
+              ok: true,
               result: `启动验证通过：服务已监听 ${st.detectedUrl}，HTTP 探测成功。验证进程已自动停止，服务命令已沉淀，用户可在预览面板一键启动。`,
               summary: `${key} 启动验证通过`,
             }
@@ -409,6 +448,7 @@ async function verifyStartup(name: string, command: string, project: string): Pr
         // 无可探测地址但有监听信号：按信号判通过，如实标注探测限制
         await useBuildStore.getState().stop(name, project)
         return {
+          ok: true,
           result: `启动验证通过（按输出中的启动信号判定）：服务已进入运行阶段但未解析到 HTTP 地址，未能做探测确认。验证进程已自动停止。`,
           summary: `${key} 启动验证通过`,
         }
@@ -417,6 +457,7 @@ async function verifyStartup(name: string, command: string, project: string): Pr
   }
   await useBuildStore.getState().stop(name, project)
   return {
+    ok: false,
     result: `启动验证失败：${VERIFY_TIMEOUT / 1000}s 内未确认服务可用（未解析到可探测的服务地址，或 HTTP 探测始终失败）。\n最近输出：\n${tail.join('\n') || '（无输出）'}`,
     summary: `${key} 启动验证失败`,
   }

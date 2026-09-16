@@ -183,13 +183,13 @@ export async function memoryList(projectRoot: string | null, includeArchived = f
   const db = await getDb()
   const statusSql = includeArchived ? '' : " AND status = 'active'"
   if (!projectRoot) {
-    const rows = await db.prepare(`SELECT * FROM mem_items WHERE project_key = 'global'${statusSql} ORDER BY updated_at DESC`).all() as MemRow[]
+    const rows = await db.prepare(`SELECT * FROM mem_items WHERE project_key = 'global'${statusSql} ORDER BY updated_at DESC`).all() as unknown as MemRow[]
     return { items: rows.map(rowToItem) }
   }
   const key = projectKey(projectRoot)
   const rows = await db
     .prepare(`SELECT * FROM mem_items WHERE (project_key = ? OR project_key = 'global')${statusSql} ORDER BY updated_at DESC`)
-    .all(key) as MemRow[]
+    .all(key) as unknown as MemRow[]
   return { items: rows.map(rowToItem) }
 }
 
@@ -314,7 +314,7 @@ export async function memoryUpdate(id: string, patch: MemoryPatch): Promise<Memo
     ).run(nextTitle, nextContent, nextCategory, nextImportance, Date.now(), id)
   }
   emitMemoryChanged([row.project_key])
-  const updated = getRow(db, id)
+  const updated = await getRow(db, id)
   return rowToItem(updated ?? row)
 }
 
@@ -350,7 +350,7 @@ export async function memoryMoveScope(
     'UPDATE mem_items SET project_key = ?, tier = ?, session_id = ?, updated_at = ? WHERE id = ?',
   ).run(nextKey, nextTier, nextSession, Date.now(), id)
   emitMemoryChanged([row.project_key, nextKey])
-  const updated = getRow(db, id)
+  const updated = await getRow(db, id)
   return rowToItem(updated ?? row)
 }
 
@@ -625,7 +625,7 @@ export async function noteLesson(
     await db.prepare(
       'UPDATE mem_items SET content = ?, importance = MIN(1.0, importance + 0.1), updated_at = ? WHERE id = ?',
     ).run(content, now, dup.id)
-    return dup.id
+    return
   }
   const item: MemoryItem = {
     id: `mem_${randomUUID()}`,
@@ -865,7 +865,7 @@ export async function memoryExportData(scope: 'project' | 'global' | 'all', proj
   const { where, params } = scopeWhere(scope, projectRoot)
   const rows = await db
     .prepare(`SELECT * FROM mem_items WHERE ${where} ORDER BY created_at ASC`)
-    .all(...params) as MemRow[]
+    .all(...params) as unknown as MemRow[]
   return { version: 1, exportedAt: Date.now(), items: rows.map(rowToItem) }
 }
 
@@ -1042,7 +1042,7 @@ async function getRow(db: SqliteDb, id: string): Promise<MemRow | undefined> {
 async function fetchRowsByIds(db: SqliteDb, ids: string[]): Promise<Map<string, MemRow>> {
   const map = new Map<string, MemRow>()
   if (ids.length === 0) return map
-  const rows = await db.prepare(`SELECT * FROM mem_items WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids) as MemRow[]
+  const rows = await db.prepare(`SELECT * FROM mem_items WHERE id IN (${ids.map(() => '?').join(',')})`).all(...ids) as unknown as MemRow[]
   for (const row of rows) map.set(row.id, row)
   return map
 }
@@ -1066,8 +1066,8 @@ async function searchFts(db: SqliteDb, q: string, key: string | null, includeArc
   const { sql, param } = scopeCond(key)
   const stmt = `SELECT mi.* FROM mem_fts JOIN mem_items mi ON mi.rowid = mem_fts.rowid WHERE mem_fts MATCH ? AND ${sql}${statusSql} ORDER BY bm25(mem_fts) LIMIT ?`
   return param !== undefined
-    ? await db.prepare(stmt).all(phrase, param, limit) as MemRow[]
-    : await db.prepare(stmt).all(phrase, limit) as MemRow[]
+    ? await db.prepare(stmt).all(phrase, param, limit) as unknown as MemRow[]
+    : await db.prepare(stmt).all(phrase, limit) as unknown as MemRow[]
 }
 
 /** 1-2 字兜底：LIKE 全表（本工程+global 范围内），%/_/\ 转义防通配符注入 */
@@ -1077,8 +1077,8 @@ async function searchLike(db: SqliteDb, q: string, key: string | null, includeAr
   const { sql, param } = scopeCond(key)
   const stmt = `SELECT * FROM mem_items mi WHERE (mi.title LIKE ? ESCAPE '\\' OR mi.content LIKE ? ESCAPE '\\') AND ${sql}${statusSql} ORDER BY mi.updated_at DESC LIMIT ?`
   return param !== undefined
-    ? await db.prepare(stmt).all(pattern, pattern, param, limit) as MemRow[]
-    : await db.prepare(stmt).all(pattern, pattern, limit) as MemRow[]
+    ? await db.prepare(stmt).all(pattern, pattern, param, limit) as unknown as MemRow[]
+    : await db.prepare(stmt).all(pattern, pattern, limit) as unknown as MemRow[]
 }
 
 /** 嵌入文本：标题与正文拼接（与设计稿一致，title 参与语义） */

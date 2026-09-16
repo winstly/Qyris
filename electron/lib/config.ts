@@ -3,6 +3,8 @@ import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { errorMessage } from './util'
 import { storageDir } from './storage'
+import { Emitter } from '../../shared/base/event'
+import type { IDisposable } from '../../shared/base/lifecycle'
 
 export interface RecentProject {
   path: string
@@ -27,6 +29,8 @@ export interface AppConfig {
   aiTiers?: { thinking?: string; fast?: string; middle?: string; heavy?: string }
   /** 调度模型方式：api=HTTP 直连；claude-cli=本机 Claude Code CLI（垃圾值回 api） */
   aiDispatchMode: 'api' | 'claude-cli'
+  /** CLI 可执行文件名/路径：缺省 'claude'（Windows 经 cmd.exe 查 PATH），可改为自定义路径 */
+  aiCliCommand?: string | null
   /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
   aiCliPermission: 'auto' | 'readonly'
   recentProjects?: RecentProject[]
@@ -46,6 +50,8 @@ export interface AppConfig {
   embedRemoteHost?: string | null
   /** 记忆整理触发轮次：自游标起累计多少轮 assistant 回复后做滚动提取（2..60），缺省 6 */
   memExtractRounds?: number
+  /** 上下文压缩阈值（token 数）：历史超过此值时自动压缩旧消息为摘要，缺省 256000；范围 64000~512000 */
+  contextCompressThreshold?: number
 }
 
 /** 新数组字段 + 旧单目录字段合并去重（旧字段排前，保持存量用户主目录序） */
@@ -64,6 +70,14 @@ function clampRounds(v: unknown): number | undefined {
   if (typeof v !== 'number' || !Number.isFinite(v)) return undefined
   const n = Math.floor(v)
   if (n < 2 || n > 60) return undefined
+  return n
+}
+
+/** 上下文压缩阈值归一：合法区间 64000..512000，非法/越界回 undefined（消费方取缺省 256000） */
+function clampCompressThreshold(v: unknown): number | undefined {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return undefined
+  const n = Math.floor(v)
+  if (n < 64000 || n > 512000) return undefined
   return n
 }
 
@@ -91,6 +105,7 @@ export async function getConfig(): Promise<AppConfig> {
           : undefined,
       aiDispatchMode: parsed.aiDispatchMode === 'claude-cli' ? 'claude-cli' : 'api',
       aiCliPermission: parsed.aiCliPermission === 'readonly' ? 'readonly' : 'auto',
+      aiCliCommand: typeof parsed.aiCliCommand === 'string' && parsed.aiCliCommand.trim() ? parsed.aiCliCommand.trim() : null,
       recentProjects: Array.isArray(parsed.recentProjects) ? parsed.recentProjects : [],
       skillsDirs: mergeSkillDirs(parsed.skillsDirs, parsed.skillsDir),
       // 旧字段原样透传：渲染层启动迁移（并入 skillsDirs 后写 null 清空）依赖读到它
@@ -108,6 +123,7 @@ export async function getConfig(): Promise<AppConfig> {
       embedRemoteHost:
         typeof parsed.embedRemoteHost === 'string' && parsed.embedRemoteHost.trim() ? parsed.embedRemoteHost : null,
       memExtractRounds: clampRounds(parsed.memExtractRounds),
+      contextCompressThreshold: clampCompressThreshold(parsed.contextCompressThreshold),
     }
     configCache = cfg; configCacheAt = Date.now()
     return cfg
@@ -115,11 +131,11 @@ export async function getConfig(): Promise<AppConfig> {
     const fallback: AppConfig = {
       lastProjectPath: null, aiBaseUrl: null, aiModel: null, aiProvider: null,
       aiTiers: undefined,
-      aiDispatchMode: 'api', aiCliPermission: 'auto',
+      aiDispatchMode: 'api', aiCliPermission: 'auto', aiCliCommand: null,
       recentProjects: [], skillsDirs: [], skillsDir: null,
       startupCommands: undefined, projectSkillsDirsMap: undefined,
       dataDir: null, embedModel: null, embedRemoteHost: null,
-      memExtractRounds: undefined,
+      memExtractRounds: undefined, contextCompressThreshold: undefined,
     }
     configCache = fallback; configCacheAt = Date.now()
     return fallback
@@ -133,8 +149,9 @@ export async function mergeConfig(patch: Partial<AppConfig>): Promise<void> {
   await setConfig({ ...current, ...patch })
 }
 
-/** 整体覆盖写入，立即落盘（pretty JSON）；写入后清缓存 */
+/** 整体覆盖写入，立即落盘（pretty JSON）；写入后清缓存并广播 diff 事件 */
 export async function setConfig(config: AppConfig): Promise<void> {
+  const prev = configCache
   invalidateConfigCache()
   const file = configPath()
   try {
@@ -147,6 +164,33 @@ export async function setConfig(config: AppConfig): Promise<void> {
   } catch (e) {
     throw new Error(`配置写入失败：${errorMessage(e)}`)
   }
+  const affected = prev ? shallowDiffKeys(prev, config) : new Set(Object.keys(config))
+  if (affected.size > 0) configChangedEmitter.fire(affected)
+}
+
+// ---------- 配置变更事件（多窗口同步） ----------
+
+const configChangedEmitter = new Emitter<Set<string>>({ name: 'config' })
+
+/** 盘上配置变更（setConfig/mergeConfig 成功后触发）：affectedKeys 为实际发生变化的顶层键 */
+export function onConfigChanged(cb: (affectedKeys: Set<string>) => void): IDisposable {
+  return configChangedEmitter.event(cb)
+}
+
+/** 顶层键浅对比；对象值用 JSON 序列化比较（配置量级小，开销可忽略） */
+function shallowDiffKeys(a: AppConfig, b: AppConfig): Set<string> {
+  const changed = new Set<string>()
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)])
+  const ra = a as unknown as Record<string, unknown>
+  const rb = b as unknown as Record<string, unknown>
+  for (const k of keys) {
+    const va = ra[k]
+    const vb = rb[k]
+    if (va === vb) continue
+    if (typeof va === 'object' && typeof vb === 'object' && JSON.stringify(va) === JSON.stringify(vb)) continue
+    changed.add(k)
+  }
+  return changed
 }
 
 function configPath(): string {

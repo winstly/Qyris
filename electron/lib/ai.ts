@@ -10,6 +10,7 @@ import { getSecretInternal } from './secrets'
 import { getConfig } from './config'
 import { abortApi, anthropicChatStream, openaiChatStream, testApiConnection, SECRET_ACCOUNT } from './ai-api'
 import { claudeCliChatStream, cliCancel, testCliConnection } from './ai-cli'
+import { registerRequestWindow, unregisterRequestWindow } from './emitter'
 
 export interface AiToolCall {
   id: string
@@ -53,10 +54,16 @@ export async function aiChatStream(
   }
   const key = await getSecretInternal(SECRET_ACCOUNT)
   if (!key) throw new Error('尚未配置 API Key，请打开设置面板填写（将存入系统 keychain）')
-  if (provider === 'anthropic') {
-    return anthropicChatStream(requestId, key, baseUrl, model, messages, tools)
+  // API 模式同样登记请求→发起窗口映射：ai-delta 等增量事件定向路由，不再全窗口广播
+  if (windowId != null) registerRequestWindow(requestId, windowId)
+  try {
+    if (provider === 'anthropic') {
+      return await anthropicChatStream(requestId, key, baseUrl, model, messages, tools)
+    }
+    return await openaiChatStream(requestId, key, baseUrl, model, messages, tools)
+  } finally {
+    if (windowId != null) unregisterRequestWindow(requestId)
   }
-  return openaiChatStream(requestId, key, baseUrl, model, messages, tools)
 }
 
 export async function aiTestConnection(

@@ -6,8 +6,9 @@ import { api } from '@/services/desktop'
 import { basename, joinPath } from '@/utils/path'
 import type { TreeNode } from '@/types'
 import { ContextMenu, type ContextMenuItem } from '@/components/common/ContextMenu'
+import { SnapshotHistoryDialog } from '@/components/workspace/SnapshotHistoryDialog'
 import { Select } from '@/components/common/Select'
-import { IconChevron, IconFolder, IconFolderOpen, IconFile, IconPlus, IconFolderPlus, IconPencil, IconTrash, IconRefresh, IconSearch, IconClose, IconBranch, IconUndo, IconCopy, IconScissors, IconCheck, IconSend } from '@/components/common/icons'
+import { IconChevron, IconFolder, IconFolderOpen, IconFile, IconPlus, IconFolderPlus, IconPencil, IconTrash, IconRefresh, IconSearch, IconClose, IconBranch, IconUndo, IconCopy, IconScissors, IconCheck, IconSend, IconTarget } from '@/components/common/icons'
 import { focusGitCommit } from '@/components/workspace/GitPanel'
 
 /** 右键「切换分支」对话框的目标目录与其仓库信息 */
@@ -106,22 +107,46 @@ export function FileTree() {
   const rootNode: TreeNode = { name: basename(rootPath), path: rootPath, kind: 'folder' }
   return (
     <div className="filetree-wrap" aria-label="项目文件">
-      <div className="filetree__search">
-        <IconSearch size={13} />
-        <input
-          className="filetree__search-input"
-          ref={(el) => { searchInputRef = el }}
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="搜索文件…"
-          aria-label="搜索文件名"
-          spellCheck={false}
-        />
-        {query && (
-          <button className="filetree__search-clear" onClick={() => setQuery('')} aria-label="清除搜索">
-            <IconClose size={11} />
+      <div className="filetree__head-bar">
+        <div className="filetree__search">
+          <IconSearch size={13} />
+          <input
+            className="filetree__search-input"
+            ref={(el) => { searchInputRef = el }}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索文件…"
+            aria-label="搜索文件名"
+            spellCheck={false}
+          />
+          {query && (
+            <button className="filetree__search-clear" onClick={() => setQuery('')} aria-label="清除搜索">
+              <IconClose size={11} />
+            </button>
+          )}
+        </div>
+        <div className="filetree__toolbar">
+          <button
+            className="filetree__toolbar-btn"
+            onClick={() => {
+              const fs = useFileStore.getState()
+              const target = fs.activePath
+              if (!target) return
+              void fs.revealPath(target).then(() => {
+                const tryScroll = (attempt: number) => {
+                  const el = document.querySelector(`[data-tree-path="${CSS.escape(target)}"]`)
+                  if (el) { el.scrollIntoView({ block: 'nearest' }); return }
+                  if (attempt < 10) setTimeout(() => tryScroll(attempt + 1), 50)
+                }
+                requestAnimationFrame(() => tryScroll(0))
+              })
+            }}
+            title="定位当前文件"
+            aria-label="定位当前文件"
+          >
+            <IconTarget size={12} />
           </button>
-        )}
+        </div>
       </div>
       <div className="filetree" onKeyDown={(e) => {
         if (!e.ctrlKey && !e.metaKey) return
@@ -146,8 +171,57 @@ export function FileTree() {
       {branchTarget && (
         <BranchSwitchDialog target={branchTarget} onClose={() => setBranchTarget(null)} />
       )}
+      <SnapshotHistoryDialog />
     </div>
   )
+}
+
+// ---------- 目录折叠优化：单子链合并 ----------
+
+/** 合并后节点：外层是文件树节点，内层是实际路径链 */
+interface CompactNode extends TreeNode {
+  /** 合并的中间路径（不含首尾） */
+  mergedChain: string[]
+  /** 合并后显示名（a/b/c 形式） */
+  mergedName: string
+}
+
+/**
+ * 把单子目录链折叠为一个节点。
+ * 例：com/ 下只有一个子目录 example/，example/ 下只有一个子目录 app/，
+ * app/ 下有多个子项 → 合并为 "com/example/app" 一个节点，childrenMap 用 app/ 的路径查。
+ */
+function compactChildren(children: TreeNode[]): (TreeNode | CompactNode)[] {
+  return children.map((child) => {
+    if (child.kind !== 'folder') return child
+    // 链式合并：只要当前目录只有一个子目录就继续往下走
+    const chain: string[] = [child.path]
+    let current = child
+    while (true) {
+      const kids = useFileStore.getState().childrenMap[current.path]
+      // 子项未加载或有多个子项（含文件）→ 停止合并
+      if (!kids || kids.length !== 1) break
+      const only = kids[0]
+      if (only.kind !== 'folder') break
+      chain.push(only.path)
+      current = only
+    }
+    if (chain.length === 1) return child // 无需合并
+    const mergedNames = chain.map((p) => {
+      const base = p.split(/[\\/]/).pop() ?? p
+      return base
+    })
+    return {
+      ...child,
+      path: current.path, // 点击展开/收起用实际最深路径
+      mergedChain: chain,
+      mergedName: mergedNames.join('/'),
+    } as CompactNode
+  })
+}
+
+function isCompactNode(node: TreeNode | CompactNode): node is CompactNode {
+  return 'mergedChain' in node
 }
 
 // ---------- 文件名搜索结果 ----------
@@ -223,6 +297,7 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
         aria-selected={activePath === node.path}
         tabIndex={-1}
         className={`tree-row ${isActive ? 'tree-row--active' : ''}`}
+        data-tree-path={node.path}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={() => {
           if (isFolder) void toggleDir(node.path)
@@ -248,9 +323,11 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
 
       {isFolder && expanded && (
         <div role="group">
-          {(children ?? []).map((c) => (
-            <NodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />
-          ))}
+          {compactChildren(children ?? []).map((c) =>
+            isCompactNode(c)
+              ? <CompactNodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />
+              : <NodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />,
+          )}
           {children && children.length === 0 && (
             <div className="tree-empty" style={{ paddingLeft: 8 + (depth + 1) * 14 + 22 }}>
               空目录
@@ -264,6 +341,88 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
           pos={menuPos}
           onClose={() => setMenuPos(null)}
           items={buildTreeMenuItems(node, rootPath, onSwitchBranch)}
+        />
+      )}
+    </>
+  )
+})
+
+/** 合并目录节点：展开时依次展开整条链，收起时收起整条链 */
+const CompactNodeRow = React.memo(function CompactNodeRow({ node, depth, onSwitchBranch }: {
+  node: CompactNode
+  depth: number
+  onSwitchBranch: (dir: string) => void
+}) {
+  const expanded = useFileStore((s) => !!s.expanded[node.path])
+  const loading = useFileStore((s) => !!s.loadingDirs[node.path])
+  const children = useFileStore((s) => s.childrenMap[node.path])
+  const rootPath = useFileStore((s) => s.rootPath)
+  const toggleDir = useFileStore((s) => s.toggleDir)
+  const [menuPos, setMenuPos] = useState<{ x: number; y: number } | null>(null)
+
+  /** 展开整条链：依次展开每个中间目录并加载子项 */
+  const expandChain = async () => {
+    const fs = useFileStore.getState()
+    for (const dirPath of node.mergedChain) {
+      if (!fs.expanded[dirPath]) {
+        await fs.toggleDir(dirPath)
+      }
+    }
+  }
+
+  const handleClick = () => {
+    if (expanded) {
+      // 收起：只收起链的最后一个（最深）目录
+      void toggleDir(node.path)
+    } else {
+      void expandChain()
+    }
+  }
+
+  return (
+    <>
+      <div
+        role="treeitem"
+        aria-expanded={expanded}
+        tabIndex={-1}
+        className="tree-row"
+        style={{ paddingLeft: 8 + depth * 14 }}
+        onClick={handleClick}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          setMenuPos({ x: e.clientX, y: e.clientY })
+        }}
+      >
+        <span className={`tree-caret ${expanded ? 'tree-caret--open' : ''}`}>
+          <IconChevron size={11} />
+        </span>
+        <span className="tree-icon tree-icon--folder">
+          {expanded ? <IconFolderOpen size={14} /> : <IconFolder size={14} />}
+        </span>
+        <span className="tree-name tree-name--compact">{node.mergedName}</span>
+        {loading && <span className="tree-loading" aria-label="加载中" />}
+      </div>
+
+      {expanded && (
+        <div role="group">
+          {compactChildren(children ?? []).map((c) =>
+            isCompactNode(c)
+              ? <CompactNodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />
+              : <NodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />,
+          )}
+          {children && children.length === 0 && (
+            <div className="tree-empty" style={{ paddingLeft: 8 + (depth + 1) * 14 + 22 }}>
+              空目录
+            </div>
+          )}
+        </div>
+      )}
+
+      {menuPos && (
+        <ContextMenu
+          pos={menuPos}
+          onClose={() => setMenuPos(null)}
+          items={buildTreeMenuItems({ name: node.mergedName, path: node.path, kind: 'folder' }, rootPath, onSwitchBranch)}
         />
       )}
     </>
@@ -380,6 +539,9 @@ function buildTreeMenuItems(
     ...(hasSnapshot
       ? [{ label: '回退到修改前', icon: <IconRefresh size={13} />, run: () => void restore() }]
       : []),
+    ...(target.kind === 'file'
+      ? [{ label: '快照历史…', icon: <IconFile size={13} />, run: () => void useFileStore.getState().openSnapshotHistory(target.path) }]
+      : []),
     ...(target.kind === 'folder'
       ? [
           {
@@ -415,6 +577,7 @@ function buildTreeMenuItems(
           },
         ]
       : []),
+    { label: '在资源管理器中打开', icon: <IconFolder size={13} />, run: () => void api.openInExplorer(target.path) },
     { label: '删除', icon: <IconTrash size={13} />, run: () => void remove(), disabled: isRoot, danger: true },
     { label: '刷新', icon: <IconRefresh size={13} />, run: () => void refresh() },
   ]

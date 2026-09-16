@@ -34,6 +34,7 @@ export function SettingsDialog() {
   const [provider, setProvider] = useState<'openai' | 'anthropic'>(settings.provider)
   const [dispatchMode, setDispatchMode] = useState<'api' | 'claude-cli'>(settings.dispatchMode)
   const [cliPermission, setCliPermission] = useState<'auto' | 'readonly'>(settings.cliPermission)
+  const [cliCommand, setCliCommand] = useState(settings.cliCommand ?? '')
   const [tiers, setTiers] = useState<ModelTiers>(settings.tiers ?? {})
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [testing, setTesting] = useState(false)
@@ -45,6 +46,7 @@ export function SettingsDialog() {
   const [dirBusy, setDirBusy] = useState<'pick' | 'migrate' | null>(null)
   const [dirCopied, setDirCopied] = useState(false)
   const [memRounds, setMemRounds] = useState('')
+  const [compressThreshold, setCompressThreshold] = useState('')
 
   useEffect(() => {
     if (!open) return
@@ -54,12 +56,14 @@ export function SettingsDialog() {
     setProvider(settings.provider)
     setDispatchMode(settings.dispatchMode)
     setCliPermission(settings.cliPermission)
+    setCliCommand(settings.cliCommand ?? '')
     setTiers(settings.tiers ?? {})
     setApiKeyInput('')
     setTestResult(null)
     setDirsDraft(null)
     setDirBusy(null)
     setMemRounds('')
+    setCompressThreshold('')
   }, [open, settings])
 
   // 进入记忆 tab 时读取配置 + 数据存储位置
@@ -70,6 +74,7 @@ export function SettingsDialog() {
     api.getConfig().then((c) => {
       if (!alive) return
       setMemRounds(c.memExtractRounds != null ? String(c.memExtractRounds) : '')
+      setCompressThreshold(c.contextCompressThreshold != null ? String(c.contextCompressThreshold) : '')
     }).catch(() => {})
     return () => { alive = false }
   }, [open, tab])
@@ -91,11 +96,14 @@ export function SettingsDialog() {
     }
     await saveSettings({
       baseUrl: baseUrl.trim(), model: model.trim(), provider, dispatchMode, cliPermission,
+      cliCommand: cliCommand.trim() || null,
       tiers: Object.keys(cleanTiers).length ? cleanTiers : undefined,
     })
     const rounds = Math.floor(Number(memRounds))
+    const threshold = Math.floor(Number(compressThreshold))
     await api.mergeConfig({
       memExtractRounds: Number.isFinite(rounds) && rounds >= 2 ? Math.min(60, rounds) : undefined,
+      contextCompressThreshold: Number.isFinite(threshold) && threshold >= 64000 ? Math.min(512000, threshold) : undefined,
     })
     await refreshHasApiKey()
     setOpen(false)
@@ -182,6 +190,7 @@ export function SettingsDialog() {
           <ModelSettingsTab
             dispatchMode={dispatchMode} setDispatchMode={setDispatchMode}
             cliPermission={cliPermission} setCliPermission={setCliPermission}
+            cliCommand={cliCommand} setCliCommand={setCliCommand}
             provider={provider} setProvider={setProvider}
             baseUrl={baseUrl} setBaseUrl={setBaseUrl}
             apiKeyInput={apiKeyInput} setApiKeyInput={setApiKeyInput}
@@ -208,6 +217,16 @@ export function SettingsDialog() {
                   <span className="settings-memrounds__unit">轮 AI 回复</span>
                 </div>
                 <span className="field__hint">每累计多少轮 AI 回复后自动把对话蒸馏进记忆——越小记得越勤、token 消耗越多；清空输入恢复默认</span>
+              </div>
+              <div className="field">
+                <span className="field__label">上下文压缩阈值</span>
+                <div className="settings-memrounds">
+                  <input className="field__input" type="number" min={64000} max={512000} step={16000}
+                    value={compressThreshold} onChange={(e) => setCompressThreshold(e.target.value)}
+                    placeholder="默认 256000" aria-label="上下文压缩阈值" />
+                  <span className="settings-memrounds__unit">token</span>
+                </div>
+                <span className="field__hint">对话历史总 token 超过此值时，自动压缩旧消息为摘要（保留最近 40 条原文）——越大越晚压缩、token 消耗越多；清空输入恢复默认（256k）</span>
               </div>
               <div className="field">
                 <span className="field__label">数据存储位置</span>

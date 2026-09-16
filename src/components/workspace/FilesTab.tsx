@@ -2,12 +2,13 @@ import { useAppStore } from '@/store/useAppStore'
 import { useGitStore } from '@/store/useGitStore'
 import { SplitPane } from '@/components/common/SplitPane'
 import { FileTree } from './FileTree'
+import { SearchPanel } from './SearchPanel'
 import { EditorPane } from './EditorPane'
 import { GitPanel } from './GitPanel'
 import { DiffView } from './DiffView'
 import { GitOpDialog } from './GitOpDialog'
 
-/** 文件 Tab：左文件树 + Git commit 工作区（可拖拽分割） + 右代码编辑器（可被 diff 覆盖层接管）。 */
+/** 文件 Tab：左文件树 + 搜索面板（可折叠） + Git 工作区 + 右代码编辑器。 */
 export function FilesTab() {
   const filesSplitRatio = useAppStore((s) => s.filesSplitRatio)
   const setFilesSplitRatio = useAppStore((s) => s.setFilesSplitRatio)
@@ -27,13 +28,13 @@ export function FilesTab() {
             <div className="files-first__tree">
               <FileTree />
             </div>
+            <SearchPanel />
             <GitPanel />
           </div>
         }
         second={
           <div className="files-second">
             <EditorPane />
-            {/* diff 覆盖层：铺满编辑器区域；编辑器保持挂载，关闭后状态不丢 */}
             {hasDiff && <DiffView />}
           </div>
         }

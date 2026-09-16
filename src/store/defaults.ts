@@ -9,4 +9,5 @@ export const DEFAULT_SETTINGS: AiSettings = {
   provider: 'openai',
   dispatchMode: 'api',
   cliPermission: 'auto',
+  cliCommand: null,
 }

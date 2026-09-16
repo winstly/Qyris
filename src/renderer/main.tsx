@@ -19,10 +19,13 @@ import '@/styles/sidebar.css'
 import '@/styles/chat.css'
 
 import App from '@/App'
+import { ErrorBoundary } from '@/components/common/ErrorBoundary'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
-    <App />
+    <ErrorBoundary>
+      <App />
+    </ErrorBoundary>
   </React.StrictMode>,
 )
 

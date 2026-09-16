@@ -74,8 +74,13 @@
 - 右键菜单：新建 / 重命名 / 删除 / 切换分支
 - 页签批量关闭
 - 外部修改自动刷新
+- **保存冲突检测**——你编辑期间文件被 AI / 外部程序改过，保存时弹对话框三选（覆盖 / 重新加载 / 取消），不再静默覆盖
+- **原子写盘**——临时文件 + rename，崩溃不截断文件
+- **快照历史**——AI 每次写入前自动留版本，右键「快照历史…」可看 unified diff 并回退到任意版本
 - Monaco Editor（语法高亮 + 多语言支持）
-- **Ctrl/Cmd+F 全局搜索**——编辑器未聚焦也能呼出
+- **Ctrl/Cmd+F 编辑器内搜索** / **Ctrl/Cmd+Shift+F 全局搜索**——全项目内容搜索，按文件分组，点击跳转定位
+- **文件树增强**：定位当前文件（🎯）、单子目录链自动合并（Java 包路径 `com.example.app` 一个节点）、右键「在资源管理器中打开」
+- 历史工程列表：一键在资源管理器中打开项目目录
 - 所有文件操作经 IPC 白名单通道，渲染进程不直接碰文件系统
 
 ### AI 对话与多 Agent 编排
@@ -90,9 +95,10 @@
   - **切换器 / 专注视图**随时查看任意子 agent 执行进度
   - 子 agent **独立 token 记账**，总额自动汇总到主对话
   - 失败自动重试（模型类错误），完成 / 取消自动清理出列表
-- 内置工具（API 模式）：`list_files` / `search_files` / `read_file` / `write_file` / `run_once` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `dispatch_subtasks` / `askUserQuestion` / `load_skill`
+- 内置工具（API 模式）：`list_files` / `search_files` / `grep_files` / `read_file` / `write_file` / `edit_file` / `run_once` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `verify_start` / `dispatch_subtasks` / `askUserQuestion` / `load_skill`
 - 内置工具（CLI 模式）：Read / Write / Bash / PowerShell / Glob / Grep / Edit / Agent / Task / WebFetch / WebSearch
 - 真取消：「停止生成」在网络层硬中断请求，连同在途子 agent 请求一并取消
+- **端口冲突自动检测**——服务启动失败时自动查询占用进程（PID + 进程名），注入解决建议（停服务 / 换端口）
 - **消息持久化**：SQLite 存储，keyset 分页（最新 50 条 + 向上翻页），稳定点 write-through（user 发送 / assistant 收尾 / toolResult 追加）
 
 ### 安全
@@ -102,6 +108,9 @@
 - git URL / 分支名入参守卫，防 CLI 选项注入
 - 外链统一经 `shell.openExternal`，仅允许 http/https
 - 预览 WebContentsView 启用 sandbox + contextIsolation + 禁 nodeIntegration
+- 主进程全局异常兜底（未捕获异常不崩溃，进日志）；渲染层 ErrorBoundary 防白屏
+- 主进程日志按天落盘 `userData/logs/`（保留 7 天）
+- 配置变更事件广播，多窗口设置实时同步
 
 ### Skills 系统
 

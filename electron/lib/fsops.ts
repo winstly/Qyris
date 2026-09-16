@@ -14,6 +14,8 @@ export interface FileContent {
   content: string
   isBinary: boolean
   truncated: boolean
+  /** 磁盘文件 mtime（渲染层保存前回传做冲突检测的基线） */
+  mtimeMs: number
 }
 
 const MAX_READ_BYTES = 2 * 1024 * 1024 // 2MB 截断阈值
@@ -78,6 +80,21 @@ export async function listDir(projectRoot: string, dir: string): Promise<TreeNod
   return nodes
 }
 
+/** 批量目录列表：一次 IPC 取多个目录内容（主进程端并发 fs.readdir）。
+ *  单目录失败不影响其他（返回空数组 + console.warn）。 */
+export async function listDirBatch(projectRoot: string, dirs: string[]): Promise<Record<string, TreeNode[]>> {
+  const results: Record<string, TreeNode[]> = {}
+  await Promise.all(dirs.map(async (dir) => {
+    try {
+      results[dir] = await listDir(projectRoot, dir)
+    } catch (e) {
+      console.warn(`[fsops] listDirBatch 单目录失败 ${dir}：${String(e)}`)
+      results[dir] = []
+    }
+  }))
+  return results
+}
+
 /** 递归按文件名搜索：大小写不敏感子串匹配相对路径；跳过 IGNORED 目录，symlink 不跟随（防环） */
 export async function searchFiles(
   projectRoot: string, query: string, limit = SEARCH_MAX_RESULTS,
@@ -135,25 +152,157 @@ export async function readTextFile(projectRoot: string, filePath: string): Promi
   const slice = buf.subarray(0, MAX_READ_BYTES)
   if (slice.subarray(0, BINARY_SNIFF_BYTES).includes(0)) {
     // 二进制文件不计入截断
-    return { content: '', isBinary: true, truncated: false }
+    return { content: '', isBinary: true, truncated: false, mtimeMs: meta.mtimeMs }
   }
   // Buffer.toString('utf8') 为 lossy 解析（非法序列 → U+FFFD）
-  return { content: slice.toString('utf8'), isBinary: false, truncated }
+  return { content: slice.toString('utf8'), isBinary: false, truncated, mtimeMs: meta.mtimeMs }
 }
 
-/** 写文本文件：自动递归建父目录，覆盖写 UTF-8 无 BOM */
-export async function writeTextFile(projectRoot: string, filePath: string, content: string): Promise<void> {
+/** 原子写：先写同目录临时文件再 rename 覆盖，崩溃不会截断原文件（Windows rename 语义可覆盖） */
+export async function atomicWriteFile(target: string, content: string): Promise<void> {
+  const tmp = path.join(
+    path.dirname(target),
+    `.${path.basename(target)}.${process.pid}.${Date.now().toString(36)}.tmp`,
+  )
+  try {
+    await fsp.writeFile(tmp, content, 'utf8')
+    await fsp.rename(tmp, target)
+  } catch (e) {
+    try {
+      await fsp.unlink(tmp)
+    } catch { /* 临时文件清理失败不掩盖原错误 */ }
+    throw e
+  }
+}
+
+/** mtime 冲突哨兵：渲染层按此前缀识别冲突类错误并弹对话框（Electron IPC 只传 message） */
+export const FILE_CONFLICT_PREFIX = 'FILE_CONFLICT::'
+
+/** 写文本文件：自动递归建父目录，原子写 UTF-8 无 BOM。
+ *  opts.expectedMtimeMs：调用方持有的磁盘基线；当前 mtime 更新且未 force 时抛 FILE_CONFLICT
+ *  （防 AI 写入 / 外部进程改动被静默覆盖，选择权交给用户）。返回写入后的 mtime。 */
+export async function writeTextFile(
+  projectRoot: string, filePath: string, content: string,
+  opts?: { expectedMtimeMs?: number | null; force?: boolean },
+): Promise<{ mtimeMs: number }> {
   const target = await ensureInside(projectRoot, filePath)
   try {
     await fsp.mkdir(path.dirname(target), { recursive: true })
   } catch (e) {
     throw new Error(`无法创建父目录：${errorMessage(e)}`)
   }
+  if (opts?.expectedMtimeMs != null && opts.force !== true) {
+    const cur = await fsp.stat(target).catch(() => null)
+    if (cur && cur.mtimeMs > opts.expectedMtimeMs) {
+      throw new Error(
+        `${FILE_CONFLICT_PREFIX}文件已被外部修改（AI 或其他程序在你编辑期间写入了该文件）。` +
+        `保存将覆盖外部修改，请确认。`,
+      )
+    }
+  }
   try {
-    await fsp.writeFile(target, content, 'utf8')
+    await atomicWriteFile(target, content)
   } catch (e) {
     throw new Error(`写入失败：${errorMessage(e)}`)
   }
+  const written = await fsp.stat(target)
+  return { mtimeMs: written.mtimeMs }
+}
+
+/** 内容搜索结果：文件（相对路径）+ 行号 + 该行文本（截 200 字符） */
+export interface GrepMatch {
+  path: string
+  line: number
+  text: string
+}
+
+export interface GrepResult {
+  matches: GrepMatch[]
+  /** 命中文件数 */
+  fileCount: number
+  /** 达到上限截断 */
+  truncated: boolean
+}
+
+const GREP_MAX_MATCHES = 120
+const GREP_MAX_FILE_BYTES = 512 * 1024 // 单文件读入上限（超过跳过，防巨型文件卡死）
+
+/** 递归按内容搜索：JS 正则（自动转义普通文本），跳过 IGNORED 目录与二进制嗅探不通过的文件。
+ *  有界遍历（命中/访问双重上限），主进程一次 IPC 完成查询。 */
+export async function grepFiles(
+  projectRoot: string, pattern: string,
+  opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean },
+): Promise<GrepResult> {
+  const root = await ensureInside(projectRoot, projectRoot)
+  const maxResults = Math.min(Math.max(opts?.maxResults ?? GREP_MAX_MATCHES, 1), 500)
+  let re: RegExp
+  try {
+    const flags = opts?.caseSensitive ? 'g' : 'gi'
+    re = new RegExp(pattern, flags)
+  } catch {
+    // 非法正则回退为字面量文本匹配
+    re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), opts?.caseSensitive ? 'g' : 'gi')
+  }
+  const globLower = opts?.glob?.toLowerCase() ?? null
+  const matches: GrepMatch[] = []
+  const hitFiles = new Set<string>()
+  let visited = 0
+  let truncated = false
+
+  async function walk(dir: string): Promise<void> {
+    if (truncated || visited >= SEARCH_MAX_VISITED) return
+    let dirents: Dirent[]
+    try {
+      dirents = await fsp.readdir(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const de of dirents) {
+      if (truncated || visited >= SEARCH_MAX_VISITED) return
+      visited++
+      if (isIgnored(de.name)) continue
+      const abs = path.join(dir, de.name)
+      if (de.isDirectory()) {
+        await walk(abs)
+        continue
+      }
+      if (!de.isFile()) continue
+      if (globLower && !abs.toLowerCase().endsWith(globLower.replace(/^\*/, ''))) continue
+      let stat: Stats
+      try {
+        stat = await fsp.stat(abs)
+      } catch {
+        continue
+      }
+      if (stat.size > GREP_MAX_FILE_BYTES || stat.size === 0) continue
+      let buf: Buffer
+      try {
+        buf = await fsp.readFile(abs)
+      } catch {
+        continue
+      }
+      if (buf.subarray(0, BINARY_SNIFF_BYTES).includes(0)) continue // 二进制跳过
+      const lines = buf.toString('utf8').split('\n')
+      for (let i = 0; i < lines.length; i++) {
+        re.lastIndex = 0
+        if (!re.test(lines[i])) continue
+        hitFiles.add(abs)
+        matches.push({
+          path: path.relative(root, abs),
+          line: i + 1,
+          text: lines[i].trim().slice(0, 200),
+        })
+        if (matches.length >= maxResults) {
+          truncated = true
+          break
+        }
+      }
+      if (truncated) return
+    }
+  }
+
+  await walk(root)
+  return { matches, fileCount: hitFiles.size, truncated }
 }
 
 /** 精确替换文本文件中的指定内容：oldString 必须唯一匹配（0 或 >1 均报错） */
@@ -172,7 +321,7 @@ export async function editTextFile(
   if (count > 1) throw new Error(`old_string 在文件中匹配到 ${count} 处，请用更精确的文本确保唯一匹配。`)
   const replaced = content.replace(oldString, newString)
   try {
-    await fsp.writeFile(target, replaced, 'utf8')
+    await atomicWriteFile(target, replaced)
   } catch (e) {
     throw new Error(`写入失败：${errorMessage(e)}`)
   }
@@ -270,9 +419,11 @@ export async function moveEntry(
   return { name: path.basename(dest), path: dest, kind: st.isDirectory() ? 'folder' : 'file' }
 }
 
-/** 删除整个项目目录（递归删除，危险操作） */
+/** 删除整个项目目录（递归删除，危险操作）。
+ *  Windows 特殊处理：fsp.rm(recursive) 有时清空内容但留空根目录（杀软/索引服务锁句柄），
+ *  失败后额外尝试 rmdir 兜底。 */
 export async function deleteProjectFiles(projectRoot: string): Promise<void> {
-  // 幂等删除：目录已不存在视为成功（手动删过 / 重复删除的场景，不能阻塞历史条目移除）
+  // 幂等删除：目录已不存在视为成功
   try {
     const st = await fsp.stat(projectRoot)
     if (!st.isDirectory()) throw new Error('目标不是目录')
@@ -280,16 +431,38 @@ export async function deleteProjectFiles(projectRoot: string): Promise<void> {
     if ((e as NodeJS.ErrnoException).code === 'ENOENT') return
     throw new Error(`项目目录不存在或无法访问：${errorMessage(e)}`)
   }
-  try {
-    // maxRetries/retryDelay：杀软 / 索引服务 / 资源管理器的瞬态占用（EBUSY/EPERM/ENOTEMPTY）
-    await fsp.rm(projectRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
-  } catch (e) {
-    // rm 中途目录消失（并发删除）同样视为成功
+
+  // 策略：直接删 → EBUSY 时 rename 逃逸 → 再删一次
+  // Windows 上 rename 不要求目录无占用，rename 成功后原路径立即不可见。
+  const tryRm = async (): Promise<boolean> => {
     try {
-      await fsp.access(projectRoot)
+      await fsp.rm(projectRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 })
+      return true
     } catch {
-      return
+      try {
+        const remaining = await fsp.readdir(projectRoot)
+        if (remaining.length === 0) { await fsp.rmdir(projectRoot); return true }
+      } catch { return true } // ENOENT
+      return false
     }
-    throw new Error(`删除项目文件失败：${errorMessage(e)}`)
   }
+
+  // 第一轮：直接删（覆盖大部分正常场景）
+  if (await tryRm()) return
+
+  // 第二轮：EBUSY → rename 逃逸（核心优化）
+  // rename 成功后原路径立即不可见，用户感知 = 已删除。
+  // 残留副本在后台异步清理（不阻塞前端）。
+  const tmpPath = projectRoot + `.__deleting__${Date.now()}`
+  try {
+    await fsp.rename(projectRoot, tmpPath)
+    // 后台异步清理残留（fire-and-forget）
+    fsp.rm(tmpPath, { recursive: true, force: true, maxRetries: 20, retryDelay: 2000 }).catch(() => {})
+    return
+  } catch { /* rename 也失败 → 最后尝试 */ }
+
+  // 第三轮：rename 也失败（极端情况），再试一次 rm
+  if (await tryRm()) return
+
+  throw new Error('删除项目文件失败：文件被其他程序持续占用。请关闭占用该目录的程序（如文件管理器、编辑器、杀毒软件）后重试，或手动删除项目文件夹，或重启电脑后重试。')
 }

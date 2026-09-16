@@ -176,6 +176,45 @@ function noteStartupFailure(projectRoot: string, name: string, errorText: string
   }).catch(() => {})
 }
 
+/** EADDRINUSE 增强：查端口占用者 → 更新 errorText，让 AI 拿到完整冲突信息和解决建议 */
+async function enrichPortConflict(projectRoot: string, slotKey: string, rawError: string): Promise<void> {
+  // 从 EADDRINUSE 信息中提取端口号
+  const portMatch = rawError.match(/:(\d{2,5})\b/) ?? rawError.match(/port\s+(\d{2,5})\b/i)
+  const port = portMatch ? Number(portMatch[1]) : 0
+  if (!port) return
+
+  const owner = await api.portOwner(port).catch(() => null)
+  let hint: string
+  if (owner) {
+    hint = `\n端口 ${port} 被占用，占用进程：${owner.name}（PID ${owner.pid}）。` +
+      `\n解决方式：` +
+      `\n① 若是本项目已运行的服务，用 stop_project 停止后重试；` +
+      `\n② 若是其他进程，在启动命令中换端口（如 set PORT=${port + 1} && <原命令> 或 PORT=${port + 1} <原命令>）。`
+  } else {
+    hint = `\n端口 ${port} 被占用（未能查询到占用进程信息）。` +
+      `\n解决方式：` +
+      `\n① 若是本项目已运行的服务，用 stop_project 停止后重试；` +
+      `\n② 若是其他进程，在启动命令中换端口（如 set PORT=${port + 1} && <原命令> 或 PORT=${port + 1} <原命令>）。`
+  }
+
+  // 更新 slot 的 errorText（追加端口占用信息）
+  useBuildStore.setState((s) => {
+    const slice = s.byProject[projectRoot]
+    if (!slice) return s
+    const slot = slice.slots[slotKey]
+    if (!slot || slot.phase !== 'error') return s
+    return {
+      byProject: {
+        ...s.byProject,
+        [projectRoot]: {
+          ...slice,
+          slots: patchSliceSlot(slice, slotKey, { errorText: slot.errorText + hint }),
+        },
+      },
+    }
+  })
+}
+
 /** 单个工程的构建切片 */
 interface BuildSlice {
   slots: Record<string, SlotState>
@@ -540,6 +579,11 @@ export const useBuildStore = create<BuildState>()((set, get) => {
     })
     // 教训采集（P2）：编译期致命错误进 error 相位 → noteLesson（fire-and-forget，重复失败由主进程去重）
     if (fatalTransition !== null) noteStartupFailure(projectRoot, name, fatalTransition)
+
+    // 端口冲突增强：EADDRINUSE → 查端口占用者 → 注入解决建议
+    if (fatalTransition && /\bEADDRINUSE\b/.test(fatalTransition)) {
+      enrichPortConflict(projectRoot, key, fatalTransition).catch(() => {})
+    }
   },
 
   onExit: (projectRoot, name, code) => {

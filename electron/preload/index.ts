@@ -9,6 +9,8 @@ import type { IpcRendererEvent } from 'electron'
 // 仅类型引入（构建时擦除，不违反沙箱不引第三方约束）
 import type { MessagesPage, MessagesRecentPage } from '../lib/messages'
 import type { MemoryItem, MemoryPatch, MemorySearchResult, MemoryStats } from '../lib/memory/service'
+import type { FileContent } from '../lib/fsops'
+import type { SnapshotVersion } from '../../shared/types'
 
 type Unsubscribe = () => void
 
@@ -23,12 +25,34 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
 const desktopAPI = {
   // 文件系统
   listDir: (projectRoot: string, dir: string) => ipcRenderer.invoke('list_dir', { projectRoot, dir }),
+  listDirBatch: (projectRoot: string, dirs: string[]) =>
+    ipcRenderer.invoke('list_dir_batch', { projectRoot, dirs }) as Promise<Record<string, { name: string; path: string; kind: 'file' | 'folder' }[]>>,
   searchFiles: (projectRoot: string, query: string) =>
     ipcRenderer.invoke('search_files', { projectRoot, query }) as Promise<{ files: string[]; truncated: boolean }>,
-  readTextFile: (projectRoot: string, filePath: string) => ipcRenderer.invoke('read_text_file', { projectRoot, path: filePath }),
-  writeTextFile: (projectRoot: string, filePath: string, content: string) => ipcRenderer.invoke('write_text_file', { projectRoot, path: filePath, content }),
+  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean }) =>
+    ipcRenderer.invoke('grep_files', {
+      projectRoot, pattern,
+      glob: opts?.glob ?? null, maxResults: opts?.maxResults ?? null, caseSensitive: opts?.caseSensitive === true,
+    }) as Promise<{ matches: { path: string; line: number; text: string }[]; fileCount: number; truncated: boolean }>,
+  readTextFile: (projectRoot: string, filePath: string) =>
+    ipcRenderer.invoke('read_text_file', { projectRoot, path: filePath }) as Promise<FileContent>,
+  writeTextFile: (projectRoot: string, filePath: string, content: string, opts?: { expectedMtimeMs?: number | null; force?: boolean }) =>
+    ipcRenderer.invoke('write_text_file', {
+      projectRoot, path: filePath, content,
+      expectedMtimeMs: opts?.expectedMtimeMs ?? null,
+      force: opts?.force === true,
+    }) as Promise<{ mtimeMs: number }>,
   editTextFile: (projectRoot: string, filePath: string, oldString: string, newString: string) => ipcRenderer.invoke('edit_text_file', { projectRoot, path: filePath, oldString, newString }) as Promise<{ replaced: number; lineCount: number }>,
-  snapshotFile: (projectRoot: string, sessionId: string, path: string) => ipcRenderer.invoke('snapshot_file', { projectRoot, sessionId, path }),
+  snapshotFile: (projectRoot: string, sessionId: string, path: string, version?: boolean) =>
+    ipcRenderer.invoke('snapshot_file', { projectRoot, sessionId, path, version: version === true }),
+  snapshotVersions: (projectRoot: string, path: string) =>
+    ipcRenderer.invoke('snapshot_versions', { projectRoot, path }) as Promise<SnapshotVersion[]>,
+  snapshotRead: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) =>
+    ipcRenderer.invoke('snapshot_read', { projectRoot, sessionId, path, versionKey: versionKey ?? null }) as Promise<string | null>,
+  snapshotDiff: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) =>
+    ipcRenderer.invoke('snapshot_diff', { projectRoot, sessionId, path, versionKey: versionKey ?? null }) as Promise<string>,
+  snapshotRestoreAt: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) =>
+    ipcRenderer.invoke('snapshot_restore_at', { projectRoot, sessionId, path, versionKey: versionKey ?? null }) as Promise<void>,
   listSnapshots: (projectRoot: string) =>
     ipcRenderer.invoke('list_snapshots', { projectRoot }) as Promise<Record<string, { ts: number; sessionId: string }>>,
   restoreFile: (projectRoot: string, path: string) => ipcRenderer.invoke('restore_file', { projectRoot, path }),
@@ -177,6 +201,7 @@ const desktopAPI = {
   setWindowTitle: (title: string) => ipcRenderer.invoke('set_window_title', { title }),
   startElementPick: (url: string) => ipcRenderer.invoke('start_element_pick', { url }),
   openExternal: (url: string) => ipcRenderer.invoke('open_external', { url }),
+  openInExplorer: (filePath: string) => ipcRenderer.invoke('open_in_explorer', { filePath }),
 
   // 事件（main → renderer），返回取消订阅函数
   onBuildOutput: (cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }) => void): Unsubscribe =>
@@ -200,6 +225,7 @@ const desktopAPI = {
   onMemoryChanged: (cb: (payload: { all: boolean; projectKeys: string[] }) => void): Unsubscribe =>
     subscribe('memory-changed', cb),
   onFsChanged: (cb: (payload: { paths: string[]; projectRoot?: string }) => void): Unsubscribe => subscribe('fs-changed', cb),
+  onConfigChanged: (cb: (payload: string[]) => void): Unsubscribe => subscribe('config:changed', cb),
   onElementPicked: (cb: (payload: { selector: string; tag: string; id: string; text: string }) => void): Unsubscribe => subscribe('element-picked', cb),
   onPreviewConsole: (cb: (payload: { level: string; message: string; sourceId: string; ts: number }) => void): Unsubscribe =>
     subscribe('preview-console', cb),

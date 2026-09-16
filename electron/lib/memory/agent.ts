@@ -36,6 +36,7 @@ import { registerOnceProc, cancelRunOnce, detectCommand } from '../proc'
 import { emitToAllWindows } from '../emitter'
 import * as service from './service'
 import { parseAgentJson } from './parse'
+import type { AgentOutput } from './parse'
 export type { AgentCreateOp, AgentPatchOp, AgentArchiveOp, AgentOp, AgentOutput } from './parse'
 
 // ---------- 纪律条款（memU 移植，系统提示原文） ----------
@@ -213,6 +214,9 @@ export function resetExtractStateForTest(): void {
 
 // ---------- 触发三口（IPC 契约，见 main/index.ts 与 preload/index.ts） ----------
 
+/** 退避自愈计数器：连续被跳过的 maybeExtract 调用次数（用于周期性日志） */
+let skippedCount = 0
+
 /** 滚动提取触发（渲染层每轮 assistant 收尾后调用；不满足阈值/冷却时为空操作） */
 export async function memoryMaybeExtract(projectRoot: string, sessionId: string): Promise<void> {
   const key = projectKey(projectRoot)
@@ -221,10 +225,30 @@ export async function memoryMaybeExtract(projectRoot: string, sessionId: string)
   const db = await getDb()
   let cur = cursors.get(ck)
   if (!cur) {
-    // 首见：优先恢复持久化游标（重启/接管场景）；从无记录 → 基线 0，历史窗口照常可提取
-    cur = { cursor: (await loadPersistedCursor(db, ck)) ?? 0, lastRunAt: 0 }
+    // 首见：优先恢复持久化游标（重启/接管场景）；无持久化记录 → 从 messages 表取 MAX(seq) 作为基线
+    //（避免基线 0 导致「重启后重扫全部旧消息→LLM 超时→失败→退避」的连锁故障）
+    const persisted = await loadPersistedCursor(db, ck)
+    if (persisted !== null) {
+      cur = { cursor: persisted, lastRunAt: 0 }
+    } else {
+      const maxSeq = await maxSeqOf(db, key, sessionId)
+      cur = { cursor: maxSeq, lastRunAt: 0 }
+      if (maxSeq > 0) {
+        console.info(`[mem-agent] 首见游标（无持久化记录），从 messages 表取 MAX(seq)=${maxSeq} 作为基线（不回溯旧消息）`)
+        // 持久化基线，防止下次重启再取
+        await persistCursor(db, ck, maxSeq)
+      }
+    }
     cursors.set(ck, cur)
   }
+
+  // 退避自愈：退避窗口已过期 + 连续失败 ≥3 → 自动归零（防永久卡退避）
+  if (failCount >= 3 && !inBackoff()) {
+    console.warn(`[mem-agent] 退避窗口已过期，自动归零 failCount=${failCount}（之前连续失败 ${failCount} 次）`)
+    failCount = 0
+    backoffUntil = 0
+  }
+
   const row = await db
     .prepare(
       "SELECT COUNT(*) AS n FROM messages WHERE project_key = ? AND session_id = ? AND seq > ? AND role = 'assistant'",
@@ -233,7 +257,17 @@ export async function memoryMaybeExtract(projectRoot: string, sessionId: string)
   // 阈值可配（设置页「记忆整理触发轮次」，config.ts 已归一到 2..60）；未配置回缺省 6
   const cfg = await getConfig()
   const threshold = cfg.memExtractRounds ?? ASSISTANT_ROUNDS_THRESHOLD
-  if (Number(row.n) < threshold) return
+  const assistantCount = Number(row.n)
+
+  if (assistantCount < threshold) {
+    // 每 5 次未达阈值的调用打一条 debug 日志（定位「对话很多但不触发」场景）
+    skippedCount++
+    if (skippedCount % 5 === 1) {
+      console.debug(`[mem-agent] 未达阈值：assistant=${assistantCount}/${threshold}，cursor=${cur.cursor}，冷却=${clock() - cur.lastRunAt < EXTRACT_COOLDOWN_MS}，退避=${inBackoff()}`)
+    }
+    return
+  }
+  skippedCount = 0 // 重置
   if (clock() - cur.lastRunAt < EXTRACT_COOLDOWN_MS) return
   if (inBackoff()) return // 退避窗口内静默跳过（游标不动，窗口过后照常重试）
   await enqueueExtract(projectRoot, sessionId, 'incremental')
@@ -362,7 +396,7 @@ async function runExtractionInner(projectRoot: string, sessionId: string, trigge
       `SELECT id, seq, role, content, tool_json FROM messages
        WHERE project_key = ? AND session_id = ? AND seq > ? ORDER BY seq ASC`,
     )
-    .all(projectKey(projectRoot), sessionId, cur.cursor) as TranscriptRow[]
+    .all(projectKey(projectRoot), sessionId, cur.cursor) as unknown as TranscriptRow[]
   if (rows.length === 0) {
     if (trigger === 'manual') {
       // 手动触发：cursor 已到末尾但用户要求重新整理 → 重置为 0 全量重扫
@@ -371,7 +405,7 @@ async function runExtractionInner(projectRoot: string, sessionId: string, trigge
       await persistCursor(db, ck, 0)
       const allRows = await db
         .prepare(`SELECT id, seq, role, content, tool_json FROM messages WHERE project_key = ? AND session_id = ? ORDER BY seq ASC`)
-        .all(projectKey(projectRoot), sessionId) as TranscriptRow[]
+        .all(projectKey(projectRoot), sessionId) as unknown as TranscriptRow[]
       if (allRows.length === 0) return 0
       // 用重置后的 rows 继续执行
       return await extractWithRows(projectRoot, sessionId, trigger, ck, allRows)
@@ -584,6 +618,8 @@ interface RunContext {
 }
 
 let disabledLogged = false
+/** 连续未启用计数：首次打 warn，后续每 10 次打一条（防刷屏但保持可观测） */
+let disabledSkipCount = 0
 
 /** 启用检查：llmHook 存在 = 测试模式直通。
  *  蒸馏跟随主模型调度（aiDispatchMode）：CLI / API。
@@ -593,24 +629,28 @@ async function resolveRunContext(): Promise<RunContext | null> {
   const cfg = await getConfig()
   const dispatchMode = cfg.aiDispatchMode ?? 'api'
   if (dispatchMode === 'claude-cli') {
-    if (detectCommand('claude') === false) return disabled('CLI 未安装')
+    const cliCmd = cfg.aiCliCommand || 'claude'
+    if ((await detectCommand(cliCmd)) === false) return disabled(`CLI 命令 '${cliCmd}' 不可用`)
     return { provider: 'openai', baseUrl: '', model: cfg.aiModel || '', dispatchMode: 'claude-cli' }
   }
-  if (!cfg.aiBaseUrl || !cfg.aiModel) return disabled('API 配置不完整')
+  if (!cfg.aiBaseUrl || !cfg.aiModel) return disabled('API 配置不完整（未设置 Base URL 或模型）')
   let key: string | null = null
   try {
     key = await getSecretInternal(SECRET_ACCOUNT)
   } catch {
     key = null
   }
-  if (!key) return disabled('API Key 缺失')
+  if (!key) return disabled('API Key 缺失（请在设置中配置）')
   return { provider: cfg.aiProvider ?? 'openai', baseUrl: cfg.aiBaseUrl, model: cfg.aiModel, dispatchMode: 'api' }
 }
 
 function disabled(reason: string): null {
+  disabledSkipCount++
   if (!disabledLogged) {
     disabledLogged = true
-    console.info(`[mem-agent] 记忆蒸馏未启用（${reason}），检索底座不受影响`)
+    console.warn(`[mem-agent] 记忆蒸馏未启用（${reason}），检索底座不受影响。记忆提取将一直跳过直到问题解决。`)
+  } else if (disabledSkipCount % 10 === 0) {
+    console.warn(`[mem-agent] 记忆蒸馏仍处于未启用状态（${reason}），已跳过 ${disabledSkipCount} 次提取`)
   }
   return null
 }
@@ -684,19 +724,20 @@ const DISTILL_JSON_SCHEMA = JSON.stringify({
   required: ['ops'],
 })
 
-function callCliJson(systemPrompt: string, userMessage: string, model: string): Promise<string> {
+async function callCliJson(systemPrompt: string, userMessage: string, model: string): Promise<string> {
   const prompt = `<conversation>\n用户：${userMessage}\n</conversation>`
   // --bare：跳过 hooks/skills/MCP/CLAUDE.md，蒸馏是纯文本→JSON 单轮任务，不需要这些
   // readonly 档（--allowedTools 白名单，只读）而非 auto（--dangerously-skip-permissions）
   // --json-schema 强制输出结构：ops 字段名、op 类型、category 枚举全部由 schema 保证
   const args = buildCliArgs(model, 'readonly', { bare: true, systemPrompt, outputFormat: 'json', maxTurns: 1, jsonSchema: DISTILL_JSON_SCHEMA })
   const isWin = process.platform === 'win32'
-  const cliCommand = 'claude'
+  const cfg = await getConfig()
+  const cliCmd = cfg.aiCliCommand || 'claude'
 
   return new Promise<string>((resolve, reject) => {
     let child: ChildProcess
     try {
-      child = spawn(isWin ? 'cmd.exe' : cliCommand, isWin ? ['/C', cliCommand, ...args] : args, {
+      child = spawn(isWin ? 'cmd.exe' : cliCmd, isWin ? ['/C', cliCmd, ...args] : args, {
         cwd: homedir(),
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,

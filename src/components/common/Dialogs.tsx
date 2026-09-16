@@ -11,9 +11,15 @@ export function Dialogs() {
   /** holdOpen 模式下确定后的执行中状态：按钮 loading、取消/遮罩关闭全部锁死 */
   const [confirming, setConfirming] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const prevResolveRef = useRef<((v: any) => void) | null>(null)
 
   useEffect(() => {
-    setConfirming(false)
+    // 只在新弹窗打开时重置 confirming，holdOpen 期间 patchDialog 不重置
+    const isNewDialog = dialog?.resolve !== prevResolveRef.current
+    prevResolveRef.current = dialog?.resolve ?? null
+    if (isNewDialog) setConfirming(false)
+
     if (dialog?.kind === 'prompt') {
       setValue(dialog.value ?? '')
       requestAnimationFrame(() => inputRef.current?.select())

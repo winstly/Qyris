@@ -42,9 +42,22 @@ function normPath(p: string): string {
   return CASE_INSENSITIVE ? n.toLowerCase() : n
 }
 
+/**
+ * 批内事件合并（vscode EventCoalescer 思想的路径版）：
+ * 1. 去重 —— chokidar 对同一文件的 add+change 只报一次
+ * 2. 父目录折叠 —— 目录被删时其子孙路径折叠进目录本身（rm -rf 不再产生海量事件）
+ * 3. 前缀包含去重 —— 子路径已被父路径覆盖时丢弃
+ */
+function coalescePaths(paths: string[]): string[] {
+  if (paths.length <= 1) return paths
+  const norm = paths.map((p) => p.replace(/\\/g, '/'))
+  const unique = [...new Set(norm)]
+  return unique.filter((p) => !unique.some((other) => other !== p && p.startsWith(other + '/')))
+}
+
 function flush(pw: ProjectWatcher): void {
   pw.timer = null
-  const paths = pw.pending
+  const paths = coalescePaths(pw.pending)
   pw.pending = []
   if (paths.length === 0) return
   for (const winId of pw.windowIds) {

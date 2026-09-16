@@ -1,46 +1,46 @@
 import { useEffect } from 'react'
-import { useAppStore } from '@/store/useAppStore'
-import { useFileStore } from '@/store/useFileStore'
-import { getEditorInstance } from '@/components/workspace/EditorPane'
-import { focusFileSearch } from '@/components/workspace/FileTree'
+import { executeCommand, canRunCommand } from '@/services/commands'
 
 /**
- * 全局快捷键：
- * - Cmd/Ctrl + O  打开项目
- * - Cmd/Ctrl + S  保存当前文件
- * - Cmd/Ctrl + F  搜索：有活动文本文件时在编辑器内搜索，否则聚焦文件树搜索框
+ * 全局快捷键 → 中央命令注册表（键位 → 命令 id 的唯一映射表）：
+ * - Cmd/Ctrl + O  workbench.action.openProject
+ * - Cmd/Ctrl + S  file.save（有活动文件时可执行）
+ * - Cmd/Ctrl + M  view.toggleMemorySidebar
+ * - Cmd/Ctrl + F  file.find（编辑器内搜索或聚焦文件树搜索框）
+ * 新命令在 services/commands.ts 注册，键位绑定只认 id。
+ * 注意：已绑定的键一律 preventDefault（漏给 Chromium 会触发默认行为，如 Ctrl+S 存网页），
+ * when 谓词只决定命令是否执行。
  */
+const KEY_BINDINGS: Record<string, string> = {
+  o: 'workbench.action.openProject',
+  s: 'file.save',
+  m: 'view.toggleMemorySidebar',
+  f: 'file.find',
+}
+
+/** 需要同时按 Shift 的快捷键（Ctrl+Shift+X） */
+const SHIFT_BINDINGS: Record<string, string> = {
+  f: 'workbench.action.globalSearch',
+}
+
 export function useKeyboardShortcuts() {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const mod = e.metaKey || e.ctrlKey
-      if (!mod) return
+      if (!(e.metaKey || e.ctrlKey)) return
       const key = e.key.toLowerCase()
-
-      if (key === 'o') {
-        e.preventDefault()
-        void useAppStore.getState().openProjectDialog()
-      } else if (key === 's') {
-        e.preventDefault()
-        void useFileStore.getState().saveFile()
-      } else if (key === 'm') {
-        e.preventDefault()
-        useAppStore.getState().toggleMemorySidebar()
-      } else if (key === 'f') {
-        const fs = useFileStore.getState()
-        // 有活动文本文件 → 编辑器内搜索
-        if (fs.activePath && !fs.binaryFiles[fs.activePath]) {
-          const editor = getEditorInstance()
-          if (editor) {
-            e.preventDefault()
-            editor.getAction('actions.find')?.run()
-            return
-          }
+      // Shift 组合键优先匹配（Ctrl+Shift+F 不应落入 Ctrl+F）
+      if (e.shiftKey) {
+        const commandId = SHIFT_BINDINGS[key]
+        if (commandId) {
+          e.preventDefault()
+          if (canRunCommand(commandId)) executeCommand(commandId)
+          return
         }
-        // 其他情况 → 聚焦文件树搜索框
-        e.preventDefault()
-        focusFileSearch()
       }
+      const commandId = KEY_BINDINGS[key]
+      if (!commandId) return
+      e.preventDefault()
+      if (canRunCommand(commandId)) executeCommand(commandId)
     }
     // capture：在编辑器内部 keymap 处理之前截获
     window.addEventListener('keydown', onKey, true)
