@@ -46,6 +46,16 @@ export default defineConfig({
       target: 'es2021',
       minify: 'esbuild',
       sourcemap: false,
+      rollupOptions: {
+        input: {
+          main: path.resolve(__dirname, 'src/renderer/index.html'),
+          pet: path.resolve(__dirname, 'src/renderer/pet/index.html'),
+          panel: path.resolve(__dirname, 'src/renderer/pet/panel.html'),
+        },
+        // 不配 manualChunks：Rollup 多入口本来就自动把共享模块提为公共 chunk。
+        // 若手动把 node_modules 归并成单一 vendor chunk，桌宠入口（只用 react）
+        // 也得整包加载全部依赖（~5MB），64px 动画窗口的开销反而爆炸。
+      },
     },
   },
 })

@@ -14,7 +14,7 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { Readable } from 'node:stream'
 import { homedir } from 'node:os'
-import { emitToRenderer, emitToWindow, registerRequestWindow, unregisterRequestWindow } from './emitter'
+import { broadcastToWindows, emitToRenderer, emitToWindow, registerRequestWindow, unregisterRequestWindow } from './emitter'
 import { getConfig, type AppConfig } from './config'
 import { readSkillFromDirs, scanSkillsDirs } from './skills'
 import { cancelRunOnce, detectCommand, registerOnceProc } from './proc'
@@ -313,9 +313,17 @@ export async function claudeCliChatStream(
   opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string },
 ): Promise<AiCompletion> {
   if (windowId != null) registerRequestWindow(requestId, windowId)
-  const emit = (event: string, payload: unknown): void => {
-    if (windowId != null) emitToWindow(windowId, event, payload)
-    else emitToRenderer(event, payload)
+  // 镜像管道：发起窗口定向照收 + 其余窗口同份广播（payload 统一附 projectRoot 供镜像窗口认领）。
+  // windowId 为 null（mem agent 蒸馏等内部调用）保持旧 emitToRenderer 全注册窗口语义——
+  // 不再叠加 broadcast，否则注册窗口每条事件收到两份；渲染层按内部 requestId 前缀忽略。
+  const emit = (event: string, payload: Record<string, unknown>): void => {
+    const enriched = { projectRoot, ...payload }
+    if (windowId != null) {
+      emitToWindow(windowId, event, enriched)
+      broadcastToWindows(event, enriched, windowId)
+    } else {
+      emitToRenderer(event, enriched)
+    }
   }
   const cliCommand = await resolveCliCommand()
   cachedCliCommand = cliCommand

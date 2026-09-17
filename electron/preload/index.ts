@@ -10,7 +10,7 @@ import type { IpcRendererEvent } from 'electron'
 import type { MessagesPage, MessagesRecentPage } from '../lib/messages'
 import type { MemoryItem, MemoryPatch, MemorySearchResult, MemoryStats } from '../lib/memory/service'
 import type { FileContent } from '../lib/fsops'
-import type { SnapshotVersion } from '../../shared/types'
+import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
 
 type Unsubscribe = () => void
 
@@ -202,18 +202,33 @@ const desktopAPI = {
   startElementPick: (url: string) => ipcRenderer.invoke('start_element_pick', { url }),
   openExternal: (url: string) => ipcRenderer.invoke('open_external', { url }),
   openInExplorer: (filePath: string) => ipcRenderer.invoke('open_in_explorer', { filePath }),
+  /** 主窗口关闭询问的回调：渲染层弹窗后回传选择；remember=true 时主进程落盘偏好 */
+  resolveClose: (action: 'minimize' | 'quit', remember: boolean) =>
+    ipcRenderer.send('app:close-resolve', { action, remember: remember === true }),
+
+  // 桌宠
+  togglePetPanel: () => ipcRenderer.send('pet:toggle-panel'),
+  requestPetState: () => ipcRenderer.send('pet:request-state'),
+  petMoveBy: (dx: number, dy: number) => ipcRenderer.send('pet:move-by', dx, dy),
+  /** 请求弹出桌宠右键菜单（打开工作台 / 退出应用），菜单由主进程原生 popup */
+  petContextMenu: () => ipcRenderer.send('pet:context-menu'),
+  /** 本窗口当前对话状态上报（桌宠动画聚合：任一窗口生成中→working，等你回答→waiting） */
+  setPetChatState: (status: string) => ipcRenderer.send('pet:chat-state', { status }),
+
+  // 对话镜像（桌宠面板 ↔ 主窗口同一场对话）：发起窗口推送稳定点，主进程转发给其余窗口
+  relayChatMirror: (p: ChatMirrorPayload) => ipcRenderer.send('chat:mirror-relay', p),
 
   // 事件（main → renderer），返回取消订阅函数
   onBuildOutput: (cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }) => void): Unsubscribe =>
     subscribe('build-output', cb),
   onBuildExit: (cb: (payload: { name: string; code: number; projectRoot?: string }) => void): Unsubscribe => subscribe('build-exit', cb),
-  onAiDelta: (cb: (payload: { requestId: string; delta: string }) => void): Unsubscribe =>
+  onAiDelta: (cb: (payload: { requestId: string; delta: string; projectRoot?: string }) => void): Unsubscribe =>
     subscribe('ai-delta', cb),
-  onAiReasoning: (cb: (payload: { requestId: string; delta: string }) => void): Unsubscribe =>
+  onAiReasoning: (cb: (payload: { requestId: string; delta: string; projectRoot?: string }) => void): Unsubscribe =>
     subscribe('ai-reasoning', cb),
-  onCliToolEvent: (cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }) => void): Unsubscribe =>
+  onCliToolEvent: (cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string; projectRoot?: string }) => void): Unsubscribe =>
     subscribe('cli-tool-event', cb),
-  onCliToolResult: (cb: (payload: { requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }) => void): Unsubscribe =>
+  onCliToolResult: (cb: (payload: { requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number }; projectRoot?: string }) => void): Unsubscribe =>
     subscribe('cli-tool-result', cb),
   // 载荷结构与 src/types 的 CliAgentEventPayload 保持一致（electron tsconfig 不含 src，故此处内联）
   onCliAgentEvent: (cb: (payload: { requestId: string; parentId: string; kind: 'text' | 'tool' | 'tool-result'; id?: string; name?: string; arguments?: string; text?: string; content?: string; isError?: boolean }) => void): Unsubscribe =>
@@ -226,6 +241,13 @@ const desktopAPI = {
     subscribe('memory-changed', cb),
   onFsChanged: (cb: (payload: { paths: string[]; projectRoot?: string }) => void): Unsubscribe => subscribe('fs-changed', cb),
   onConfigChanged: (cb: (payload: string[]) => void): Unsubscribe => subscribe('config:changed', cb),
+  onPetState: (cb: (state: string) => void): Unsubscribe => subscribe('pet:state', cb),
+  onCloseRequest: (cb: () => void): Unsubscribe => subscribe('app:close-request', cb),
+  /** 关闭询问被主进程兜底收口（渲染层 10s 未响应按最小化处理）时推送，渲染层收起询问框 */
+  onCloseCancel: (cb: () => void): Unsubscribe => subscribe('app:close-cancel', cb),
+  onChatMirror: (cb: (p: ChatMirrorPayload) => void): Unsubscribe => subscribe('chat:mirror', cb),
+  onChatRequestDone: (cb: (p: { requestId: string; projectRoot: string | null; hasError: boolean }) => void): Unsubscribe =>
+    subscribe('chat:request-done', cb),
   onElementPicked: (cb: (payload: { selector: string; tag: string; id: string; text: string }) => void): Unsubscribe => subscribe('element-picked', cb),
   onPreviewConsole: (cb: (payload: { level: string; message: string; sourceId: string; ts: number }) => void): Unsubscribe =>
     subscribe('preview-console', cb),

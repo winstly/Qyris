@@ -52,6 +52,8 @@ export interface AppConfig {
   memExtractRounds?: number
   /** 上下文压缩阈值（token 数）：历史超过此值时自动压缩旧消息为摘要，缺省 256000；范围 64000~512000 */
   contextCompressThreshold?: number
+  /** 主窗口关闭行为：缺省/ask=每次询问；minimize=隐藏窗口保留桌宠；quit=退出整个应用 */
+  closeAction?: 'minimize' | 'quit'
 }
 
 /** 新数组字段 + 旧单目录字段合并去重（旧字段排前，保持存量用户主目录序） */
@@ -124,6 +126,7 @@ export async function getConfig(): Promise<AppConfig> {
         typeof parsed.embedRemoteHost === 'string' && parsed.embedRemoteHost.trim() ? parsed.embedRemoteHost : null,
       memExtractRounds: clampRounds(parsed.memExtractRounds),
       contextCompressThreshold: clampCompressThreshold(parsed.contextCompressThreshold),
+      closeAction: parsed.closeAction === 'minimize' || parsed.closeAction === 'quit' ? parsed.closeAction : undefined,
     }
     configCache = cfg; configCacheAt = Date.now()
     return cfg
@@ -136,6 +139,7 @@ export async function getConfig(): Promise<AppConfig> {
       startupCommands: undefined, projectSkillsDirsMap: undefined,
       dataDir: null, embedModel: null, embedRemoteHost: null,
       memExtractRounds: undefined, contextCompressThreshold: undefined,
+      closeAction: undefined,
     }
     configCache = fallback; configCacheAt = Date.now()
     return fallback

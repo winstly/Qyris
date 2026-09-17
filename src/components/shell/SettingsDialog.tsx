@@ -47,6 +47,8 @@ export function SettingsDialog() {
   const [dirCopied, setDirCopied] = useState(false)
   const [memRounds, setMemRounds] = useState('')
   const [compressThreshold, setCompressThreshold] = useState('')
+  // 系统设置：主窗口关闭行为（ask=每次询问，落盘值为 minimize/quit）
+  const [closeAction, setCloseAction] = useState<'ask' | 'minimize' | 'quit'>('ask')
 
   useEffect(() => {
     if (!open) return
@@ -65,6 +67,17 @@ export function SettingsDialog() {
     setMemRounds('')
     setCompressThreshold('')
   }, [open, settings])
+
+  // 进入系统 tab 时读取主窗口关闭行为偏好
+  useEffect(() => {
+    if (!open || tab !== 'system') return
+    let alive = true
+    api.getConfig().then((c) => {
+      if (!alive) return
+      setCloseAction(c.closeAction === 'minimize' || c.closeAction === 'quit' ? c.closeAction : 'ask')
+    }).catch(() => {})
+    return () => { alive = false }
+  }, [open, tab])
 
   // 进入记忆 tab 时读取配置 + 数据存储位置
   useEffect(() => {
@@ -262,6 +275,23 @@ export function SettingsDialog() {
                   ]}
                 />
                 <span className="field__hint">选择后立即生效；「跟随系统」随操作系统外观自动切换</span>
+              </label>
+              <label className="field">
+                <span className="field__label">关闭主窗口时</span>
+                <Select
+                  value={closeAction}
+                  onChange={(v) => {
+                    const next = v as 'ask' | 'minimize' | 'quit'
+                    setCloseAction(next)
+                    void api.mergeConfig({ closeAction: next === 'ask' ? undefined : next })
+                  }}
+                  options={[
+                    { value: 'ask', label: '每次询问（可勾选记住选择）' },
+                    { value: 'minimize', label: '最小化到桌宠（保留桌宠，可找回）' },
+                    { value: 'quit', label: '完全退出应用（连同桌宠）' },
+                  ]}
+                />
+                <span className="field__hint">最小化后主窗口从任务栏消失，右键桌宠选「打开工作台」找回</span>
               </label>
             </div>
             <div className="modal__actions">

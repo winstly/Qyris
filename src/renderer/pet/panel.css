@@ -1,0 +1,121 @@
+/* ============ 桌宠面板：类手机底部导航 ============ */
+
+/* 全局 reset + 根元素撑满窗口 */
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  background: var(--s1, #131315);
+  color: var(--fg, #e0e0e0);
+}
+
+.pet-panel {
+  position: relative;
+  height: 100%;
+  background: var(--s1, #131315);
+  color: var(--fg, #e0e0e0);
+  font-family: var(--font-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif);
+  font-size: 13px;
+  overflow: hidden;
+}
+
+/* ── 内容区：绝对定位锚定，彻底摆脱 flex 链依赖 ── */
+.pet-panel__content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 48px; /* nav 高度 */
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* 子组件拉满 */
+.pet-panel__content > * {
+  flex: 1 1 0;
+  min-height: 0;
+  min-width: 0;
+}
+
+/* 对话面板独占整栏：去掉主窗口的左侧分隔线（撑满由 .pet-panel__content > * 的 flex 链保证） */
+.pet-panel__content .chat {
+  border-left: none;
+}
+
+/* 项目列表边距适配（ChatPanel 自带内边距） */
+.pet-panel__content .projects-tab__bar {
+  padding: 12px 12px 8px;
+}
+.pet-panel__content .history {
+  padding: 4px 12px 12px;
+}
+.pet-panel__content .history__section {
+  margin-bottom: 8px;
+}
+
+/* ── 底部导航栏（绝对定位锚底） ── */
+.pet-panel__nav {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 48px;
+  display: flex;
+  align-items: stretch;
+  border-top: 1px solid var(--edge-hair, #1f1f28);
+  background: var(--s1, #131315);
+}
+
+.pet-panel__nav-item {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  padding: 8px 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--muted, #666);
+  cursor: pointer;
+  transition: color 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+  position: relative;
+}
+
+.pet-panel__nav-item span {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+/* hover 态 */
+.pet-panel__nav-item:hover {
+  color: var(--fg-2, #aaa);
+}
+
+/* 选中态：图标 + 文字变主题色，顶部 2px accent 指示条 */
+.pet-panel__nav-item--active {
+  color: var(--accent, #6C63FF);
+}
+.pet-panel__nav-item--active::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 24px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--accent, #6C63FF);
+}
+
+/* SVG 图标尺寸统一 */
+.pet-panel__nav-item svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+.pet-panel__nav-item--active svg {
+  stroke-width: 2.2;
+}

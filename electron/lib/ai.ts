@@ -58,9 +58,9 @@ export async function aiChatStream(
   if (windowId != null) registerRequestWindow(requestId, windowId)
   try {
     if (provider === 'anthropic') {
-      return await anthropicChatStream(requestId, key, baseUrl, model, messages, tools)
+      return await anthropicChatStream(requestId, key, baseUrl, model, messages, tools, projectRoot)
     }
-    return await openaiChatStream(requestId, key, baseUrl, model, messages, tools)
+    return await openaiChatStream(requestId, key, baseUrl, model, messages, tools, projectRoot)
   } finally {
     if (windowId != null) unregisterRequestWindow(requestId)
   }

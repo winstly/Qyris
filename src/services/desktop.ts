@@ -3,7 +3,7 @@
  * 前端所有文件操作都经由这里走主进程，绝不在渲染层直接碰文件系统。
  */
 import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, MemoryHit, MemoryItem, MemoryStats, PreviewConsoleEntry } from '@/types'
-import type { SnapshotVersion } from '../../shared/types'
+import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
 
 /** 是否运行在 Electron 桌面壳内（浏览器直接跑 vite 时为 false，界面会给出提示） */
 export const isDesktop = typeof window !== 'undefined' && !!window.desktopAPI
@@ -187,6 +187,18 @@ export const api = {
   startElementPick: (url: string) => wrap((d) => d.startElementPick(url)),
   openExternal: (url: string) => wrap((d) => d.openExternal(url)),
   openInExplorer: (filePath: string) => wrap((d) => d.openInExplorer(filePath)),
+  /** 关闭询问弹窗的回传（fire-and-forget；挂起校验在主进程） */
+  resolveClose: (action: 'minimize' | 'quit', remember: boolean) => { window.desktopAPI?.resolveClose(action, remember) },
+
+  // 桌宠
+  togglePetPanel: () => { window.desktopAPI?.togglePetPanel() },
+  requestPetState: () => { window.desktopAPI?.requestPetState() },
+  petMoveBy: (dx: number, dy: number) => { window.desktopAPI?.petMoveBy(dx, dy) },
+
+  // 对话镜像（发起窗口调用；主进程转发给其余窗口）
+  relayChatMirror: (p: ChatMirrorPayload) => {
+    window.desktopAPI?.relayChatMirror(p)
+  },
 }
 
 // ---------- 事件订阅（main → renderer，同步返回取消函数） ----------
@@ -201,22 +213,22 @@ export function onBuildExit(cb: (payload: { name: string; code: number; projectR
   return window.desktopAPI.onBuildExit(cb)
 }
 
-export function onAiDelta(cb: (payload: { requestId: string; delta: string }) => void): () => void {
+export function onAiDelta(cb: (payload: { requestId: string; delta: string; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onAiDelta(cb)
 }
 
-export function onAiReasoning(cb: (payload: { requestId: string; delta: string }) => void): () => void {
+export function onAiReasoning(cb: (payload: { requestId: string; delta: string; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onAiReasoning(cb)
 }
 
-export function onCliToolEvent(cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }) => void): () => void {
+export function onCliToolEvent(cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onCliToolEvent(cb)
 }
 
-export function onCliToolResult(cb: (payload: { requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }) => void): () => void {
+export function onCliToolResult(cb: (payload: { requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number }; projectRoot?: string }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onCliToolResult(cb)
 }
@@ -256,6 +268,43 @@ export function onFsChanged(cb: (payload: { paths: string[]; projectRoot?: strin
 export function onConfigChanged(cb: (affectedKeys: string[]) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onConfigChanged(cb)
+}
+
+export function onPetState(cb: (state: string) => void): () => void {
+  // typeof 守卫：preload 只在窗口创建时注入，dev 热更新下渲染层可能新于 preload，
+  // 缺方法时静默降级而不是 throw（throw 会连带断掉 offs 数组里后续所有订阅）
+  if (!isDesktop || typeof window.desktopAPI?.onPetState !== 'function') return () => {}
+  return window.desktopAPI.onPetState(cb)
+}
+
+/** 对话状态上报（fire-and-forget；typeof 守卫防 preload 旧版错位）：
+ *  本窗口当前对话状态 → 主进程跨窗口聚合 → 桌宠动画 */
+export function setPetChatState(status: string): void {
+  if (typeof window.desktopAPI?.setPetChatState !== 'function') return
+  window.desktopAPI.setPetChatState(status)
+}
+
+export function onCloseRequest(cb: () => void): () => void {
+  if (!isDesktop || typeof window.desktopAPI?.onCloseRequest !== 'function') return () => {}
+  return window.desktopAPI.onCloseRequest(cb)
+}
+
+/** 关闭询问被主进程超时兜底收口（app:close-cancel）：渲染层收起询问框，防残留死按钮 */
+export function onCloseCancel(cb: () => void): () => void {
+  if (!isDesktop || typeof window.desktopAPI?.onCloseCancel !== 'function') return () => {}
+  return window.desktopAPI.onCloseCancel(cb)
+}
+
+export function onChatMirror(cb: (p: ChatMirrorPayload) => void): () => void {
+  // typeof 守卫：dev 热更新下渲染层可能新于窗口里的 preload（preload 仅在窗口创建时注入），
+  // 缺方法时静默降级而不是 throw——炸在这里会连带断掉 offs 数组里后续所有事件订阅
+  if (!isDesktop || typeof window.desktopAPI?.onChatMirror !== 'function') return () => {}
+  return window.desktopAPI.onChatMirror(cb)
+}
+
+export function onChatRequestDone(cb: (p: { requestId: string; projectRoot: string | null; hasError: boolean }) => void): () => void {
+  if (!isDesktop || typeof window.desktopAPI?.onChatRequestDone !== 'function') return () => {}
+  return window.desktopAPI.onChatRequestDone(cb)
 }
 
 export function previewSetUrl(url: string): Promise<void> {

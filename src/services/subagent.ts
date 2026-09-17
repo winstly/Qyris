@@ -111,7 +111,9 @@ async function runOne(task: SubTask, threadId: string, project: string): Promise
   for (let round = 0; round < MAX_ROUNDS; round++) {
     if (useChatStore.getState().byProject[project]?.cancelled) return finish('cancelled', '（主对话已取消，子任务中止）')
     let completion: AiCompletion
-    const requestId = uid()
+    // 子 agent 请求带内部前缀：镜像窗口按 INTERNAL_REQUEST_RE 拒绝认领/收口这些旁路流
+    //（否则子 agent 的 delta/done 会与主对话镜像互相干扰，见 useChatStore.resolveProjectForEvent）
+    const requestId = `sub-agent-${uid()}`
     activeRequests.add(requestId)
     try {
       completion = await api.aiChatStream(requestId, settings.provider, settings.baseUrl, model, messages, SUBAGENT_TOOL_DEFS, settings.dispatchMode, project)

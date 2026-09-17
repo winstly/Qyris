@@ -77,6 +77,9 @@ export interface ChatSlice {
   oldestSeq: number | null
   /** 正在向上翻页加载更早历史 */
   loadingOlder: boolean
+  /** 镜像管道：非 null 表示当前活跃请求由另一窗口发起（本窗口只读镜像）——
+   *  落库/取消等本地副作用全部抑制，数据以镜像推送 + done 校正为准 */
+  mirrored: string | null
 }
 
 function emptyChatSlice(): ChatSlice {
@@ -96,6 +99,7 @@ function emptyChatSlice(): ChatSlice {
     hasMoreOlder: false,
     oldestSeq: null,
     loadingOlder: false,
+    mirrored: null,
   }
 }
 
@@ -106,11 +110,19 @@ interface ChatState {
 
   send: (text: string, meta?: import('@/types').MessageMeta) => Promise<void>
   setPendingElement: (el: PickedElement | null) => void
-  appendDelta: (requestId: string, delta: string) => void
-  appendReasoning: (requestId: string, delta: string) => void
-  handleCliToolEvent: (requestId: string, id: string, name: string, phase: 'start' | 'stop', argumentsStr: string) => void
-  handleCliToolResult: (requestId: string, id: string, content: string, isError: boolean, tokens?: { input: number; output: number }) => void
+  appendDelta: (requestId: string, delta: string, projectRoot?: string) => void
+  appendReasoning: (requestId: string, delta: string, projectRoot?: string) => void
+  handleCliToolEvent: (requestId: string, id: string, name: string, phase: 'start' | 'stop', argumentsStr: string, projectRoot?: string) => void
+  handleCliToolResult: (requestId: string, id: string, content: string, isError: boolean, tokens?: { input: number; output: number }, projectRoot?: string) => void
   handleCliAgentEvent: (p: CliAgentEventPayload) => void
+  /** 镜像管道：接入另一窗口刚发出的用户消息（不落库，发起窗口负责持久化） */
+  receiveMirroredUserMessage: (projectRoot: string, message: ChatMessage) => void
+  /** 镜像管道：用对方窗口推送的 assistant 消息稳定点最新态替换本地对应消息（按 id 对齐） */
+  receiveMirroredFinalized: (projectRoot: string, msg: ChatMessage) => void
+  /** 镜像管道：对方一次 AI 请求收场 → 收口状态 + 延迟从库校正（toolResults/seq 等内存盲区对齐） */
+  finishMirroredRequest: (requestId: string, projectRoot: string | null, hasError: boolean) => void
+  /** 镜像管道：立即从库拉最新会话窗口对齐（对方 clear 后的换代校正） */
+  resyncMirror: (projectRoot: string) => void
   answerAsk: (answer: string) => void
   cancelProject: (project: string) => void
   cancel: () => void
@@ -164,6 +176,39 @@ function markRequestCompleted(requestId: string, project: string): void {
   setTimeout(() => completedRequestMap.delete(requestId), COMPLETED_MAP_TTL)
 }
 
+/** 内部旁路请求前缀（mem agent 蒸馏 / 上下文压缩 / API 子 agent）：永不参与镜像认领与镜像收口 */
+const INTERNAL_REQUEST_RE = /^(mem-agent-|ctx-compress-|sub-agent-)/
+
+/** 事件路由（镜像管道版）：优先按 payload.projectRoot 定位工程切片。
+ *  requestId 已知 → 原路；未知且切片处于「relay 已宣告 user 消息（streaming）但流尚未接上」
+ *  的窄窗口 → 认领为镜像请求（adoption）。subagent/ctx-compress/mem-agent 等旁路请求因
+ *  主请求占据 activeRequestId（或前缀守卫）而天然被挡，绝不误认领。 */
+function resolveProjectForEvent(projectRoot: string | null | undefined, requestId: string): string | undefined {
+  const s = useChatStore.getState()
+  if (projectRoot) {
+    const slice = s.byProject[projectRoot]
+    if (!slice) return undefined
+    if (slice.activeRequestId === requestId || completedRequestMap.get(requestId) === projectRoot) return projectRoot
+    // adoption：镜像窗口认领发起窗口的新一轮请求。多轮工具循环中每轮 done 会把镜像收口为 idle，
+    // 所以下一轮必须允许从 idle 重新认领（否则第二轮起镜像全断）；工具执行中（tools）不认领——
+    // 那是上一轮的残留事件窗口，由 completedRequestMap 挡旧 id。旁路请求（subagent/压缩/蒸馏）
+    // 因主请求占位 activeRequestId 或内部前缀被挡。
+    if (
+      !slice.activeRequestId &&
+      !completedRequestMap.has(requestId) &&
+      (slice.status === 'streaming' || slice.status === 'idle') &&
+      !slice.mirrored &&
+      !INTERNAL_REQUEST_RE.test(requestId)
+    ) {
+      markRequestCompleted(requestId, projectRoot)
+      patchSlice(projectRoot, { activeRequestId: requestId, mirrored: requestId, status: 'streaming' })
+      return projectRoot
+    }
+    return undefined
+  }
+  return findProjectByRequest(requestId)
+}
+
 export const useChatStore = create<ChatState>()((set, get) => ({
   current: null,
   byProject: {},
@@ -202,6 +247,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     resetCancelSource(project)
     // 稳定点：用户消息立即落库，seq 由 append 返回后回挂
     persistUpsert(project, userMsg)
+    // 镜像管道：对方窗口立即接入这条用户消息（打字机效果从第一条 delta 起两端同步）
+    relayChatMirror({ kind: 'user-message', projectRoot: project, message: userMsg })
     await runAgentLoop(project)
   },
 
@@ -210,8 +257,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (project) patchSlice(project, { pendingElement: el })
   },
 
-  appendDelta: (requestId, delta) => {
-    const project = findProjectByRequest(requestId)
+  appendDelta: (requestId, delta, projectRoot) => {
+    const project = resolveProjectForEvent(projectRoot, requestId)
     if (!project) return
     const s = getSlice(project)
     if (!s || s.cancelled) return
@@ -234,8 +281,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     })
   },
 
-  appendReasoning: (requestId, delta) => {
-    const project = findProjectByRequest(requestId)
+  appendReasoning: (requestId, delta, projectRoot) => {
+    const project = resolveProjectForEvent(projectRoot, requestId)
     if (!project) return
     const s = getSlice(project)
     if (!s || s.cancelled) return
@@ -244,14 +291,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const kind = assistantTailKind(last)
     if (kind === 'thinking' || kind === 'draft') {
       msgs[msgs.length - 1] = { ...last!, reasoning: (last!.reasoning ?? '') + delta }
+      // thinking 消息创建时已建档落库：增量到达后按时间间隔整行同步（等建档 append 收场再覆写，幂等）。
+      // 不能逐 token 落库——流式期间每 delta 一次 messagePatch IPC + SQLite 写会打爆主进程；
+      // 最终态由 finalizeAssistant 的 persistUpsert 收口，此处节流只为崩溃时少丢一段
+      if (kind === 'thinking') throttlePersistReasoning(project, last!.id)
     } else {
       if (!delta.trim()) return
       const collapsed = msgs.map((m) => (m.role === 'assistant' && m.pending ? { ...m, pending: false } : m))
-      collapsed.push({ id: uid(), role: 'assistant', content: '', reasoning: delta })
+      const orphan: ChatMessage = { id: uid(), role: 'assistant', content: '', reasoning: delta }
+      collapsed.push(orphan)
       patchSlice(project, {
         messages: collapsed,
         usage: { ...s.usage, output: s.usage.output + estimateTokens(delta) },
       })
+      // 创建即落库（与工具卡建档同款时机）：若等轮末补落，seq 会晚于紧随的工具卡，
+      // 历史加载（按 seq 排序）后 thinking 折叠块全部堆到对话末尾
+      persistUpsert(project, orphan)
       return
     }
     patchSlice(project, {
@@ -260,8 +315,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     })
   },
 
-  handleCliToolEvent: (requestId, id, name, phase, argumentsStr) => {
-    const project = findProjectByRequest(requestId)
+  handleCliToolEvent: (requestId, id, name, phase, argumentsStr, projectRoot) => {
+    const project = resolveProjectForEvent(projectRoot, requestId)
     if (!project) return
     let created: ChatMessage | undefined
     useChatStore.setState((s) => {
@@ -305,8 +360,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
    *  - async 派发确认（"Async agent launched successfully"）：工具调用本身完成（主卡 done），
    *    但子 agent 转入后台运行——线程保持 running，等完成通知（同 id 的第二个 tool_result）再收口
    *  - 同步结果 / async 完成通知：权威完成信号，立即 finishThread + 收口残留 running entry */
-  handleCliToolResult: (requestId, id, content, isError, tokens) => {
-    const project = findProjectByRequest(requestId)
+  handleCliToolResult: (requestId, id, content, isError, tokens, projectRoot) => {
+    const project = resolveProjectForEvent(projectRoot, requestId)
     if (!project) return
     if (getSlice(project)?.cancelled) return
     const result = content.length > 2000 ? content.slice(0, 2000) + '…' : content
@@ -355,7 +410,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
    *  ⚠️ 线程 finish 只由 cli-tool-result（Agent 工具结果）驱动——子 agent 执行工具期间
    *  CLI 不发任何事件，静默 >300ms 是常态，不能作为完成信号（debounce 方案已证伪）。 */
   handleCliAgentEvent: (p) => {
-    const project = findProjectByRequest(p.requestId)
+    const project = resolveProjectForEvent(p.projectRoot, p.requestId)
     if (!project) return
     if (getSlice(project)?.cancelled) return
     const agentSlice = useAgentStore.getState().byProject[project]
@@ -401,6 +456,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   cancelProject: (project) => {
     const cur = getSlice(project)
     if (!cur) return
+    // 镜像窗口禁止本地取消：agent 循环在发起窗口，跨窗口置 cancelled 会让对方把取消误判为错误
+    if (cur.mirrored) return
     patchSlice(project, { cancelled: true })
     // 统一取消：token 事件即时唤醒 sleepInterruptible 等所有等待者（重试退避不再空等）
     cancelTokenOf(project).cancel()
@@ -458,6 +515,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     })
     // 持久化新 session ID 到 meta 表：messagesRecent 优先查它，不回退旧会话
     void api.saveCurrentSession(project, newSessionId).catch(() => {})
+    // 镜像管道：对方窗口延迟从库校正（新空会话），两端对齐换代
+    relayChatMirror({ kind: 'cleared', projectRoot: project })
   },
 
   loadOlder: async () => {
@@ -551,14 +610,118 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       }
     }).catch(() => {})
   },
+
+  // ---------- 镜像管道（桌宠面板 ↔ 主窗口同一场对话） ----------
+
+  /** 对方窗口刚发出的用户消息：立即接入（不落库，持久化由发起窗口独家负责）。
+   *  上一镜像请求的残留状态先清场（done 丢失兜底），保证 adoption 窗口重新打开。 */
+  receiveMirroredUserMessage: (projectRoot, message) => {
+    const cur = getSlice(projectRoot)
+    if (!cur) return
+    console.debug(`[mirror] user-message → ${projectRoot.slice(-8)}（本地 ${cur.messages.length} + 1）`)
+    patchSlice(projectRoot, {
+      messages: [...cur.messages, message],
+      status: 'streaming', cancelled: false, pendingElement: null,
+      activeRequestId: null, mirrored: null, pendingAsk: null,
+    })
+  },
+
+  /** 对方窗口推送的 assistant 消息稳定点最新态：按 id 对齐替换，本地没有则追加 */
+  receiveMirroredFinalized: (projectRoot, msg) => {
+    const cur = getSlice(projectRoot)
+    if (!cur) return
+    const idx = cur.messages.findIndex((m) => m.id === msg.id)
+    const messages = idx >= 0
+      ? cur.messages.map((m, i) => (i === idx ? msg : m))
+      : [...cur.messages, msg]
+    patchSlice(projectRoot, { messages })
+  },
+
+  /** 对方一次 AI 请求收场：状态先收口（输入框立即可用），数据随后从库校正——
+   *  发起窗口的落库为权威源，toolResults/seq 等内存盲区由 resyncMirrored 两拍对齐 */
+  finishMirroredRequest: (requestId, projectRoot, _hasError) => {
+    // 内部旁路请求（上下文压缩 / 子 agent）的 done 广播永不参与镜像收口：
+    // 它们与主请求同 projectRoot，若照收会把正在流式中的镜像切片误打成 idle
+    if (INTERNAL_REQUEST_RE.test(requestId)) return
+    const project = (projectRoot && getSlice(projectRoot) ? projectRoot : undefined) ?? findProjectByRequest(requestId)
+    const s = project ? getSlice(project) : undefined
+    if (!project || !s) return
+    // 只收口本窗口正在镜像（mirrored）或尚未认领任何请求（activeRequestId 为空）的流——
+    // 其余情况说明本窗口自己的请求正活跃，旁路 done 不得打断
+    if (s.activeRequestId && s.mirrored !== requestId) return
+    console.debug(`[mirror] done ${requestId.slice(-6)} → 收口 ${project.slice(-8)}（消息 ${s.messages.length} 条）`)
+    markRequestCompleted(requestId, project)
+    patchSlice(project, {
+      status: 'idle', activeRequestId: null, mirrored: null, pendingAsk: null,
+      messages: s.messages.map((m) => (m.pending ? { ...m, pending: false } : m)),
+    })
+    void resyncMirrored(project)
+  },
+
+  resyncMirror: (projectRoot) => {
+    if (getSlice(projectRoot)) void resyncMirrored(projectRoot)
+  },
 }))
+
+/** 镜像校正：从库拉最新会话窗口对齐。append/patch IPC 与 done 广播存在竞态，
+ *  两拍延迟（400ms / 800ms）兜底；等待期间本地已换代则丢弃过期响应。 */
+async function resyncMirrored(project: string): Promise<void> {
+  for (const delay of [400, 800]) {
+    await new Promise((r) => setTimeout(r, delay))
+    try {
+      const before = getSlice(project)
+      if (!before) return
+      const resp = await api.messagesRecent(project)
+      const s = getSlice(project)
+      if (!s || s.sessionId !== before.sessionId) return // 等待期间本地已换代
+      if (resp.sessionId !== null && resp.sessionId !== s.sessionId) {
+        // 对方 clear() 开了新会话：整体换代对齐（不触发本地 clear 的副作用）
+        patchSlice(project, {
+          messages: resp.messages, sessionId: resp.sessionId, status: 'idle',
+          activeRequestId: null, mirrored: null, pendingAsk: null, answers: {},
+          usage: { input: 0, output: 0 }, cliSkills: [], lastSummary: null,
+          hasMoreOlder: resp.hasMore, oldestSeq: resp.oldestSeq, loadingOlder: false,
+        })
+        return
+      }
+      if (resp.sessionId === s.sessionId) {
+        // 空数据守卫：库侧异常返回空页时绝不用空覆盖非空内存（消息全灭事故的最后一道闸）
+        if (resp.messages.length === 0 && s.messages.length > 0) {
+          console.warn(`[mirror] resync 拉到空页，保留内存 ${s.messages.length} 条不动`)
+          return
+        }
+        // 活跃镜像流守卫：本窗口已认领下一轮流式请求时，库侧尚无在途消息，
+        // 整表覆盖会撕掉在途草稿（多轮工具循环的 done→resync 竞态窗口）——等下一次 done 再对齐
+        if (s.mirrored && (s.status === 'streaming' || s.status === 'tools')) return
+        console.debug(`[mirror] resync ${project.slice(-8)} → 库 ${resp.messages.length} 条 / 内存 ${s.messages.length} 条`)
+        patchSlice(project, {
+          messages: resp.messages, hasMoreOlder: resp.hasMore, oldestSeq: resp.oldestSeq,
+        })
+      }
+    } catch { /* 拉取失败下一拍重试 */ }
+  }
+}
 
 // ---------- 持久化 write-through ----------
 // 只在稳定点逐条落库（主进程 SQLite），流式增量只在内存；消息有 seq = 已持久化。
 // 全部 fire-and-forget + 静默吞错：库暂时落后于内存可接受，绝不阻塞对话主链路。
+// ⚠️ 镜像窗口（slice.mirrored 非空）一律跳过落库——持久化由发起窗口独家负责，防止双写。
 
 /** message_append 在途登记（msgId → 是否成功）：append 收场前该行不在库里，后续 patch 必须等它 */
 const inflightAppends = new Map<string, Promise<boolean>>()
+
+/** 镜像管道推送：fire-and-forget，非桌面环境静默 */
+function relayChatMirror(p: import('../../shared/types').ChatMirrorPayload): void {
+  try {
+    window.desktopAPI?.relayChatMirror(p)
+  } catch { /* 非桌面/桥未就绪 */ }
+}
+
+/** 镜像管道：把某条消息的最新态推给其他窗口（API 模式工具卡 running→done 的实时同步也走这里） */
+function pushFinalized(project: string, messageId: string): void {
+  const fin = getSlice(project)?.messages.find((m) => m.id === messageId)
+  if (fin) relayChatMirror({ kind: 'finalized', projectRoot: project, msg: fin })
+}
 
 /** 用切片内最新消息状态整行覆写库行（content/reasoning/tool 全量） */
 function persistPatchLatest(project: string, sessionId: string, msg: ChatMessage): Promise<void> {
@@ -571,6 +734,7 @@ function persistPatchLatest(project: string, sessionId: string, msg: ChatMessage
 
 /** 稳定点落库统一入口：无 seq → append 新行并回挂 seq；有 seq → patch 原行 */
 function persistUpsert(project: string, msg: ChatMessage): void {
+  if (getSlice(project)?.mirrored) return // 镜像窗口不落库（发起窗口独家持久化）
   const sessionId = getSlice(project)?.sessionId
   if (!sessionId) return
   if (msg.seq !== undefined) {
@@ -607,6 +771,7 @@ async function awaitSettledMsg(project: string, msgId: string): Promise<ChatMess
 
 /** 等该消息的 append 收场后再整行覆写（append 失败则行不存在，跳过）；等待期间会话已切换则放弃 */
 function persistAfterSettled(project: string, msgId: string): void {
+  if (getSlice(project)?.mirrored) return // 镜像窗口不落库
   void (async () => {
     const latest = await awaitSettledMsg(project, msgId)
     if (latest?.seq !== undefined) {
@@ -618,9 +783,21 @@ function persistAfterSettled(project: string, msgId: string): void {
 
 /** 折叠扫描改写的既有消息（running→done/error）同步回库，避免重启后残留「执行中」 */
 function persistSwept(project: string, swept: ChatMessage[]): void {
+  if (getSlice(project)?.mirrored) return // 镜像窗口不落库
   for (const m of swept) {
     if (m.seq !== undefined) persistUpsert(project, m)
   }
+}
+
+/** thinking 增量落库节流（msgId → 上次同步时刻）：同一消息至多每 1.5s 落库一次 */
+const reasoningPersistTs = new Map<string, number>()
+const REASONING_PERSIST_INTERVAL = 1500
+
+function throttlePersistReasoning(project: string, msgId: string): void {
+  const now = Date.now()
+  if (now - (reasoningPersistTs.get(msgId) ?? 0) < REASONING_PERSIST_INTERVAL) return
+  reasoningPersistTs.set(msgId, now)
+  persistAfterSettled(project, msgId)
 }
 
 /** 会话 token 用量持久化（fire-and-forget，runAgentLoop 每轮结束时调用） */
@@ -953,6 +1130,8 @@ async function runAgentLoop(project: string) {
     }
 
     const assistantId = finalizeAssistant(project, completion, epoch)
+    // 镜像管道：稳定点推送该消息最新态（pending 收口 + toolCalls 附着），对方窗口按 id 对齐替换
+    pushFinalized(project, assistantId)
     history.push(toHistoryEntry(completion))
 
     if (appState.settings.dispatchMode === 'claude-cli') {
@@ -997,6 +1176,7 @@ async function runAgentLoop(project: string) {
     patchSlice(project, { status: 'tools' })
     for (const tc of completion.toolCalls) {
       patchToolCard(project, tc.id, { status: 'running' }, epoch)
+      pushFinalized(project, assistantId) // 镜像：工具卡出现（running 转圈）
       let result: string
       let summary: string
       let ok: boolean
@@ -1024,6 +1204,7 @@ async function runAgentLoop(project: string) {
         result: result.length > 2000 ? result.slice(0, 2000) + '…' : result,
       }, epoch)
       appendToolResult(project, assistantId, { toolCallId: tc.id, content: result }, epoch)
+      pushFinalized(project, assistantId) // 镜像：工具卡收口 + toolResults 对齐
       history.push({ role: 'tool', tool_call_id: tc.id, content: result })
     }
     fireMaybeExtract(project, epoch)
@@ -1134,6 +1315,19 @@ function finalizeDraft(project: string, text: string, isError: boolean, epoch: n
   persistSwept(project, collapsed.swept)
 }
 
+/** 孤儿思考消息兜底补落库：thinking 消息现已在 appendReasoning 创建时即落库（保证 seq 时序），
+ *  此扫描只兜"建档成功但增量未同步"等漏网场景，幂等（已入库有 seq → 走 patch 覆盖最新内容）。 */
+function persistOrphanReasoning(project: string, messages: ChatMessage[]): void {
+  for (const m of messages) {
+    if (
+      m.role === 'assistant' && !m.pending && m.seq === undefined &&
+      !m.toolCalls?.length && (m.reasoning ?? '').length > 0
+    ) {
+      persistUpsert(project, m)
+    }
+  }
+}
+
 function finalizeAssistant(project: string, completion: AiCompletion, epoch: number): string {
   const s = getSlice(project)
   if (!s || s.epoch !== epoch) return ''
@@ -1169,6 +1363,7 @@ function finalizeAssistant(project: string, completion: AiCompletion, epoch: num
     // 稳定点：收尾消息落库（draft 未持久化 → append；已有 seq → patch）
     persistUpsert(project, updated)
     persistSwept(project, collapsed.swept)
+    persistOrphanReasoning(project, collapsed.messages)
     return updated.id
   }
   const msg: ChatMessage = { id: uid(), role: 'assistant', content, pending: false, toolCalls }
@@ -1177,14 +1372,7 @@ function finalizeAssistant(project: string, completion: AiCompletion, epoch: num
   patchSlice(project, { messages: collapsed.messages })
   persistUpsert(project, msg)
   persistSwept(project, collapsed.swept)
-  // 孤儿思考消息（只有 reasoning、无 pending 标记，模型直接转工具调用时留下）随本稳定点补落库，否则永远不入库
-  const prev = s.messages[s.messages.length - 1]
-  if (
-    prev && prev.role === 'assistant' && !prev.pending && prev.seq === undefined &&
-    !prev.toolCalls?.length && (prev.reasoning ?? '').length > 0
-  ) {
-    persistUpsert(project, prev)
-  }
+  persistOrphanReasoning(project, collapsed.messages)
   return msg.id
 }
 

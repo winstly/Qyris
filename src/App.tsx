@@ -1,16 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
-import { useBuildStore } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
-import { useChatStore } from '@/store/useChatStore'
-import { onBuildOutput, onBuildExit, onAiDelta, onAiReasoning, onCliToolEvent, onCliToolResult, onCliAgentEvent, onFsChanged, onElementPicked, onConfigChanged, previewSetVisible, isDesktop } from '@/services/desktop'
+import { previewSetVisible, isDesktop } from '@/services/desktop'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useIsWide } from '@/hooks/useMediaQuery'
+import { useDesktopEvents, useThemeSync, usePetChatStatus } from '@/hooks/useDesktopEvents'
 import { Workspace } from '@/components/workspace/Workspace'
 import { MemorySidebar } from '@/components/shell/MemorySidebar'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { StatusBar } from '@/components/shell/StatusBar'
 import { SettingsDialog } from '@/components/shell/SettingsDialog'
+import { ClosePromptDialog } from '@/components/shell/ClosePromptDialog'
 import { Dialogs } from '@/components/common/Dialogs'
 import { IconAlert } from '@/components/common/icons'
 export default function App() {
@@ -29,67 +29,18 @@ export default function App() {
     void useAppStore.getState().boot()
   }, [])
 
-  // 主题应用
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)')
-    const apply = () => {
-      const resolved = theme === 'system' ? (mq.matches ? 'dark' : 'light') : theme
-      document.documentElement.dataset.theme = resolved
-    }
-    apply()
-    mq.addEventListener('change', apply)
-    return () => mq.removeEventListener('change', apply)
-  }, [theme])
-
+  // 主题应用 + 桌宠状态上报 + 全局事件接线（与桌宠面板共用，见 useDesktopEvents）
+  useThemeSync(theme)
+  usePetChatStatus()
   // 弹窗打开时隐藏 WebContentsView（native overlay 遮不住 DOM 弹窗）
   const hasDialog = useAppStore((s) => !!s.dialog || s.settingsOpen || s.createProjectOpen || s.openSelectCount > 0)
   useEffect(() => {
     void previewSetVisible(!hasDialog)
   }, [hasDialog])
-
-  // 会话持久化已改为 store 内稳定点 write-through（见 useChatStore），这里不再做全量覆写订阅
-
-  // 全局事件接线：编译输出 / 退出码 / AI 增量 / 文件变更
-  useEffect(() => {
-    if (!isDesktop) return
-    // AI 增量微任务批合：同一微任务内到达的 N 个 delta 合并为每 requestId 一次 store 更新
-    //（流式每 token 触发全列表渲染是长会话卡顿主因；配合 MessageBubble 的 memo 生效）
-    const deltaBuf = new Map<string, string>()
-    const reasoningBuf = new Map<string, string>()
-    let deltasScheduled = false
-    const flushDeltas = () => {
-      deltasScheduled = false
-      if (deltaBuf.size === 0 && reasoningBuf.size === 0) return
-      const ds = [...deltaBuf.entries()]
-      const rs = [...reasoningBuf.entries()]
-      deltaBuf.clear()
-      reasoningBuf.clear()
-      const chat = useChatStore.getState()
-      for (const [rid, text] of ds) chat.appendDelta(rid, text)
-      for (const [rid, text] of rs) chat.appendReasoning(rid, text)
-    }
-    const bufferChunk = (buf: Map<string, string>, requestId: string, text: string) => {
-      buf.set(requestId, (buf.get(requestId) ?? '') + text)
-      if (!deltasScheduled) {
-        deltasScheduled = true
-        queueMicrotask(flushDeltas)
-      }
-    }
-    const offs = [
-      onBuildOutput((p) => useBuildStore.getState().onOutput(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.stream, p.line)),
-      onBuildExit((p) => useBuildStore.getState().onExit(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.code)),
-      onAiDelta((p) => bufferChunk(deltaBuf, p.requestId, p.delta)),
-      onAiReasoning((p) => bufferChunk(reasoningBuf, p.requestId, p.delta)),
-      onCliToolEvent((p) => useChatStore.getState().handleCliToolEvent(p.requestId, p.id, p.name, p.phase, p.arguments)),
-      onCliToolResult((p) => useChatStore.getState().handleCliToolResult(p.requestId, p.id, p.content, p.isError, p.tokens)),
-      onCliAgentEvent((p) => useChatStore.getState().handleCliAgentEvent(p)),
-      onFsChanged((p) => { scheduleFsRefresh(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.paths) }),
-      onElementPicked((p) => useChatStore.getState().setPendingElement(p)),
-      // 多窗口配置同步：任一窗口/主进程改配置后，本窗口按变化键刷新镜像
-      onConfigChanged(() => { void useAppStore.getState().refreshRemoteConfig() }),
-    ]
-    return () => { offs.forEach((f) => f()) }
-  }, [])
+  useDesktopEvents({
+    // 只处理当前工程的变更 + 400ms 节流合并（面板窗口直接刷新，见 panel-main.tsx）
+    onFsChanged: (p) => { scheduleFsRefresh(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.paths) },
+  })
 
   /** 主分割线拖拽：左工作区 ≥ 500px，右对话栏 ≥ 300px。
    *  坐标基准是「工作区左缘」而非 body 左缘——工作区左侧还有 MemorySidebar（40px 图标列
@@ -180,6 +131,7 @@ export default function App() {
 
       <StatusBar />
       <SettingsDialog />
+      <ClosePromptDialog />
       <Dialogs />
     </div>
   )

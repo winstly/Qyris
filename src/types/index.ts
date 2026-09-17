@@ -138,6 +138,8 @@ export interface AppConfig {
   memExtractRounds?: number
   /** 上下文压缩阈值（token 数）：历史超过此值时自动压缩旧消息为摘要，缺省 256000 */
   contextCompressThreshold?: number
+  /** 主窗口关闭行为：缺省（未设置）=每次询问；minimize=隐藏窗口保留桌宠；quit=退出整个应用 */
+  closeAction?: 'minimize' | 'quit'
 }
 
 export interface AiToolCall {
@@ -175,6 +177,8 @@ export interface ToolResultEntry {
 /** CLI 子 agent 事件（electron ai-cli 转发，载荷结构与 preload 内联版保持一致） */
 export interface CliAgentEventPayload {
   requestId: string
+  /** 事件所属工程根（镜像窗口按它把事件路由到对应工程切片） */
+  projectRoot?: string
   /** 所属子 agent 派发卡的 tool_use id（Agent/Task） */
   parentId: string
   kind: 'text' | 'tool' | 'tool-result'

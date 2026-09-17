@@ -3,7 +3,17 @@
  * 前端统一用 OpenAI 格式的 messages/tools；选 Anthropic 时在此做协议转换。
  * Key 在主进程内解密直用，明文不经过渲染层。
  */
-import { emitToRequestWindow } from './emitter'
+import { broadcastToWindows, emitToRequestWindow } from './emitter'
+
+/** AI 流事件广播：发起窗口照收（handler 原样消费），其余窗口同份投递用于镜像。
+ *  projectRoot 为 null（旧路径/内部调用）时退化为仅定向发起窗口，行为与旧版一致。 */
+function broadcastAi(requestId: string, projectRoot: string | null, event: string, payload: unknown): void {
+  if (projectRoot == null) {
+    emitToRequestWindow(requestId, event, payload)
+    return
+  }
+  broadcastToWindows(event, payload)
+}
 import { getSecretInternal } from './secrets'
 import { errorMessage } from './util'
 import type { AiCompletion, AiToolCall } from './ai'
@@ -34,6 +44,8 @@ function trimBaseUrl(baseUrl: string): string {
 
 export async function openaiChatStream(
   requestId: string, key: string, baseUrl: string, model: string, messages: unknown, tools: unknown,
+  /** 事件随发随带的工程根（镜像窗口按它认领流），null = 不镜像 */
+  projectRoot: string | null = null,
 ): Promise<AiCompletion> {
   const controller = new AbortController()
   aborts.set(requestId, controller)
@@ -92,7 +104,7 @@ export async function openaiChatStream(
     const text = delta.content
     if (typeof text === 'string' && text.length > 0) {
       content += text
-      emitToRequestWindow(requestId, 'ai-delta', { requestId, delta: text })
+      broadcastAi(requestId, projectRoot, 'ai-delta', { requestId, projectRoot, delta: text })
     }
     // 思考过程：兼容 DeepSeek 系 `reasoning_content` 与 OpenAI o 系 `reasoning`
     const think =
@@ -103,7 +115,7 @@ export async function openaiChatStream(
           : ''
     if (think) {
       reasoning += think
-      emitToRequestWindow(requestId, 'ai-reasoning', { requestId, delta: think })
+      broadcastAi(requestId, projectRoot, 'ai-reasoning', { requestId, projectRoot, delta: think })
     }
     if (typeof choice.finish_reason === 'string') finishReason = choice.finish_reason
 
@@ -221,6 +233,8 @@ function toAnthropicTools(toolsIn: unknown): Record<string, unknown>[] | undefin
 
 export async function anthropicChatStream(
   requestId: string, key: string, baseUrl: string, model: string, messages: unknown, tools: unknown,
+  /** 事件随发随带的工程根（镜像窗口按它认领流），null = 不镜像 */
+  projectRoot: string | null = null,
 ): Promise<AiCompletion> {
   const { system, messages: anthropicMessages } = toAnthropicPayload(messages)
   const anthropicTools = toAnthropicTools(tools)
@@ -295,10 +309,10 @@ export async function anthropicChatStream(
       const delta = json.delta as Json | undefined
       if (delta?.type === 'text_delta' && typeof delta.text === 'string' && delta.text.length > 0) {
         content += delta.text
-        emitToRequestWindow(requestId, 'ai-delta', { requestId, delta: delta.text })
+        broadcastAi(requestId, projectRoot, 'ai-delta', { requestId, projectRoot, delta: delta.text })
       } else if (delta?.type === 'thinking_delta' && typeof delta.thinking === 'string' && delta.thinking.length > 0) {
         reasoning += delta.thinking
-        emitToRequestWindow(requestId, 'ai-reasoning', { requestId, delta: delta.thinking })
+        broadcastAi(requestId, projectRoot, 'ai-reasoning', { requestId, projectRoot, delta: delta.thinking })
       } else if (delta?.type === 'input_json_delta' && typeof delta.partial_json === 'string' && currentTool) {
         currentTool.arguments += delta.partial_json
       }

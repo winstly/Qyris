@@ -2,7 +2,8 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
-import { registerWindow, removeWindow, getAllWindows, emitToAllWindows } from '../lib/emitter'
+import { registerWindow, removeWindow, getAllWindows, emitToAllWindows, broadcastToWindows } from '../lib/emitter'
+import * as pet from '../lib/pet'
 import { setUnexpectedErrorHandler, isCancellationError } from '../../shared/base/errors'
 import { format as logFormat } from '../../shared/base/log'
 import { mainLog, attachFileLogging } from '../lib/log-file'
@@ -275,7 +276,19 @@ function registerIpc(): void {
   // AI（windowId 绑定到发起请求的窗口，用于事件定向路由；opts 透传 CLI 记忆反哺通道——
   //  sessionSummary/memoryBlock，缺此一跳 CLI 模式的记忆注入会整体断供）
   handle('ai_chat_stream', (e, p) =>
-    ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot, e.sender.id, p.opts ?? undefined))
+    Promise.resolve(
+      ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot, e.sender.id, p.opts ?? undefined),
+    ).then(
+      (r) => {
+        // 镜像管道：请求收场广播给其余窗口（镜像侧据此收口状态并从库校正）
+        broadcastToWindows('chat:request-done', { requestId: p.requestId, projectRoot: p.projectRoot ?? null, hasError: false }, e.sender.id)
+        return r
+      },
+      (err) => {
+        broadcastToWindows('chat:request-done', { requestId: p.requestId, projectRoot: p.projectRoot ?? null, hasError: true }, e.sender.id)
+        throw err
+      },
+    ))
   handle('ai_test_connection', (_e, p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode))
   handle('ai_cancel', (_e, p) => ai.aiCancel(p.requestId))
 
@@ -309,18 +322,101 @@ function registerIpc(): void {
   handle('open_in_explorer', (_e, { filePath }: { filePath: string }) => {
     return shell.showItemInFolder(filePath)
   })
+  // 桌宠（注入主窗口/退出动作，右键菜单用；quitApp 先置放行位再退，不与 close 拦截死缠）
+  pet.registerPetIpc({
+    openMain: () => showMainWindow(),
+    quitApp: () => {
+      quitting = true
+      app.quit()
+    },
+  })
+  ipcMain.on('pet:move-by', (e, dx: number, dy: number) => {
+    // 渲染层来的 TS 类型标注只是编译期的：IPC 载荷必须运行时校验，
+    // 否则字符串会拼接进坐标、NaN 会把窗口打到无效位置
+    const ix = Number(dx)
+    const iy = Number(dy)
+    if (!Number.isFinite(ix) || !Number.isFinite(iy)) return
+    const petWin = BrowserWindow.fromWebContents(e.sender)
+    if (petWin && !petWin.isDestroyed()) {
+      const [x, y] = petWin.getPosition()
+      petWin.setPosition(x + ix, y + iy)
+    }
+  })
+  // 主窗口生命周期：关闭询问回调（挂起中才受理，超时兜底已收口）+ 桌宠面板「打开主窗口」入口
+  ipcMain.on('app:close-resolve', (_e, p: { action?: string; remember?: boolean }) => {
+    if (!closePromptPending) return
+    closePromptPending = false
+    const action = p?.action === 'quit' ? 'quit' : 'minimize'
+    if (p?.remember === true) void config.mergeConfig({ closeAction: action })
+    if (action === 'quit') {
+      quitting = true
+      app.quit()
+      return
+    }
+    if (mainWin && !mainWin.isDestroyed()) mainWin.hide()
+  })
+  // 对话镜像 relay：发起窗口的用户消息/收尾/清空 → 其余全部窗口（桌宠面板 ↔ 主窗口同一场对话）
+  ipcMain.on('chat:mirror-relay', (e, p) => broadcastToWindows('chat:mirror', p, e.sender.id))
+
   handle('start_element_pick', () => {
     void inspect.startElementPick(preview.getPreviewWebContents())
   })
 }
 
-/** 窗口位置偏移：新窗口相对上一个偏移 40px */
+/** 窗口位置偏移：新窗口相对上一个主窗口偏移 40px（桌宠/面板小窗口不参与布局计算） */
 function nextWindowOffset(): { x: number; y: number } {
-  const wins = getAllWindows()
+  const wins = getAllWindows().filter((w) => !pet.isPetFamilyWindowId(w.id))
   if (wins.length === 0) return { x: NaN, y: NaN }
   const last = wins[wins.length - 1]
   const bounds = last.getBounds()
   return { x: bounds.x + 40, y: bounds.y + 40 }
+}
+
+/** 主窗口引用：桌宠面板「打开主窗口」与关闭拦截的 hide 都需要定向操作 */
+let mainWin: BrowserWindow | null = null
+/** app.quit() 进行中：放行所有窗口 close，避免关闭拦截把退出也拦下来 */
+let quitting = false
+/** 关闭询问弹窗挂起中：防重复触发；渲染层超时未响应时兜底 */
+let closePromptPending = false
+
+/** 主窗口关闭（已 preventDefault）：按配置分流。
+ *  ask=推给渲染层弹询问框；minimize=隐藏保留桌宠；quit=退出整个应用。
+ *  渲染层 10s 无响应按最小化兜底——宁可窗口藏起来可找回，不可让应用凭空失联。 */
+async function requestClose(win: BrowserWindow): Promise<void> {
+  const cfg = await config.getConfig()
+  if (cfg.closeAction === 'minimize') {
+    win.hide()
+    return
+  }
+  if (cfg.closeAction === 'quit') {
+    quitting = true
+    app.quit()
+    return
+  }
+  if (closePromptPending) return
+  closePromptPending = true
+  win.webContents.send('app:close-request')
+  setTimeout(() => {
+    if (!closePromptPending) return
+    closePromptPending = false
+    // 兜底隐藏前必须通知渲染层收起询问框：否则窗口找回后残留的对话框
+    // 按钮会打在已收口的 pending 位上，点了没反应（用户以为退出了其实没退）
+    if (!win.isDestroyed()) {
+      win.webContents.send('app:close-cancel')
+      win.hide()
+    }
+  }, 10_000)
+}
+
+/** 把主窗口带到前台；窗口已被销毁（异常路径）时重建 */
+function showMainWindow(): void {
+  if (mainWin && !mainWin.isDestroyed()) {
+    if (mainWin.isMinimized()) mainWin.restore()
+    mainWin.show()
+    mainWin.focus()
+    return
+  }
+  createWindow()
 }
 
 /** 创建主窗口（渲染层 boot 时读取配置自动恢复上次项目） */
@@ -349,8 +445,9 @@ function createWindow(): void {
     },
   })
 
-  if (state.maximized && getAllWindows().length === 0) win.maximize()
+  if (state.maximized && getAllWindows().filter((w) => !pet.isPetFamilyWindowId(w.id)).length === 0) win.maximize()
   registerWindow(win)
+  mainWin = win
   preview.setPreviewHost(win)
 
   win.once('ready-to-show', () => win.show())
@@ -372,9 +469,17 @@ function createWindow(): void {
       win.webContents.toggleDevTools()
     }
   })
-  win.on('close', () => saveWindowState(win))
+  win.on('close', (e) => {
+    saveWindowState(win)
+    if (quitting) return
+    // 关闭行为由主进程接管（ask/minimize/quit），不允许默认销毁——桌宠还活着时窗口必须可找回
+    e.preventDefault()
+    void requestClose(win)
+  })
   win.on('closed', () => {
+    if (mainWin === win) mainWin = null
     removeWindow(win)
+    pet.clearWindowChatState(win.id)
     void watcher.stopWatchingForWindow(win.id)
   })
 
@@ -423,6 +528,8 @@ app.whenReady().then(async () => {
   }
   registerIpc()
   createWindow()
+  // 桌宠：主窗口就绪后创建透明置顶小窗口
+  pet.createPetWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })
@@ -431,6 +538,11 @@ app.whenReady().then(async () => {
 // 所有窗口关闭后退出
 app.on('window-all-closed', () => {
   app.quit()
+})
+
+// 退出序列开始：放行所有窗口的 close 拦截，保证 ask/minimize 拦截不会卡死退出
+app.on('before-quit', () => {
+  quitting = true
 })
 
 app.on('will-quit', () => {

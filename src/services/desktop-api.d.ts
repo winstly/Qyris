@@ -146,14 +146,38 @@ declare global {
     startElementPick: (url: string) => Promise<void>
     openExternal: (url: string) => Promise<void>
     openInExplorer: (filePath: string) => Promise<void>
+    /** 主窗口关闭询问的回传（ask 流程；remember=true 时主进程落盘 closeAction 偏好） */
+    resolveClose: (action: 'minimize' | 'quit', remember: boolean) => void
+
+    // 桌宠
+    togglePetPanel: () => void
+    requestPetState: () => void
+    petMoveBy: (dx: number, dy: number) => void
+    /** 请求弹出桌宠右键菜单（打开工作台 / 退出应用） */
+    petContextMenu: () => void
+    /** 本窗口当前对话状态上报（桌宠动画聚合） */
+    setPetChatState: (status: string) => void
+    onPetState: DesktopEventSub<'idle' | 'working' | 'waiting'>
+
+    // 对话镜像（桌宠面板 ↔ 主窗口同一场对话）
+    /** 发起窗口推送稳定点（user-message/finalized/cleared），主进程转发给其余窗口 */
+    relayChatMirror: (p: { kind: 'user-message' | 'finalized' | 'cleared'; projectRoot: string; message?: unknown; msg?: unknown }) => void
+    /** 主窗口关闭被拦截（closeAction=ask）：渲染层弹询问框后必须回 resolveClose */
+    onCloseRequest: DesktopEventSub<void>
+    /** 关闭询问被主进程超时兜底收口：渲染层收起询问框 */
+    onCloseCancel: DesktopEventSub<void>
+    /** 对话镜像 relay（对方窗口的稳定点推送） */
+    onChatMirror: DesktopEventSub<{ kind: 'user-message' | 'finalized' | 'cleared'; projectRoot: string; message?: unknown; msg?: unknown }>
+    /** 一次 AI 请求收场广播（发起窗口除外）：镜像侧据此收口状态并从库校正 */
+    onChatRequestDone: DesktopEventSub<{ requestId: string; projectRoot: string | null; hasError: boolean }>
 
     // 事件订阅（返回取消函数）
     onBuildOutput: DesktopEventSub<{ name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }>
     onBuildExit: DesktopEventSub<{ name: string; code: number; projectRoot?: string }>
-    onAiDelta: DesktopEventSub<{ requestId: string; delta: string }>
-    onAiReasoning: DesktopEventSub<{ requestId: string; delta: string }>
-    onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string }>
-    onCliToolResult: DesktopEventSub<{ requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number } }>
+    onAiDelta: DesktopEventSub<{ requestId: string; delta: string; projectRoot?: string }>
+    onAiReasoning: DesktopEventSub<{ requestId: string; delta: string; projectRoot?: string }>
+    onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string; projectRoot?: string }>
+    onCliToolResult: DesktopEventSub<{ requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number }; projectRoot?: string }>
     onCliAgentEvent: DesktopEventSub<CliAgentEventPayload>
     onCliRetry: DesktopEventSub<{ requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }>
     onMemoryExtractState: DesktopEventSub<{ projectRoot: string; extracting: boolean }>

@@ -168,7 +168,9 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
     flex-basis: 0% !important;
   }
   .app__divider { display: none; }
-  .chat {
+  /* 作用域必须收敛到 .app__body：桌宠面板窗口（400px 宽）同样引入本文件，
+     裸 .chat 会命中面板里的对话栏，把它钉死在 46vh 导致无法撑满面板 */
+  .app__body .chat {
     flex: 0 0 auto !important;
     width: 100% !important;
     height: 46vh;

@@ -9,3 +9,14 @@ export interface SnapshotVersion {
   versionKey: string | null
   sessionId: string
 }
+
+/** 对话镜像 relay 载荷（桌宠面板 ↔ 主窗口同一场对话）。
+ *  user-message=对方刚发出的用户消息；finalized=某条 assistant 消息稳定点最新态；
+ *  cleared=对方清空对话（开新会话）。message/msg 结构与渲染层 ChatMessage 一致
+ *  （跨 tsconfig 隔离，此处内联透传 unknown，渲染层自行收窄）。 */
+export interface ChatMirrorPayload {
+  kind: 'user-message' | 'finalized' | 'cleared'
+  projectRoot: string
+  message?: unknown
+  msg?: unknown
+}

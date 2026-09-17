@@ -3,7 +3,7 @@
  * 每个 BrowserWindow 注册后，按 windowId（webContents.id）定向发送事件。
  * AI 请求通过 requestId → windowId 映射路由到发起窗口。
  */
-import type { BrowserWindow } from 'electron'
+import { BrowserWindow } from 'electron'
 
 /** windowId → BrowserWindow */
 const windows = new Map<number, BrowserWindow>()
@@ -36,6 +36,17 @@ export function emitToWindow(winId: number, event: string, payload: unknown): vo
 export function emitToAllWindows(event: string, payload: unknown): void {
   for (const win of windows.values()) {
     if (!win.isDestroyed()) {
+      win.webContents.send(event, payload)
+    }
+  }
+}
+
+/** 向所有 Electron 窗口广播（含未注册的桌宠/面板窗口）。
+ *  exceptWinId 用于跳过发起窗口（避免主对话流在发起窗口双份投递）。
+ *  镜像管道用：AI 流事件 / 对话镜像 relay 由此到达每一个窗口。 */
+export function broadcastToWindows(event: string, payload: unknown, exceptWinId?: number): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed() && win.id !== exceptWinId) {
       win.webContents.send(event, payload)
     }
   }

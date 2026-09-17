@@ -18,7 +18,9 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
   retrying: '重试中',
 }
 
-export function ChatPanel() {
+/** showHeaderActions：右上角回退/清空/设置图标组。桌宠面板传 false——
+ *  面板窗口未挂载 SettingsDialog / 确认弹窗，那组按钮在面板里本就无功能。 */
+export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: boolean }) {
   const { status, sessionId } = useChatStore(selectCurrentChat)
   const hasMessages = useChatStore((s) => selectCurrentChat(s).messages.length > 0)
   const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
@@ -87,17 +89,19 @@ export function ChatPanel() {
         <span className="chat__dot" data-status={status} />
         <span className="chat__title">AI 助手</span>
         <span className="chat__status" data-status={status}>{STATUS_LABEL[status]}</span>
-        <div className="chat__head-actions">
-          <button className="icon-btn" onClick={() => void revertSession()} disabled={!hasSessionChanges} aria-label="回退会话" title="回退本次会话的 AI 文件改动">
-            <IconUndo size={15} />
-          </button>
-          <button className="icon-btn" onClick={() => void clearChat()} disabled={!hasMessages} aria-label="清空对话" title="清空对话">
-            <IconTrash size={15} />
-          </button>
-          <button className="icon-btn" onClick={() => setSettingsOpen(true)} aria-label="AI 设置" title="AI 设置">
-            <IconGear size={15} />
-          </button>
-        </div>
+        {showHeaderActions && (
+          <div className="chat__head-actions">
+            <button className="icon-btn" onClick={() => void revertSession()} disabled={!hasSessionChanges} aria-label="回退会话" title="回退本次会话的 AI 文件改动">
+              <IconUndo size={15} />
+            </button>
+            <button className="icon-btn" onClick={() => void clearChat()} disabled={!hasMessages} aria-label="清空对话" title="清空对话">
+              <IconTrash size={15} />
+            </button>
+            <button className="icon-btn" onClick={() => setSettingsOpen(true)} aria-label="AI 设置" title="AI 设置">
+              <IconGear size={15} />
+            </button>
+          </div>
+        )}
       </header>
 
       {/* agent 切换器：只列活着的 agent（完成/取消自动清理出列表）；正在查看的线程始终保留选项 */}
