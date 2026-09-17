@@ -82,11 +82,15 @@ function sendToWorker(msg: Record<string, unknown>): Promise<unknown> {
 
 function createWorker(): Worker {
   // Worker 代码内联：避免 Electron 打包路径问题
+  // eval worker 的模块解析以进程 cwd 为基准，解析不到 asar/app.asar.unpacked 内的 node_modules
+  //（打包安装后必现 "Cannot find module 'better-sqlite3'"）。主进程侧 require.resolve 走
+  // Electron 的 asar/unpacked 透明重定向拿到真实绝对路径，注入 worker 后与 cwd 彻底解耦。
+  const betterSqlite3Entry = require.resolve('better-sqlite3')
   const code = `
 const { parentPort } = require('node:worker_threads');
 const { mkdirSync } = require('node:fs');
 const path = require('node:path');
-const Database = require('better-sqlite3');
+const Database = require(${JSON.stringify(betterSqlite3Entry)});
 
 const SCHEMA = \`
 CREATE TABLE IF NOT EXISTS messages (

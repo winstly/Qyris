@@ -5,11 +5,25 @@ directories:
   output: dist
 # 复用 node_modules 内已下载的 Electron 发行版，避免打包时二次下载
 electronDist: node_modules/electron/dist
-# 产物自包含（主进程依赖已 bundle 进 out/），无需携带 node_modules
+# 产物自包含（主进程依赖已 bundle 进 out/），仅携带无法 bundle 的 native 运行时：
+# better-sqlite3 为 N-API 二进制（node 版经实证可在 Electron 44 直接加载），npmRebuild 关闭
+# 以跳过 node-gyp 源码重编（无需 Visual Studio）；sqlite-vec 缺失时主进程优雅降级（FTS 可用）。
+# @huggingface/transformers / onnxruntime-web 体积巨大且 embed 有降级路径，首版不随包分发。
+npmRebuild: false
 files:
   - out/**
   - package.json
+  - node_modules/better-sqlite3/package.json
+  - node_modules/better-sqlite3/lib/**
+  - node_modules/better-sqlite3/prebuilds/**
+  - node_modules/better-sqlite3/build/**
+  - node_modules/sqlite-vec/**
 asar: true
+# native 运行时解包到真实文件系统：SQLite loadable extension（sqlite-vec）无法从 asar 虚拟路径
+# dlopen；better-sqlite3 的入口路径经 require.resolve 重定向到 app.asar.unpacked 后由 db worker 加载
+asarUnpack:
+  - node_modules/better-sqlite3/**
+  - node_modules/sqlite-vec/**
 # 窗口图标随包分发（BrowserWindow icon 运行时读取）
 extraResources:
   - { from: build/icon.png, to: icon.png }
