@@ -5,7 +5,7 @@
  * 主进程 await 后直接 emitToRenderer 转发渲染层。
  */
 import type { WebContents } from 'electron'
-import { emitToRenderer } from './emitter'
+import { emitToRenderer, emitToWindow } from './emitter'
 
 export interface PickedElement {
   selector: string
@@ -84,9 +84,10 @@ const PICKER_SCRIPT = String.raw`(function () {
   })
 })()`
 
-/** 在预览 webContents 里注入选取器；完成后把结果 emitToRenderer 给渲染层。
+/** 在预览 webContents 里注入选取器；完成后把结果定向发回发起拾取的窗口（不广播——
+ *  否则桌宠面板也会收到别的窗口选中的元素，把无关元素带进它的下一条消息）。
  *  30s 超时保底：页面导航/SPA 路由跳转可能销毁注入上下文致 Promise 永不 resolve。 */
-export async function startElementPick(previewWc: WebContents | null): Promise<void> {
+export async function startElementPick(previewWc: WebContents | null, requesterWinId?: number): Promise<void> {
   if (!previewWc || previewWc.isDestroyed()) return
   try {
     const result = await Promise.race([
@@ -95,7 +96,8 @@ export async function startElementPick(previewWc: WebContents | null): Promise<v
     ])
     if (result) {
       const picked = JSON.parse(result) as PickedElement
-      emitToRenderer('element-picked', picked)
+      if (requesterWinId != null) emitToWindow(requesterWinId, 'element-picked', picked)
+      else emitToRenderer('element-picked', picked)
     }
   } catch { /* 页面导航/销毁时静默 */ }
 }

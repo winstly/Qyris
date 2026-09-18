@@ -1,24 +1,82 @@
 /**
- * 桌宠窗口渲染入口：CSS/SVG 动画角色 + 左键开面板 + 右键菜单 + 拖拽移动。
- * 状态由主进程通过 pet:state 事件推送，三种动画：idle / working / waiting。
+ * 桌宠窗口渲染入口：MP4 视频动画角色 + 左键开面板 + 右键菜单 + 拖拽移动。
+ * 状态由主进程通过 pet:state 事件推送，四种动画：idle(slackoff) / working / waiting / error。
+ * 声音可通过设置中的 petSound 开关控制（默认静音）。
  */
-import { StrictMode, useEffect, useRef, useState } from 'react'
+import { StrictMode, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
+import type { AppConfig } from '@/types'
 import './pet.css'
 
-type PetState = 'idle' | 'working' | 'waiting'
+type PetState = 'idle' | 'working' | 'waiting' | 'error'
+
+/** 状态 → MP4 文件名 */
+const STATE_VIDEO: Record<PetState, string> = {
+  idle: 'slackoff.mp4',
+  working: 'working.mp4',
+  waiting: 'slackoff.mp4',
+  error: 'error.mp4',
+}
 
 function Pet() {
   const [state, setState] = useState<PetState>('idle')
+  const [muted, setMuted] = useState(true)
+  const [videoUrls, setVideoUrls] = useState<Record<string, string>>({})
+  const videoRef = useRef<HTMLVideoElement>(null)
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0 })
 
   // 监听主进程推送的状态
   useEffect(() => {
-    const off = window.desktopAPI?.onPetState?.((s) => setState(s))
-    // 请求当前状态
+    const off = window.desktopAPI?.onPetState?.((s) => setState(s as PetState))
     window.desktopAPI?.requestPetState?.()
     return () => { off?.() }
   }, [])
+
+  // 预解析视频 URL（dev 走 Vite dev server，打包后走 file:// + asarUnpack）
+  useEffect(() => {
+    const resolve = async () => {
+      const urls: Record<string, string> = {}
+      for (const f of new Set(Object.values(STATE_VIDEO))) {
+        try { urls[f] = await window.desktopAPI?.resolveVideoUrl?.(f) ?? f } catch { urls[f] = f }
+      }
+      setVideoUrls(urls)
+    }
+    void resolve()
+  }, [])
+
+  // 读取 petSound 配置 + 监听变更
+  useEffect(() => {
+    window.desktopAPI?.getConfig?.().then((cfg: AppConfig) => {
+      setMuted(!cfg.petSound)
+    }).catch(() => {})
+    const off = window.desktopAPI?.onConfigChanged?.((keys) => {
+      if (keys.includes('petSound')) {
+        window.desktopAPI?.getConfig?.().then((cfg: AppConfig) => {
+          setMuted(!cfg.petSound)
+        }).catch(() => {})
+      }
+    })
+    return () => { off?.() }
+  }, [])
+
+  /** imperative play：比 autoPlay 声明式属性更可靠，key 变更重挂载后仍保证播放 */
+  const startPlay = useCallback(() => {
+    const v = videoRef.current
+    if (!v) return
+    v.play().catch(() => {
+      // 某些极端时序下 loadeddata 前 play() 被拒，loadeddata handler 会兜底
+    })
+  }, [])
+
+  // 状态切换时强制播放新视频（key 变更 → 重挂载 → ref 更新 → 触发 play）
+  useEffect(() => {
+    startPlay()
+  }, [state, startPlay])
+
+  // muted 变更时也要确保视频继续播放（仅改属性不会自动恢复）
+  useEffect(() => {
+    startPlay()
+  }, [muted, startPlay])
 
   // 左键：开/关面板
   const handleClick = (e: React.MouseEvent) => {
@@ -57,30 +115,28 @@ function Pet() {
     window.addEventListener('mouseup', onUp)
   }
 
+  const videoName = STATE_VIDEO[state]
+  const videoSrc = videoUrls[videoName] ?? videoName
+
   return (
     <div
       className={`pet pet--${state}`}
       onClick={handleClick}
       onContextMenu={handleContextMenu}
       onMouseDown={handleMouseDown}
-      title={state === 'idle' ? '待命' : state === 'working' ? '执行中…' : '等待确认'}
+      title={state === 'idle' ? '待命' : state === 'working' ? '执行中…' : state === 'error' ? '异常' : '等待确认'}
     >
-      <svg className="pet__body" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
-        {/* 身体：圆形 */}
-        <circle cx="32" cy="34" r="22" fill="var(--pet-body, #6C63FF)" />
-        {/* 眼睛 */}
-        <circle className="pet__eye pet__eye--left" cx="24" cy="30" r="3.5" fill="white" />
-        <circle className="pet__eye pet__eye--right" cx="40" cy="30" r="3.5" fill="white" />
-        <circle className="pet__pupil pet__pupil--left" cx="24" cy="30" r="2" fill="#1a1a2e" />
-        <circle className="pet__pupil pet__pupil--right" cx="40" cy="30" r="2" fill="#1a1a2e" />
-        {/* 嘴巴 */}
-        <path className="pet__mouth" d="M 26 40 Q 32 46 38 40" stroke="white" strokeWidth="2" fill="none" strokeLinecap="round" />
-        {/* 耳朵 */}
-        <ellipse cx="16" cy="16" rx="6" ry="8" fill="var(--pet-body, #6C63FF)" transform="rotate(-15 16 16)" />
-        <ellipse cx="48" cy="16" rx="6" ry="8" fill="var(--pet-body, #6C63FF)" transform="rotate(15 48 16)" />
-      </svg>
-      {/* 状态指示灯 */}
-      <div className="pet__indicator" />
+      <video
+        ref={videoRef}
+        className="pet__video"
+        src={videoSrc}
+        loop
+        muted={muted}
+        playsInline
+        disablePictureInPicture
+        key={videoName}
+        onLoadedData={startPlay}
+      />
     </div>
   )
 }

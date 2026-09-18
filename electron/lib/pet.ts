@@ -2,7 +2,7 @@
  * 桌宠窗口管理：透明置顶小窗口（动画角色）+ 面板窗口（项目/对话）。
  *
  * 窗口模型：
- *   petWin（64×64 透明置顶）──左键──→ panelWin（400×600 项目/对话）
+ *   petWin（128×128 透明置顶）──左键──→ panelWin（400×600 项目/对话）
  *
  * 状态聚合：监听 build/AI 事件 → 维护 petState → 推送给桌宠窗口切换动画。
  * 面板窗口复用主窗口的 preload + IPC 事件，Zustand store 各自独立。
@@ -12,7 +12,7 @@ import path from 'node:path'
 import { emitToWindow, registerWindow } from './emitter'
 import { mainLog } from './log-file'
 
-export type PetState = 'idle' | 'working' | 'waiting'
+export type PetState = 'idle' | 'working' | 'waiting' | 'error'
 
 let petWin: BrowserWindow | null = null
 let panelWin: BrowserWindow | null = null
@@ -34,17 +34,19 @@ export function updatePetState(state: PetState): void {
 /** 各窗口上报的对话状态（sender.id → 桌宠态） */
 const windowChatStates = new Map<number, PetState>()
 
-/** 渲染层对话状态 → 桌宠态：等你回答 > 生成中/工具执行/重试 > 待命 */
+/** 渲染层对话状态 → 桌宠态：error > 等你回答 > 生成中/工具执行/重试 > 待命 */
 function chatStatusToPetState(status: string): PetState {
+  if (status === 'error') return 'error'
   if (status === 'awaiting-user') return 'waiting'
   if (status === 'streaming' || status === 'tools' || status === 'retrying') return 'working'
   return 'idle'
 }
 
-/** 聚合所有窗口：waiting > working > idle */
+/** 聚合所有窗口：error > waiting > working > idle */
 function recomputePetChatState(): void {
   let next: PetState = 'idle'
   for (const st of windowChatStates.values()) {
+    if (st === 'error') { next = 'error'; break }
     if (st === 'waiting') { next = 'waiting'; break }
     if (st === 'working') next = 'working'
   }
@@ -66,7 +68,7 @@ export function clearWindowChatState(windowId: number): void {
 
 // ---------- 桌宠窗口 ----------
 
-const PET_SIZE = 64
+const PET_SIZE = 128
 
 function getRendererUrl(page: string): string {
   const rendererUrl = process.env['ELECTRON_RENDERER_URL']
@@ -153,10 +155,26 @@ export function isPetFamilyWindowId(id: number): boolean {
 
 export function togglePanelWindow(): void {
   if (panelWin && !panelWin.isDestroyed()) {
-    panelWin.close()
+    if (panelWin.isVisible()) {
+      // 隐藏而非销毁：保留 Zustand store 状态，重开时无需从 DB 重新加载
+      panelWin.hide()
+      mainLog.info('[pet] 面板隐藏（store 状态保留，未销毁）')
+      if (process.platform === 'darwin' && petWin && !petWin.isDestroyed()) petWin.setFocusable(true)
+    } else {
+      panelWin.show()
+      panelWin.focus()
+      mainLog.info('[pet] 面板重新显示（复用既有窗口，状态应完整）')
+      if (process.platform === 'darwin' && petWin && !petWin.isDestroyed()) petWin.setFocusable(false)
+    }
     return
   }
   if (!petWin || petWin.isDestroyed()) return
+  mainLog.info('[pet] 面板不存在，创建新窗口（此前若曾打开，说明发生了销毁——需排查）')
+
+  // macOS IMK 兼容：禁止桌宠窗口抢焦点，防止 toolbar 窗口与面板竞争 IMK match port
+  // （导致 "error messaging the match port for IMKCFRunLoopWakeUpReliable" + 文本输入阻塞）
+  // 桌宠保持可见但不接受键盘焦点，面板正常接收文本输入
+  if (process.platform === 'darwin') petWin.setFocusable(false)
 
   const petBounds = petWin.getBounds()
   // 钳制基准是桌宠所在显示器的工作区（桌宠可被拖到副屏）——按主屏钳制会让面板
@@ -201,8 +219,14 @@ export function togglePanelWindow(): void {
 
   const panelWinId = panelWin.id
   panelWin.on('closed', () => {
+    // 正常运行中此事件不应触发（hide ≠ closed）——触发即说明面板被销毁，运行中数据全丢
+    mainLog.warn('[pet] 面板窗口被销毁（closed 事件）——若非应用退出，运行中的对话数据将丢失')
     clearWindowChatState(panelWinId)
     panelWin = null
+    // 面板关闭后恢复桌宠可交互（可点击开面板、右键菜单）
+    if (petWin && !petWin.isDestroyed()) {
+      if (process.platform === 'darwin') petWin.setFocusable(true)
+    }
   })
 
   mainLog.info('[pet] 桌宠面板已打开')
@@ -220,6 +244,14 @@ export function registerPetIpc(handlers: { openMain: () => void; quitApp: () => 
   // 对话状态上报：桌宠动画跟随任一窗口的 AI 活动（生成中/等你回答）
   ipcMain.on('pet:chat-state', (e, p: { status?: string }) => {
     setWindowChatState(e.sender.id, String(p?.status ?? 'idle'))
+  })
+  // 面板窗口控制：隐藏（保留 store 状态），非销毁
+  ipcMain.on('pet:panel-close', () => {
+    if (panelWin && !panelWin.isDestroyed()) {
+      panelWin.hide()
+      mainLog.info('[pet] 面板隐藏（标题栏关闭按钮，store 状态保留）')
+      if (process.platform === 'darwin' && petWin && !petWin.isDestroyed()) petWin.setFocusable(true)
+    }
   })
   // 右键菜单：原生 popup（64px 透明小窗口画 DOM 菜单会被裁剪）
   ipcMain.on('pet:context-menu', () => {

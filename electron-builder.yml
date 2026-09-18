@@ -24,6 +24,7 @@ asar: true
 asarUnpack:
   - node_modules/better-sqlite3/**
   - node_modules/sqlite-vec/**
+  - out/renderer/pet/*.mp4
 # 窗口图标随包分发（BrowserWindow icon 运行时读取）
 extraResources:
   - { from: build/icon.png, to: icon.png }

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
 import { IconClose, IconFolder, IconPlus, IconTrash } from '@/components/common/icons'
@@ -18,10 +18,14 @@ const IDLE_ROW: UrlRowState = { status: 'idle', branches: [], branch: '', error:
 
 /**
  * 创建项目对话框：两种模式 —— 创建空项目 / 从远端仓库克隆（支持多仓库、连接测试、分支选择）。
+ * 自订阅全局 overlay（同 SettingsDialog / Dialogs 模式）：开关状态直接读 store，
+ * 挂载方写 <CreateProjectDialog /> 即可，无需逐窗口手工接线 open/onClose。
  */
-export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function CreateProjectDialog() {
+  const open = useAppStore((s) => s.createProjectOpen)
   const openProjectWithChoice = useAppStore((s) => s.openProjectWithChoice)
   const showAlert = useAppStore((s) => s.showAlert)
+  const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
 
   const [tab, setTab] = useState<Tab>('empty')
 
@@ -36,6 +40,10 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
 
   const [creating, setCreating] = useState(false)
 
+  // 最新仓库地址列表（异步「测试连接」回包时校验该行仍未变，防过期结果写错行）
+  const cloneUrlsRef = useRef(cloneUrls)
+  cloneUrlsRef.current = cloneUrls
+
   if (!open) return null
 
   const reset = () => {
@@ -49,7 +57,7 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
 
   const handleClose = () => {
     reset()
-    onClose()
+    setCreateProjectOpen(false)
   }
 
   const pickEmptyParent = async () => {
@@ -71,7 +79,7 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
   }
 
   const handleCreateEmpty = async () => {
-    if (!emptyName.trim() || !emptyParent.trim()) return
+    if (creating || !emptyName.trim() || !emptyParent.trim()) return
     setCreating(true)
     try {
       const projectPath = await api.createEmptyProject(emptyParent.trim(), emptyName.trim())
@@ -85,6 +93,7 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
   }
 
   const handleClone = async () => {
+    if (creating) return
     const repos = cloneUrls
       .map((u, i) => ({ url: u.trim(), branch: rowStates[i]?.branch || undefined }))
       .filter((r) => r.url)
@@ -130,6 +139,8 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
     setRowStates((prev) => ({ ...prev, [i]: { ...IDLE_ROW, status: 'testing' } }))
     try {
       const res = await api.testRepo(url)
+      // 回包前该行可能已被删除（行重排）或地址已改——过期结果写回会张冠李戴，直接丢弃
+      if (cloneUrlsRef.current[i]?.trim() !== url) return
       if (res.valid) {
         setRowStates((prev) => ({
           ...prev,
@@ -150,11 +161,11 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
   }
 
   return (
-    <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) handleClose() }}>
+    <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !creating) handleClose() }}>
       <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label="创建项目">
         <div className="modal__head">
           <span>创建项目</span>
-          <button className="icon-btn" onClick={handleClose} aria-label="关闭">
+          <button className="icon-btn" onClick={handleClose} disabled={creating} aria-label="关闭">
             <IconClose size={14} />
           </button>
         </div>
@@ -180,33 +191,35 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
 
         {tab === 'empty' ? (
           <>
-            <label className="field">
-              <span className="field__label">父目录</span>
-              <div className="create-project__dir-row">
+            <div className="modal__body">
+              <label className="field">
+                <span className="field__label">父目录</span>
+                <div className="create-project__dir-row">
+                  <input
+                    className="field__input mono"
+                    value={emptyParent}
+                    onChange={(e) => setEmptyParent(e.target.value)}
+                    placeholder="选择一个目录作为父目录"
+                  />
+                  <button className="btn btn--ghost btn--sm" onClick={pickEmptyParent} title="浏览选择">
+                    <IconFolder size={13} />
+                  </button>
+                </div>
+                <span className="field__hint">新项目将创建在此目录下</span>
+              </label>
+              <label className="field">
+                <span className="field__label">项目名称</span>
                 <input
                   className="field__input mono"
-                  value={emptyParent}
-                  onChange={(e) => setEmptyParent(e.target.value)}
-                  placeholder="选择一个目录作为父目录"
+                  value={emptyName}
+                  onChange={(e) => setEmptyName(e.target.value)}
+                  placeholder="my-project"
+                  onKeyDown={(e) => { if (e.key === 'Enter') void handleCreateEmpty() }}
                 />
-                <button className="btn btn--ghost btn--sm" onClick={pickEmptyParent} title="浏览选择">
-                  <IconFolder size={13} />
-                </button>
-              </div>
-              <span className="field__hint">新项目将创建在此目录下</span>
-            </label>
-            <label className="field">
-              <span className="field__label">项目名称</span>
-              <input
-                className="field__input mono"
-                value={emptyName}
-                onChange={(e) => setEmptyName(e.target.value)}
-                placeholder="my-project"
-                onKeyDown={(e) => { if (e.key === 'Enter') void handleCreateEmpty() }}
-              />
-            </label>
+              </label>
+            </div>
             <div className="modal__actions">
-              <button className="btn btn--ghost" onClick={handleClose}>取消</button>
+              <button className="btn btn--ghost" onClick={handleClose} disabled={creating}>取消</button>
               <button
                 className="btn btn--primary"
                 onClick={handleCreateEmpty}
@@ -218,81 +231,83 @@ export function CreateProjectDialog({ open, onClose }: { open: boolean; onClose:
           </>
         ) : (
           <>
-            <label className="field">
-              <span className="field__label">父目录</span>
-              <div className="create-project__dir-row">
-                <input
-                  className="field__input mono"
-                  value={cloneParent}
-                  onChange={(e) => setCloneParent(e.target.value)}
-                  placeholder="选择一个目录存放克隆的仓库"
-                />
-                <button className="btn btn--ghost btn--sm" onClick={pickCloneParent} title="浏览选择">
-                  <IconFolder size={13} />
-                </button>
-              </div>
-              <span className="field__hint">每个仓库克隆为子目录；单仓库直接打开该子目录</span>
-            </label>
+            <div className="modal__body">
+              <label className="field">
+                <span className="field__label">父目录</span>
+                <div className="create-project__dir-row">
+                  <input
+                    className="field__input mono"
+                    value={cloneParent}
+                    onChange={(e) => setCloneParent(e.target.value)}
+                    placeholder="选择一个目录存放克隆的仓库"
+                  />
+                  <button className="btn btn--ghost btn--sm" onClick={pickCloneParent} title="浏览选择">
+                    <IconFolder size={13} />
+                  </button>
+                </div>
+                <span className="field__hint">每个仓库克隆为子目录；单仓库直接打开该子目录</span>
+              </label>
 
-            <div className="field">
-              <span className="field__label">仓库地址</span>
-              <div className="create-project__urls">
-                {cloneUrls.map((url, i) => {
-                  const row = rowStates[i] ?? IDLE_ROW
-                  return (
-                    <div key={i} className="create-project__url-block">
-                      <div className="create-project__url-row">
-                        <input
-                          className="field__input mono"
-                          value={url}
-                          onChange={(e) => updateCloneUrl(i, e.target.value)}
-                          placeholder="https://github.com/user/repo.git"
-                        />
-                        <button
-                          className="btn btn--ghost btn--sm create-project__test-btn"
-                          onClick={() => void testCloneUrl(i)}
-                          disabled={!url.trim() || row.status === 'testing'}
-                          title="验证远端仓库是否有效并列出分支"
-                        >
-                          {row.status === 'testing' ? '测试中…' : '测试连接'}
-                        </button>
-                        {row.status === 'ok' && row.branches.length > 0 && (
-                          <div className="create-project__branch">
-                            <Select
-                              value={row.branch}
-                              onChange={(v) => setRowStates((prev) => ({ ...prev, [i]: { ...prev[i], branch: v } }))}
-                              options={row.branches.map((b) => ({ value: b, label: b }))}
-                              searchable
-                              ariaLabel="选择分支"
-                              placeholder="选择分支"
-                            />
+              <div className="field">
+                <span className="field__label">仓库地址</span>
+                <div className="create-project__urls">
+                  {cloneUrls.map((url, i) => {
+                    const row = rowStates[i] ?? IDLE_ROW
+                    return (
+                      <div key={i} className="create-project__url-block">
+                        <div className="create-project__url-row">
+                          <input
+                            className="field__input mono"
+                            value={url}
+                            onChange={(e) => updateCloneUrl(i, e.target.value)}
+                            placeholder="https://github.com/user/repo.git"
+                          />
+                          <button
+                            className="btn btn--ghost btn--sm create-project__test-btn"
+                            onClick={() => void testCloneUrl(i)}
+                            disabled={!url.trim() || row.status === 'testing'}
+                            title="验证远端仓库是否有效并列出分支"
+                          >
+                            {row.status === 'testing' ? '测试中…' : '测试连接'}
+                          </button>
+                          {row.status === 'ok' && row.branches.length > 0 && (
+                            <div className="create-project__branch">
+                              <Select
+                                value={row.branch}
+                                onChange={(v) => setRowStates((prev) => ({ ...prev, [i]: { ...prev[i], branch: v } }))}
+                                options={row.branches.map((b) => ({ value: b, label: b }))}
+                                searchable
+                                ariaLabel="选择分支"
+                                placeholder="选择分支"
+                              />
+                            </div>
+                          )}
+                          {cloneUrls.length > 1 && (
+                            <button className="icon-btn" onClick={() => removeCloneUrl(i)} aria-label="移除" title="移除此地址">
+                              <IconTrash size={12} />
+                            </button>
+                          )}
+                        </div>
+                        {row.status === 'ok' && (
+                          <div className="notice notice--ok create-project__row-notice">
+                            仓库有效 · {row.branches.length} 个分支{row.branch ? `，将克隆「${row.branch}」` : ''}
                           </div>
                         )}
-                        {cloneUrls.length > 1 && (
-                          <button className="icon-btn" onClick={() => removeCloneUrl(i)} aria-label="移除" title="移除此地址">
-                            <IconTrash size={12} />
-                          </button>
+                        {row.status === 'fail' && (
+                          <div className="notice notice--err create-project__row-notice">{row.error}</div>
                         )}
                       </div>
-                      {row.status === 'ok' && (
-                        <div className="notice notice--ok create-project__row-notice">
-                          仓库有效 · {row.branches.length} 个分支{row.branch ? `，将克隆「${row.branch}」` : ''}
-                        </div>
-                      )}
-                      {row.status === 'fail' && (
-                        <div className="notice notice--err create-project__row-notice">{row.error}</div>
-                      )}
-                    </div>
-                  )
-                })}
+                    )
+                  })}
+                </div>
+                <button className="btn btn--ghost btn--sm" onClick={addCloneUrl} style={{ marginTop: 6 }}>
+                  <IconPlus size={12} /> 添加仓库
+                </button>
               </div>
-              <button className="btn btn--ghost btn--sm" onClick={addCloneUrl} style={{ marginTop: 6 }}>
-                <IconPlus size={12} /> 添加仓库
-              </button>
             </div>
 
             <div className="modal__actions">
-              <button className="btn btn--ghost" onClick={handleClose}>取消</button>
+              <button className="btn btn--ghost" onClick={handleClose} disabled={creating}>取消</button>
               <button
                 className="btn btn--primary"
                 onClick={handleClone}

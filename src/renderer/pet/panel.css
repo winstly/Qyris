@@ -19,10 +19,53 @@ html, body, #root {
   overflow: hidden;
 }
 
+/* ── 标题栏：可拖拽区域 + 缩小/关闭按钮 ── */
+.pet-panel__titlebar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  padding: 0 6px;
+  z-index: 10;
+  background: var(--s1, #131315);
+  -webkit-app-region: drag;
+}
+.pet-panel__titlebar-drag {
+  flex: 1;
+  height: 100%;
+}
+.pet-panel__titlebar-btn {
+  -webkit-app-region: no-drag;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted, #666);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.pet-panel__titlebar-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--fg, #e0e0e0);
+}
+.pet-panel__titlebar-btn--close:hover {
+  background: #e81123;
+  color: #fff;
+}
+
 /* ── 内容区：绝对定位锚定，彻底摆脱 flex 链依赖 ── */
 .pet-panel__content {
   position: absolute;
-  top: 0;
+  top: 32px; /* titlebar 高度 */
   left: 0;
   right: 0;
   bottom: 48px; /* nav 高度 */

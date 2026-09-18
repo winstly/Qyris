@@ -1,5 +1,5 @@
 /** Electron 主进程入口：多窗口管理、IPC 注册、退出清理 */
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, Tray, nativeImage } from 'electron'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { registerWindow, removeWindow, getAllWindows, emitToAllWindows, broadcastToWindows } from '../lib/emitter'
@@ -84,6 +84,7 @@ function cleanup(): void {
   proc.killRunningForCleanup()
   proc.cancelRunOnce()
   void watcher.stopWatching()
+  if (tray && !tray.isDestroyed()) tray.destroy()
   closeDb()
 }
 
@@ -206,9 +207,16 @@ function registerIpc(): void {
   // 配置与密钥
   handle('get_config', () => config.getConfig())
   handle('merge_config', (_e, p) => config.mergeConfig(p.patch))
-  handle('set_secret', (_e, p) => secrets.setSecret(p.key, p.value))
+  // 密钥增删后广播 config:changed：另一窗口（桌宠面板无 SettingsDialog）据此刷新 hasApiKey
+  handle('set_secret', async (_e, p) => {
+    await secrets.setSecret(p.key, p.value)
+    emitToAllWindows('config:changed', ['secrets'])
+  })
   handle('has_secret', (_e, p) => secrets.hasSecret(p.key))
-  handle('delete_secret', (_e, p) => secrets.deleteSecret(p.key))
+  handle('delete_secret', async (_e, p) => {
+    await secrets.deleteSecret(p.key)
+    emitToAllWindows('config:changed', ['secrets'])
+  })
 
   // Skills 目录
   handle('scan_skills', (_e, p) => skills.scanSkillsDirs(p.dirs))
@@ -266,11 +274,18 @@ function registerIpc(): void {
   handle('pick_parent_dir', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return null
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择父目录',
-      properties: ['openDirectory'],
-    })
-    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    // 同 pick_directory：alwaysOnTop 窗口先取消置顶再弹原生对话框
+    const wasAlwaysOnTop = win.isAlwaysOnTop()
+    if (wasAlwaysOnTop) win.setAlwaysOnTop(false)
+    try {
+      const result = await dialog.showOpenDialog(win, {
+        title: '选择父目录',
+        properties: ['openDirectory'],
+      })
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    } finally {
+      if (wasAlwaysOnTop) win.setAlwaysOnTop(true)
+    }
   })
 
   // AI（windowId 绑定到发起请求的窗口，用于事件定向路由；opts 透传 CLI 记忆反哺通道——
@@ -292,15 +307,40 @@ function registerIpc(): void {
   handle('ai_test_connection', (_e, p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode))
   handle('ai_cancel', (_e, p) => ai.aiCancel(p.requestId))
 
+  // 跨窗口项目同步：发起窗口 send → 主进程广播给其余窗口
+  ipcMain.on('project:changed', (e, p: { projectPath: string | null; openProjects: string[]; closedProject?: string | null }) => {
+    broadcastToWindows('project:changed', p, e.sender.id)
+  })
+
+  // 桌宠视频路径解析：打包后用 file:// 指向 asarUnpack 解包的 MP4，dev 用相对路径
+  handle('pet:resolve-video', (_e, filename: string) => {
+    if (app.isPackaged) {
+      // asarUnpack 解包到 app.asar.unpacked/out/renderer/pet/
+      return `file://${path.join(process.resourcesPath, 'app.asar.unpacked', 'out', 'renderer', 'pet', filename)}`
+    }
+    // dev 模式：Vite dev server 的 public 目录
+    const rendererUrl = process.env['ELECTRON_RENDERER_URL']
+    if (rendererUrl) return `${rendererUrl}/pet/${filename}`
+    return filename
+  })
+
   // 窗口（对话框绑定到调用方窗口）
   handle('pick_directory', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return null
-    const result = await dialog.showOpenDialog(win, {
-      title: '选择项目目录',
-      properties: ['openDirectory'],
-    })
-    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    // alwaysOnTop 窗口（桌宠面板）会盖住原生对话框 → 用户看到"点了没反应"。
+    // 弹窗期间临时取消置顶，结束后恢复。
+    const wasAlwaysOnTop = win.isAlwaysOnTop()
+    if (wasAlwaysOnTop) win.setAlwaysOnTop(false)
+    try {
+      const result = await dialog.showOpenDialog(win, {
+        title: '选择项目目录',
+        properties: ['openDirectory'],
+      })
+      return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0]
+    } finally {
+      if (wasAlwaysOnTop) win.setAlwaysOnTop(true)
+    }
   })
   handle('set_window_title', (e, p) => {
     const win = BrowserWindow.fromWebContents(e.sender)
@@ -358,8 +398,9 @@ function registerIpc(): void {
   // 对话镜像 relay：发起窗口的用户消息/收尾/清空 → 其余全部窗口（桌宠面板 ↔ 主窗口同一场对话）
   ipcMain.on('chat:mirror-relay', (e, p) => broadcastToWindows('chat:mirror', p, e.sender.id))
 
-  handle('start_element_pick', () => {
-    void inspect.startElementPick(preview.getPreviewWebContents())
+  handle('start_element_pick', (e) => {
+    // 定向回传发起窗口：拾取只在主窗口预览发起，广播会让面板收到别的窗口选中的元素
+    void inspect.startElementPick(preview.getPreviewWebContents(), e.sender.id)
   })
 }
 
@@ -374,6 +415,8 @@ function nextWindowOffset(): { x: number; y: number } {
 
 /** 主窗口引用：桌宠面板「打开主窗口」与关闭拦截的 hide 都需要定向操作 */
 let mainWin: BrowserWindow | null = null
+/** 系统托盘（模块级持有防 GC） */
+let tray: Tray | null = null
 /** app.quit() 进行中：放行所有窗口 close，避免关闭拦截把退出也拦下来 */
 let quitting = false
 /** 关闭询问弹窗挂起中：防重复触发；渲染层超时未响应时兜底 */
@@ -530,6 +573,30 @@ app.whenReady().then(async () => {
   createWindow()
   // 桌宠：主窗口就绪后创建透明置顶小窗口
   pet.createPetWindow()
+  // 系统托盘：主窗口隐藏后可通过托盘找回；右键菜单提供全局操作入口
+  const trayIconPath = app.isPackaged
+    ? path.join(process.resourcesPath, 'icon.png')
+    : path.join(app.getAppPath(), 'build', 'icon.png')
+  try {
+    let trayIcon = nativeImage.createFromPath(trayIconPath)
+    // macOS 菜单栏图标缩放到 18px（不设 Template——彩色图标设 Template 会变全白不可见）
+    if (process.platform === 'darwin') {
+      trayIcon = trayIcon.resize({ width: 18, height: 18 })
+    }
+    tray = new Tray(trayIcon)
+    tray.setToolTip('轻驭')
+    const buildTrayMenu = (): Menu => Menu.buildFromTemplate([
+      { label: '打开工作台', click: () => showMainWindow() },
+      { type: 'separator' },
+      { label: '退出应用', click: () => { quitting = true; app.quit() } },
+    ])
+    tray.setContextMenu(buildTrayMenu())
+    // 左键单击打开主窗口（Windows/Linux）
+    tray.on('click', () => showMainWindow())
+    mainLog.info('[boot] 系统托盘已创建')
+  } catch (e) {
+    mainLog.warn(`[boot] 系统托盘创建失败：${String(e)}`)
+  }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
   })

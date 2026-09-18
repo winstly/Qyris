@@ -8,11 +8,14 @@
  *   - result：权威收口
  * 子 agent 派发工具为 Agent（旧版 Task），其事件带 parent_tool_use_id 指回派发卡的 tool_use id。
  * 会话为无状态重放：每轮把轻驭历史序列化进 prompt（编辑重发/分叉天然正确）。
- * Windows：claude 通常是 .cmd，直连 spawn 会被 Node ≥18 的 EINVAL 拦截 —— 与 proc.ts 同惯性走 cmd.exe /C。
+ * Windows：claude 通常是 .cmd，直连 spawn 会被 Node ≥18 的 EINVAL 拦截 —— 统一经
+ * spawnCliProcess 走 shell:true（cmd.exe /d /s /c "<整串>"，/s 只剥最外层引号，
+ * 带空格的自定义路径才不会被 cmd 的引号剥离规则撕碎）。
  */
 import { spawn, type ChildProcess } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { Readable } from 'node:stream'
+import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { broadcastToWindows, emitToRenderer, emitToWindow, registerRequestWindow, unregisterRequestWindow } from './emitter'
 import { getConfig, type AppConfig } from './config'
@@ -20,6 +23,7 @@ import { readSkillFromDirs, scanSkillsDirs } from './skills'
 import { cancelRunOnce, detectCommand, registerOnceProc } from './proc'
 import { buildChildEnv } from './proc-env'
 import { errorMessage } from './util'
+import { mainLog } from './log-file'
 import type { AiCompletion, AiToolCall } from './ai'
 
 type Json = Record<string, any>
@@ -37,6 +41,17 @@ const NOT_INSTALLED_MSG = '未找到 claude 命令：请先安装 Claude Code CL
  *  运行时从 config.aiCliCommand 读取，缺省 'claude'；测试可注入覆盖。 */
 const DEFAULT_CLI_COMMAND = 'claude'
 let cliCommandOverride: string | null = null
+
+// ---------- CLI session 管理（Plan C：有状态优先 + 压缩兜底） ----------
+
+/** projectRoot → CLI session_id（init 事件返回；不落盘，应用重启重建） */
+const cliSessions = new Map<string, string>()
+
+/** 清除某项目的 CLI session（用户清除对话 / 会话换代 / resume 失败时调用） */
+export function clearCliSession(projectRoot: string): void {
+  cliSessions.delete(projectRoot)
+  mainLog.info(`[ai-cli] session 已清除：${projectRoot}`)
+}
 
 /** 当前生效的 CLI 命令（测试注入 > 配置 > 默认值） */
 export async function resolveCliCommand(): Promise<string> {
@@ -60,6 +75,65 @@ export function setCliCommandForTest(cmd: string | null): void {
 /** 请求级取消：CLI 子进程登记在 onceProcs（token=requestId），复用统一取消链 */
 export function cliCancel(requestId: string): void {
   cancelRunOnce(requestId)
+}
+
+// ---------------- 子进程 spawn（跨平台统一通道） ----------------
+
+/** 引号感知拆分 CLI 命令串：`"D:\My Tools\claude.cmd" --foo` → ['D:\\My Tools\\claude.cmd', '--foo']。
+ *  自定义命令允许「可执行文件 + 前置参数」形态（如 `npx -y @anthropic-ai/claude-code`） */
+export function splitCliCommand(command: string): string[] {
+  const out: string[] = []
+  for (const m of command.matchAll(/"([^"]*)"|(\S+)/g)) {
+    const t = m[1] ?? m[2] ?? ''
+    if (t) out.push(t)
+  }
+  return out
+}
+
+/** Windows 单 token 引号包装：含空白/引号才包，内层双引号翻倍（argv 通行规则） */
+function qWin(token: string): string {
+  return /[\s"]/.test(token) ? `"${token.replace(/"/g, '""')}"` : token
+}
+
+/** 统一 CLI 子进程 spawn。修复两类已复现缺陷：
+ *  ① cwd 不存在 → spawn cmd.exe ENOENT（error 事件，用户看到「启动失败 spawn … ENOENT」）——
+ *     cwd 缺失时回退 homedir 并落日志；
+ *  ② 带空格的自定义路径经 cmd /C 逐 token 传参，被 cmd /C 的首尾引号剥离规则撕碎
+ *     （报「'D:\Program' 不是内部或外部命令」）——Windows 改走 shell:true 单串传参
+ *     （cmd.exe /d /s /c "<整串>"，/s 只剥最外层引号，内层引号原样抵达子进程），
+ *     引号由 qWin 自管，与 Node 自身 shell:true 机制同源。
+ *  Unix 直启 argv（execve 语义无引号问题），detached 保持旧惯性。
+ *  已知边界：--system-prompt 等含换行的超长参数经 cmd 单行命令线传递受限（蒸馏路径现状如此，未回归恶化）。 */
+export function spawnCliProcess(
+  cliCommand: string,
+  args: string[],
+  opts?: { cwd?: string | null; env?: NodeJS.ProcessEnv; stdio?: ('pipe' | 'ignore')[] },
+): ChildProcess {
+  const isWin = process.platform === 'win32'
+  let cwd = opts?.cwd ?? undefined
+  if (cwd && !existsSync(cwd)) {
+    mainLog.warn(`[ai-cli] cwd 不存在，回退 homedir：${cwd}`)
+    cwd = homedir()
+  }
+  const stdio = opts?.stdio ?? ['pipe', 'pipe', 'pipe']
+  if (isWin) {
+    const cmdLine = [...splitCliCommand(cliCommand), ...args].map(qWin).join(' ')
+    return spawn(cmdLine, {
+      cwd,
+      stdio,
+      shell: true,
+      windowsHide: true,
+      env: opts?.env,
+    })
+  }
+  const [exe, ...prefix] = splitCliCommand(cliCommand)
+  return spawn(exe, [...prefix, ...args], {
+    cwd,
+    stdio,
+    windowsHide: true,
+    detached: true,
+    env: opts?.env,
+  })
 }
 
 // ---------------- prompt 组装（无状态重放核心） ----------------
@@ -151,6 +225,18 @@ export function serializeConversation(messages: unknown, sessionSummary?: string
     joined = `${joined.slice(0, half)}\n（…更早对话已省略…）\n${joined.slice(-half)}`
   }
   return head ? `${head}\n\n${joined}` : joined
+}
+
+/** Resume 路径：只提取最后一条 user 消息作为 stdin（CLI 内部维护完整历史） */
+export function extractLatestUserMessage(messages: unknown): string {
+  const msgs = (Array.isArray(messages) ? messages : []) as Json[]
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i]
+    if (m?.role === 'user' && typeof m.content === 'string' && m.content.trim()) {
+      return m.content.trim()
+    }
+  }
+  return ''
 }
 
 /** @internal 下一轮 Skill 请求指令（尾行协议；id 允许中文目录名） */
@@ -282,10 +368,13 @@ export function buildCliArgs(
     systemPrompt?: string; appendSystemPrompt?: string;
     outputFormat?: string; maxTurns?: number; jsonSchema?: string;
     bare?: boolean;
+    /** --resume 目标 session_id（有状态续接模式） */
+    sessionId?: string;
   },
 ): string[] {
   const format = opts?.outputFormat ?? 'stream-json'
   const args = ['-p', '--output-format', format]
+  // session_id 保留接口（未来 --resume 预留），当前走 replay 保证稳定性
   if (format === 'stream-json') {
     args.push('--verbose', '--include-partial-messages')
   }
@@ -304,13 +393,35 @@ export function buildCliArgs(
 export async function claudeCliChatStream(
   requestId: string, model: string, messages: unknown,
   projectRoot: string | null, permissionMode: 'auto' | 'readonly',
+  cfgIn?: AppConfig | null,
+  windowId: number | null = null,
+  opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string; appendSystemPrompt?: string },
+): Promise<AiCompletion> {
+  try {
+    return await claudeCliChatStreamAttempt(requestId, model, messages, projectRoot, permissionMode, cfgIn, windowId, opts)
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    // Resume 失败检测：session 过期/不存在 → 清除 session 并以重放模式重试一次
+    if (projectRoot && cliSessions.has(projectRoot) && /session|resume/i.test(msg)) {
+      mainLog.warn(`[ai-cli] resume 失败，降级为 replay 模式：${msg}`)
+      clearCliSession(projectRoot)
+      return claudeCliChatStreamAttempt(requestId, model, messages, projectRoot, permissionMode, cfgIn, windowId, opts)
+    }
+    throw e
+  }
+}
+
+/** @internal 单次 CLI 调用（外层 claudeCliChatStream 负责 resume 失败重试） */
+async function claudeCliChatStreamAttempt(
+  requestId: string, model: string, messages: unknown,
+  projectRoot: string | null, permissionMode: 'auto' | 'readonly',
   /** 调用方透传的 config */
   cfgIn?: AppConfig | null,
   /** 发起请求的窗口 ID（多窗口事件定向路由） */
   windowId: number | null = null,
-  /** P0 记忆反哺通道：sessionSummary/memoryBlock 前置进序列化正文（API adapter 忽略，已在 system）；
+  /** P0 记忆反哺通道：sessionSummary/memoryBlock/contextSummary 前置进序列化正文或 append-system-prompt；
    *  systemPrompt 覆盖 CLI 系统提示；outputFormat 覆盖输出格式（默认 stream-json）。 */
-  opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string },
+  opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string; appendSystemPrompt?: string },
 ): Promise<AiCompletion> {
   if (windowId != null) registerRequestWindow(requestId, windowId)
   // 镜像管道：发起窗口定向照收 + 其余窗口同份广播（payload 统一附 projectRoot 供镜像窗口认领）。
@@ -327,8 +438,11 @@ export async function claudeCliChatStream(
   }
   const cliCommand = await resolveCliCommand()
   cachedCliCommand = cliCommand
-  if (cliCommand === DEFAULT_CLI_COMMAND && (await detectCommand(cliCommand)) === false) {
-    throw new Error(NOT_INSTALLED_MSG)
+  // 可用性预检：自定义路径写错时给出可读提示（测试注入路径跳过——where.exe 搜不到临时目录）
+  // detectCommand 返回 null（超时/探测异常）视为不可用，不让裸的 spawn ENOENT 落到用户面前
+  if (!cliCommandOverride && (await detectCommand(cliCommand)) !== true) {
+    if (cliCommand === DEFAULT_CLI_COMMAND) throw new Error(NOT_INSTALLED_MSG)
+    throw new Error(`未找到 CLI 命令「${cliCommand}」：请检查设置中的 Claude CLI 自定义命令（支持含空格的引号路径与附带参数）`)
   }
 
   const cfg = cfgIn ?? await getConfig().catch(() => null)
@@ -346,24 +460,52 @@ export async function claudeCliChatStream(
     resolveSkillBlock(skillDirs, referencedIds),
     buildSkillIndex(skillDirs, referencedIds),
   ])
-  // 系统提示走 stdin（adapter 指令 + <conversation>），不用 --append-system-prompt / --bare。
-  // mem agent 用 --system-prompt 完全替换（蒸馏是纯文本→JSON 单轮任务）。
-  const prompt = opts?.systemPrompt
-    ? `<conversation>\n${serializeConversation(messages, opts?.sessionSummary ?? null, opts?.memoryBlock ?? null)}\n</conversation>`
-    : `${buildCliSystemPrompt(projectRoot, skillBlock, skillIndex, skillDirs)}\n\n<conversation>\n${serializeConversation(messages, opts?.sessionSummary ?? null, opts?.memoryBlock ?? null)}\n</conversation>`
-  const args = buildCliArgs(model, permissionMode, opts?.systemPrompt
-    ? { systemPrompt: opts.systemPrompt, outputFormat: opts.outputFormat }
-    : undefined)
+  // ---------- 双路径：resume（有状态增量）vs replay（压缩降级） ----------
+  // systemPrompt（mem agent 蒸馏）始终走重放——单轮任务无需 session 续接
+  const sessionId = projectRoot ? cliSessions.get(projectRoot) : undefined
+  const isResume = !!sessionId && !opts?.systemPrompt
+
+  let prompt: string
+  let args: string[]
+
+  if (isResume) {
+    // Resume 路径：CLI 内部维护完整对话历史，stdin 只发最新 user 消息。
+    // 记忆/摘要/技能通过 --append-system-prompt 注入（每轮可更新）。
+    const latestMsg = extractLatestUserMessage(messages)
+    const contextParts: string[] = []
+    // 系统提示（技能指令等）——与 replay 路径的 buildCliSystemPrompt 对齐
+    const sysPrompt = buildCliSystemPrompt(projectRoot, skillBlock, skillIndex, skillDirs)
+    if (sysPrompt) contextParts.push(sysPrompt)
+    if (opts?.sessionSummary) contextParts.push(`【此前会话进展】\n${opts.sessionSummary}`)
+    if (opts?.memoryBlock) contextParts.push(opts.memoryBlock)
+    if (opts?.contextSummary) contextParts.push(`【早期对话摘要（原始历史已压缩）】\n${opts.contextSummary}`)
+    const appendPrompt = contextParts.join('\n\n')
+    prompt = latestMsg
+    args = buildCliArgs(model, permissionMode, {
+      sessionId,
+      outputFormat: opts?.outputFormat,
+      ...(appendPrompt ? { appendSystemPrompt: appendPrompt } : {}),
+    })
+    mainLog.info(`[ai-cli] resume 模式：session=${sessionId}, stdin=${latestMsg.length}字, append=${appendPrompt.length}字`)
+  } else {
+    // 重放路径（降级兜底）：全量序列化历史，CLI 每次从零开始
+    const summary = opts?.sessionSummary ?? null
+    const memory = opts?.memoryBlock ?? null
+    prompt = opts?.systemPrompt
+      ? `<conversation>\n${serializeConversation(messages, summary, memory)}\n</conversation>`
+      : `${buildCliSystemPrompt(projectRoot, skillBlock, skillIndex, skillDirs)}\n\n<conversation>\n${serializeConversation(messages, summary, memory)}\n</conversation>`
+    args = buildCliArgs(model, permissionMode, opts?.systemPrompt
+      ? { systemPrompt: opts.systemPrompt, outputFormat: opts.outputFormat }
+      : undefined)
+    mainLog.info(`[ai-cli] replay 模式：prompt=${prompt.length}字`)
+  }
   const isWin = process.platform === 'win32'
 
   return new Promise<AiCompletion>((resolve, reject) => {
     let child: ChildProcess
     try {
-      child = spawn(isWin ? 'cmd.exe' : cliCommand, isWin ? ['/C', cliCommand, ...args] : args, {
+      child = spawnCliProcess(cliCommand, args, {
         cwd: projectRoot ?? homedir(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-        detached: !isWin,
         env: { ...buildChildEnv(), NO_COLOR: '1', FORCE_COLOR: '0' },
       })
     } catch (e) {
@@ -412,8 +554,14 @@ export async function claudeCliChatStream(
       const type = json.type as string | undefined
 
       if (type === 'system' && json.subtype === 'init') {
-        // 无状态重放：session_id 仅留痕日志，不做 --resume
-        console.log(`[ai-cli] session ${String(json.session_id ?? '')}`)
+        // 有状态续接：捕获 session_id 供后续 --resume 使用
+        const sid = typeof json.session_id === 'string' ? json.session_id : ''
+        if (sid && projectRoot) {
+          cliSessions.set(projectRoot, sid)
+          mainLog.info(`[ai-cli] session 注册：${sid} (project=${projectRoot})`)
+        } else {
+          console.log(`[ai-cli] session ${sid}`)
+        }
         return
       }
 
@@ -666,9 +814,17 @@ function translateCliError(stderrTail: string): string | null {
 
 // ---------------- 连接测试（二进制 + 版本 + 登录态） ----------------
 
-/** 异步执行 CLI 探测命令 */
+/** 异步执行 CLI 探测命令。
+ *  自定义命令前置 detectCommand 预检——路径写错时给出可读提示，不让裸的 spawn ENOENT 落到用户面前。 */
 async function runCli(args: string[], timeoutMs = 10_000): Promise<{ status: number | null; stdout: string; stderr: string; error: string | null }> {
   const cliCmd = cachedCliCommand
+  const avail = await detectCommand(cliCmd)
+  if (avail === false) {
+    const msg = cliCmd === DEFAULT_CLI_COMMAND
+      ? NOT_INSTALLED_MSG
+      : `未找到 CLI 命令「${cliCmd}」：请检查设置中的 Claude CLI 自定义命令`
+    return { status: null, stdout: '', stderr: '', error: msg }
+  }
   return new Promise((resolve) => {
     const isWin = process.platform === 'win32'
     let child: ChildProcess
@@ -708,8 +864,12 @@ async function runCli(args: string[], timeoutMs = 10_000): Promise<{ status: num
 export async function testCliConnection(): Promise<string> {
   const cliCommand = await resolveCliCommand()
   cachedCliCommand = cliCommand
-  if (cliCommand === DEFAULT_CLI_COMMAND && (await detectCommand(cliCommand)) === false) {
-    throw new Error(NOT_INSTALLED_MSG)
+  // 可用性预检对默认/自定义命令一视同仁：自定义路径写错此前直接落进 spawn，
+  // 报出来的是裸的 spawn ENOENT / cmd 引号错误，用户没法读
+  // detectCommand 返回 null（超时/探测异常）视为不可用，不让裸的 spawn ENOENT 落到用户面前
+  if ((await detectCommand(cliCommand)) !== true) {
+    if (cliCommand === DEFAULT_CLI_COMMAND) throw new Error(NOT_INSTALLED_MSG)
+    throw new Error(`未找到 CLI 命令「${cliCommand}」：请检查设置中的 Claude CLI 自定义命令（支持含空格的引号路径与附带参数）`)
   }
   const version = await runCli(['--version'])
   if (version.error) throw new Error(`claude 命令执行失败：${version.error}`)

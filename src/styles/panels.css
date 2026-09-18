@@ -686,6 +686,7 @@
 }
 .create-project__url-row {
   display: flex;
+  flex-wrap: wrap; /* 窄窗口（桌宠面板 400px）下分支选择器换行而不是溢出被裁 */
   gap: 6px;
   align-items: center;
 }
@@ -787,6 +788,39 @@
 .files-diff__line--del { background: color-mix(in oklab, var(--danger), transparent 88%); color: var(--danger); }
 .files-diff__line--hunk { color: var(--muted); background: color-mix(in oklab, var(--s2), var(--deepen) 14%); padding: 2px var(--space-4); }
 .files-diff__line--meta { color: var(--muted); }
+
+/* ── 分栏 diff（左旧右新，逐行对齐） ── */
+.files-diff__split { display: flex; flex-direction: column; min-width: fit-content; }
+.files-diff__row { display: flex; }
+.files-diff__row > .files-diff__cell { flex: 1 1 50%; min-width: 0; }
+.files-diff__row--hunk > .files-diff__cell { flex: 1 1 100%; }
+.files-diff__cell {
+  display: flex;
+  padding: 0 var(--space-2) 0 0;
+  white-space: pre;
+  color: var(--fg-2);
+  border-right: 1px solid var(--border);
+}
+.files-diff__row > .files-diff__cell:last-child { border-right: none; }
+.files-diff__cell--blank { background: color-mix(in oklab, var(--s2), transparent 60%); }
+.files-diff__cell--add { background: color-mix(in oklab, var(--success), transparent 88%); color: var(--success); }
+.files-diff__cell--del { background: color-mix(in oklab, var(--danger), transparent 88%); color: var(--danger); }
+.files-diff__cell--hunk {
+  color: var(--muted);
+  background: color-mix(in oklab, var(--s2), var(--deepen) 14%);
+  padding: 2px var(--space-4);
+}
+.files-diff__num {
+  flex-shrink: 0;
+  width: 42px;
+  padding: 0 var(--space-2);
+  text-align: right;
+  color: var(--muted);
+  user-select: none;
+  font-size: 11px;
+  line-height: inherit;
+}
+.files-diff__cell-text { overflow: hidden; text-overflow: ellipsis; }
 .files-diff__empty {
   padding: var(--space-6);
   text-align: center;

@@ -103,7 +103,7 @@ declare global {
     pickParentDir: () => Promise<string | null>
 
     // AI
-    aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string }) => Promise<AiCompletion>
+    aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string }) => Promise<AiCompletion>
     aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) => Promise<string>
     aiCancel: (requestId: string) => Promise<void>
 
@@ -157,7 +157,13 @@ declare global {
     petContextMenu: () => void
     /** 本窗口当前对话状态上报（桌宠动画聚合） */
     setPetChatState: (status: string) => void
-    onPetState: DesktopEventSub<'idle' | 'working' | 'waiting'>
+    /** 面板窗口控制（无原生标题栏，由渲染层自绘按钮触发） */
+    closePanel: () => void
+    /** 跨窗口项目同步：通知其余窗口 projectPath / openProjects 变化 */
+    notifyProjectChanged: (projectPath: string | null, openProjects: string[], closedProject?: string | null) => void
+    /** 桌宠视频路径解析：dev 走 Vite dev server，打包后走 file:// + asarUnpack */
+    resolveVideoUrl: (filename: string) => Promise<string>
+    onPetState: DesktopEventSub<'idle' | 'working' | 'waiting' | 'error'>
 
     // 对话镜像（桌宠面板 ↔ 主窗口同一场对话）
     /** 发起窗口推送稳定点（user-message/finalized/cleared），主进程转发给其余窗口 */
@@ -186,6 +192,8 @@ declare global {
     onFsChanged: DesktopEventSub<{ paths: string[]; projectRoot?: string }>
     /** 盘上配置变更广播（载荷 = 实际变化的顶层键，多窗口设置同步用） */
     onConfigChanged: DesktopEventSub<string[]>
+    /** 跨窗口项目切换广播（另一窗口 open/close project 后触发） */
+    onProjectChanged: DesktopEventSub<{ projectPath: string | null; openProjects: string[]; closedProject?: string | null }>
     onElementPicked: DesktopEventSub<{ selector: string; tag: string; id: string; text: string }>
     onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>
   }

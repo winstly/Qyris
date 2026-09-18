@@ -11,8 +11,6 @@ export function Workspace() {
   const activeTab = useAppStore((s) => s.activeTab)
   const setTab = useAppStore((s) => s.setTab)
   const projectPath = useAppStore((s) => s.projectPath)
-  const createProjectOpen = useAppStore((s) => s.createProjectOpen)
-  const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
 
   return (
     <div className="workspace">
@@ -51,7 +49,7 @@ export function Workspace() {
         </button>
       </div>
 
-      <CreateProjectDialog open={createProjectOpen} onClose={() => setCreateProjectOpen(false)} />
+      <CreateProjectDialog />
 
       <div className="workspace__panes" key={projectPath ?? 'none'}>
         <div className={`pane ${activeTab === 'files' ? 'pane--active' : ''}`}>

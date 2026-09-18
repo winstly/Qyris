@@ -34,7 +34,7 @@ interface FileSnapshot {
 
 const fileSnapshots = new Map<string, FileSnapshot>()
 
-function checkpointFileStore(projectPath: string): void {
+export function checkpointFileStore(projectPath: string): void {
   const fs = useFileStore.getState()
   fileSnapshots.set(projectPath, {
     childrenMap: fs.childrenMap,
@@ -149,6 +149,10 @@ interface AppState {
   openProject: (path: string) => Promise<void>
   removeRecentProject: (path: string) => void
   setSkillsDirs: (dirs: string[]) => void
+  /** 跨窗口同步：轻量 setter，只更新本地 store */
+  setProjectPath: (path: string | null) => void
+  /** 跨窗口同步：轻量 setter，只更新本地 store */
+  setOpenProjects: (projects: string[]) => void
   loadSkills: () => Promise<void>
   /** 加载当前项目的 Skill（扫描 projectSkillsDirs） */
   loadProjectSkills: () => Promise<void>
@@ -270,6 +274,7 @@ export const useAppStore = create<AppState>()(
         try {
           await get().refreshRemoteConfig()
           const cfg = await api.getConfig()
+          console.info(`[boot] lastProjectPath=${cfg.lastProjectPath}, recentCount=${cfg.recentProjects?.length ?? 0}`)
           // 扫描 skills 目录（异步，不阻塞启动）
           if ((cfg.skillsDirs ?? []).length > 0) {
             void get().loadSkills()
@@ -282,7 +287,23 @@ export const useAppStore = create<AppState>()(
           if (cfg.lastProjectPath) {
             try {
               await get().openProject(cfg.lastProjectPath)
-            } catch { /* 目录已失效，静默跳过 */ }
+              console.info(`[boot] openProject 成功：${cfg.lastProjectPath}`)
+            } catch (e) {
+              console.warn(`[boot] openProject 失败（lastProjectPath）：${String(e)}`)
+            }
+          }
+          // lastProjectPath 缺失或失效时，兜底选最近项目（确保 chat store current 不为 null）
+          if (!useChatStore.getState().current && (cfg.recentProjects?.length ?? 0) > 0) {
+            console.info(`[boot] lastProjectPath 无效，尝试 recentProjects 兜底`)
+            for (const rp of cfg.recentProjects!) {
+              try {
+                await get().openProject(rp.path)
+                console.info(`[boot] 兜底成功：${rp.path}`)
+                break
+              } catch (e) {
+                console.warn(`[boot] 兜底失败：${rp.path}：${String(e)}`)
+              }
+            }
           }
         } finally {
           await get().refreshHasApiKey()
@@ -321,12 +342,8 @@ export const useAppStore = create<AppState>()(
         useChatStore.getState().ensureProject(projectPath)
         useAgentStore.getState().ensureProject(projectPath)
         useAgentStore.getState().setCurrent(projectPath)
-        const scm = get().startupCommandsMap[projectPath] ?? []
-        const defaultSkillsDir = projectPath + '/.qyris/skills'
-        const savedExtraDirs = get().projectSkillsDirsMap[projectPath] ?? []
-        const allProjectDirs = [defaultSkillsDir, ...savedExtraDirs.filter((d) => d !== defaultSkillsDir)]
-        set({ projectPath: projectPath, projectName: basename(projectPath), startupCommands: scm, projectSkillsDirs: allProjectDirs, projectSkillMetas: [] })
-        useProjectStore.getState().setProjectPath(projectPath)
+        // projectPath + 项目级镜像（startupCommands / projectSkillsDirs / projectSkillMetas）统一走 setProjectPath
+        get().setProjectPath(projectPath)
         useStartupStore.getState().setCurrentProject(projectPath)
 
         // 文件态：有快照则恢复，否则全新初始化
@@ -353,6 +370,7 @@ export const useAppStore = create<AppState>()(
         if (chatNeedsRestore) {
           try {
             const resp = await api.messagesRecent(projectPath)
+            console.info(`[boot] messagesRecent: sessionId=${resp.sessionId}, msgs=${resp.messages.length}, hasMore=${resp.hasMore}`)
             if (resp.sessionId === null) {
               useChatStore.getState().clear()
             } else {
@@ -362,7 +380,11 @@ export const useAppStore = create<AppState>()(
                 oldestSeq: resp.oldestSeq,
               })
             }
-          } catch { /* 会话加载失败忽略 */ }
+          } catch (e) {
+            console.warn(`[boot] messagesRecent 失败：${String(e)}`)
+          }
+        } else {
+          console.info(`[boot] chat 已驻留，跳过恢复（current=${useChatStore.getState().current}）`)
         }
 
         // 更新历史工程列表：插入头部、去重、截断 20 条
@@ -383,6 +405,8 @@ export const useAppStore = create<AppState>()(
 
         // 窗口标题显示当前项目名
         api.setWindowTitle(`${basename(projectPath)} — 轻驭`).catch(() => {})
+        // 跨窗口广播（接收端用轻量 setter，不调 openProject，不重入）
+        window.desktopAPI?.notifyProjectChanged?.(projectPath, get().openProjects)
       },
 
       removeRecentProject: (projectPath) => {
@@ -433,11 +457,14 @@ export const useAppStore = create<AppState>()(
           } else {
             useFileStore.getState().reset()
             useAgentStore.getState().clear()
-            set({ projectPath: null, projectName: '', startupCommands: [], projectSkillsDirs: [], projectSkillMetas: [] })
-            useProjectStore.getState().setProjectPath(null)
+            get().setProjectPath(null)
             useStartupStore.getState().setCurrentProject(null)
             api.setWindowTitle('轻驭').catch(() => {})
+            window.desktopAPI?.notifyProjectChanged?.(null, [], projectPath)
           }
+        } else {
+          // 关闭了非当前项目，广播 openProjects 变化
+          window.desktopAPI?.notifyProjectChanged?.(get().projectPath, get().openProjects, projectPath)
         }
       },
 
@@ -449,6 +476,19 @@ export const useAppStore = create<AppState>()(
         void api.mergeConfig({ skillsDirs: clean }).catch(() => {})
         void get().loadSkills()
       },
+
+      setProjectPath: (path) => {
+        // 项目级镜像一并刷新：启动命令 + 项目级 Skill 目录 + 清空旧 Skill 元数据。
+        // openProject 与跨窗口静默切换（project:changed 接收端）都走这里——否则静默切换后
+        // loadProjectSkills 扫的是上一个工程的 skills 目录、startupCommands 也是旧工程的。
+        const scm = path ? (get().startupCommandsMap[path] ?? []) : []
+        const defaultSkillsDir = path ? path + '/.qyris/skills' : ''
+        const savedExtraDirs = path ? (get().projectSkillsDirsMap[path] ?? []) : []
+        const allProjectDirs = path ? [defaultSkillsDir, ...savedExtraDirs.filter((d) => d !== defaultSkillsDir)] : []
+        set({ projectPath: path, projectName: path ? basename(path) : '', startupCommands: scm, projectSkillsDirs: allProjectDirs, projectSkillMetas: [] })
+        useProjectStore.getState().setProjectPath(path)
+      },
+      setOpenProjects: (projects) => { set({ openProjects: projects }) },
 
       setStartupCommands: async (cmds, projectPath) => {
         const p = projectPath ?? get().projectPath

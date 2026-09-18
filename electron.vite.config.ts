@@ -22,6 +22,8 @@ export default defineConfig({
   },
   renderer: {
     plugins: [react()],
+    // electron-vite renderer root 默认 src/renderer/，publicDir 需指向项目根 public/
+    publicDir: path.resolve(__dirname, 'public'),
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),

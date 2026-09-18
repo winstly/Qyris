@@ -108,7 +108,7 @@ export const api = {
   aiChatStream: (
     requestId: string, provider: string, baseUrl: string, model: string,
     messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null,
-    opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string },
+    opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string },
   ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot, opts)),
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
     wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode)),
@@ -268,6 +268,11 @@ export function onFsChanged(cb: (payload: { paths: string[]; projectRoot?: strin
 export function onConfigChanged(cb: (affectedKeys: string[]) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onConfigChanged(cb)
+}
+
+export function onProjectChanged(cb: (p: { projectPath: string | null; openProjects: string[]; closedProject?: string | null }) => void): () => void {
+  if (!isDesktop || typeof window.desktopAPI?.onProjectChanged !== 'function') return () => {}
+  return window.desktopAPI.onProjectChanged(cb)
 }
 
 export function onPetState(cb: (state: string) => void): () => void {

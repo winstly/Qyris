@@ -49,6 +49,8 @@ export function SettingsDialog() {
   const [compressThreshold, setCompressThreshold] = useState('')
   // 系统设置：主窗口关闭行为（ask=每次询问，落盘值为 minimize/quit）
   const [closeAction, setCloseAction] = useState<'ask' | 'minimize' | 'quit'>('ask')
+  // 桌宠音效开关
+  const [petSound, setPetSound] = useState(false)
 
   useEffect(() => {
     if (!open) return
@@ -66,15 +68,17 @@ export function SettingsDialog() {
     setDirBusy(null)
     setMemRounds('')
     setCompressThreshold('')
-  }, [open, settings])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
 
-  // 进入系统 tab 时读取主窗口关闭行为偏好
+  // 进入系统 tab 时读取主窗口关闭行为偏好 + 桌宠音效开关
   useEffect(() => {
     if (!open || tab !== 'system') return
     let alive = true
     api.getConfig().then((c) => {
       if (!alive) return
       setCloseAction(c.closeAction === 'minimize' || c.closeAction === 'quit' ? c.closeAction : 'ask')
+      setPetSound(c.petSound === true)
     }).catch(() => {})
     return () => { alive = false }
   }, [open, tab])
@@ -293,6 +297,22 @@ export function SettingsDialog() {
                 />
                 <span className="field__hint">最小化后主窗口从任务栏消失，右键桌宠选「打开工作台」找回</span>
               </label>
+              <div className="field">
+                <span className="field__label">桌宠音效</span>
+                <label className="modal__check">
+                  <input
+                    type="checkbox"
+                    checked={petSound}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                      setPetSound(next)
+                      void api.mergeConfig({ petSound: next })
+                    }}
+                  />
+                  <span className="modal__check-label">播放桌宠动画音效</span>
+                </label>
+                <span className="field__hint">开启后桌宠动画将播放内置音轨；默认静音</span>
+              </div>
             </div>
             <div className="modal__actions">
               <button className="btn btn--primary" onClick={() => setOpen(false)}>完成</button>

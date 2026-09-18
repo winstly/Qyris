@@ -134,6 +134,8 @@ interface ChatState {
   editAndResend: (messageId: string, newContent: string, meta?: import('@/types').MessageMeta) => Promise<void>
   restore: (messages: ChatMessage[], session: { sessionId: string; hasMoreOlder: boolean; oldestSeq: number | null }) => void
   ensureProject: (path: string) => void
+  /** 跨窗口同步用：设置 current + 从 DB 加载消息 */
+  ensureProjectFromDb: (path: string) => Promise<void>
   closeProject: (path: string) => void
 }
 
@@ -219,6 +221,42 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       current: path,
     }))
   },
+  /** 跨窗口同步用：设置 current + 从 DB 加载消息（始终从 DB 重载，确保数据新鲜）。
+   *  守卫与 resyncMirrored 对齐：空页不覆盖非空内存、流式进行中不整表覆盖——
+   *  persistUpsert 是 fire-and-forget，DB 可能落后于内存，裸覆盖会撕掉在途消息。 */
+  ensureProjectFromDb: async (path) => {
+    const before = get().byProject[path]
+    set((s) => ({
+      byProject: s.byProject[path] ? s.byProject : { ...s.byProject, [path]: emptyChatSlice() },
+      current: path,
+    }))
+    try {
+      const resp = await api.messagesRecent(path)
+      const s = getSlice(path)
+      if (!s) return
+      if (resp.sessionId !== null && resp.sessionId !== s.sessionId && before && before.messages.length > 0) {
+        // 对方换了会话（clear/editAndResend）：整体对齐
+        patchSlice(path, { messages: resp.messages, sessionId: resp.sessionId, hasMoreOlder: resp.hasMore, oldestSeq: resp.oldestSeq })
+        return
+      }
+      if (resp.sessionId === null) return
+      // 空页守卫：DB 异常返回空时绝不用空覆盖非空内存
+      if (resp.messages.length === 0 && s.messages.length > 0) {
+        console.warn(`[chat] ensureProjectFromDb 拉到空页，保留内存 ${s.messages.length} 条不动`)
+        return
+      }
+      // 流式守卫：本窗口正在流式/认领请求时，库侧可能缺在途消息，整表覆盖会撕掉草稿
+      if (s.mirrored && (s.status === 'streaming' || s.status === 'tools')) return
+      patchSlice(path, {
+        messages: resp.messages,
+        sessionId: resp.sessionId,
+        hasMoreOlder: resp.hasMore,
+        oldestSeq: resp.oldestSeq,
+      })
+      const tok = await api.loadSessionTokens(path, resp.sessionId).catch(() => null)
+      if (tok) patchSlice(path, { usage: { input: tok.input, output: tok.output } })
+    } catch { /* 静默 */ }
+  },
 
   closeProject: (path) => {
     // 会话收尾提取：关工程 = 会话终止，趁旧 sessionId 还在手先通知（fire-and-forget）
@@ -232,10 +270,24 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   send: async (text, meta) => {
-    const project = get().current
-    if (!project) return
+    let project = get().current
+    // fallback：current 为空时从 appStore 取 projectPath 兜底（面板独立窗口首次启动场景）
+    if (!project) {
+      project = useAppStore.getState().projectPath ?? null
+      if (project) {
+        console.warn('[chat-send] current 为空，从 appStore.projectPath 兜底：', project)
+        get().ensureProject(project)
+      }
+    }
+    if (!project) {
+      console.warn('[chat-send] 无项目选中，消息未发送。请先在项目 tab 选择一个工程。')
+      return
+    }
     const cur = getSlice(project)
-    if (!cur || (cur.status !== 'idle' && cur.status !== 'error')) return
+    if (!cur || (cur.status !== 'idle' && cur.status !== 'error')) {
+      console.warn('[chat-send] 状态异常：', cur?.status ?? '无切片')
+      return
+    }
     const trimmed = text.trim()
     if (!trimmed && !meta?.element) return
     const el = meta?.element
@@ -569,18 +621,22 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       cliSkills: [],
       epoch: cur.epoch + 1,
     })
-    // DB 同步：截断被编辑消息之后的历史（该消息不是 pending，必有 seq），再把该行覆写为编辑后内容——
+    // DB 同步：await 截断+覆写完成后再广播——确保对端 resync 时 DB 已是最新态。
     // 编辑重发本来就丢掉原 toolCalls/后续消息（上面 slice），库与切片保持一致。
-    // patch 失败必须告警：截断已落库而 patch 未落库 → 库内该消息仍是旧内容（重启后可见）。
     const edited = messages[messages.length - 1]
     if (edited.seq !== undefined) {
       const sessionId = cur.sessionId
-      void api.messagesTruncate(project, sessionId, edited.seq)
-        .catch((e) => { console.warn(`[chat] 编辑重发截断失败：${String(e)}`) })
-        .then(() => api.messagePatch(project, sessionId, edited.id, {
+      try {
+        await api.messagesTruncate(project, sessionId, edited.seq)
+        await api.messagePatch(project, sessionId, edited.id, {
           content: edited.content, reasoning: null, tool: { toolCalls: [], toolResults: [] },
-        }).catch((e) => { console.warn(`[chat] 编辑重发 patch 失败（库内内容可能未更新）：${String(e)}`) }))
+        })
+      } catch (e) {
+        console.warn(`[chat] 编辑重发 DB 同步失败：${String(e)}`)
+      }
     }
+    // 广播 cleared：对端收到后从 DB 重新拉取，避免旧消息残留 + 编辑不同步
+    relayChatMirror({ kind: 'cleared', projectRoot: project })
     await runAgentLoop(project)
   },
 
@@ -618,9 +674,15 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   receiveMirroredUserMessage: (projectRoot, message) => {
     const cur = getSlice(projectRoot)
     if (!cur) return
-    console.debug(`[mirror] user-message → ${projectRoot.slice(-8)}（本地 ${cur.messages.length} + 1）`)
+    // 按 id 去重：镜像消息可能与本地（DB 回填/重复投递）撞 id，追加前先查——
+    // 已存在则原位替换，绝不产生第二条相同消息
+    const idx = message ? cur.messages.findIndex((m) => m.id === (message as { id?: string }).id) : -1
+    const messages = idx >= 0
+      ? cur.messages.map((m, i) => (i === idx ? (message as ChatMessage) : m))
+      : [...cur.messages, message as ChatMessage]
+    console.debug(`[mirror] user-message → ${projectRoot.slice(-8)}（本地 ${messages.length} 条${idx >= 0 ? '，id 撞车已去重' : ''}）`)
     patchSlice(projectRoot, {
-      messages: [...cur.messages, message],
+      messages,
       status: 'streaming', cancelled: false, pendingElement: null,
       activeRequestId: null, mirrored: null, pendingAsk: null,
     })
@@ -1100,7 +1162,7 @@ async function runAgentLoop(project: string) {
         ]
         completion = await api.aiChatStream(
           requestId, settings.provider, settings.baseUrl, settings.model, payload, TOOL_DEFS,
-          settings.dispatchMode, project, { sessionSummary: summary, memoryBlock },
+          settings.dispatchMode, project, { sessionSummary: summary, memoryBlock, contextSummary },
         )
         break
       } catch (e) {
@@ -1129,6 +1191,7 @@ async function runAgentLoop(project: string) {
       }
     }
 
+    console.info(`[chat-loop] completion: content=${(completion.content ?? '').length}字, tools=${completion.toolCalls.length}, finish=${completion.finishReason}`)
     const assistantId = finalizeAssistant(project, completion, epoch)
     // 镜像管道：稳定点推送该消息最新态（pending 收口 + toolCalls 附着），对方窗口按 id 对齐替换
     pushFinalized(project, assistantId)
@@ -1162,7 +1225,9 @@ async function runAgentLoop(project: string) {
       if (agentSlice) {
         for (const t of Object.values(agentSlice.threads)) {
           if (t.tier === 'CLI' && t.status === 'running') {
-            useAgentStore.getState().finishThread(t.id, 'done', '（CLI 会话结束，子任务收口）', undefined, project)
+            // 保留已有 token 计数（不要传 undefined 覆盖掉）
+            const tokens = t.tokens.input > 0 || t.tokens.output > 0 ? t.tokens : undefined
+            useAgentStore.getState().finishThread(t.id, 'done', '（CLI 会话结束，子任务收口）', tokens, project)
           }
         }
       }

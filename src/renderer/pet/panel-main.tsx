@@ -10,6 +10,8 @@ import { useFileStore } from '@/store/useFileStore'
 import { useDesktopEvents, useThemeSync, usePetChatStatus } from '@/hooks/useDesktopEvents'
 import { ProjectsTab } from '@/components/workspace/ProjectsTab'
 import { ChatPanel } from '@/components/chat/ChatPanel'
+import { Dialogs } from '@/components/common/Dialogs'
+import { CreateProjectDialog } from '@/components/workspace/CreateProjectDialog'
 import '@/styles/tokens.css'
 import '@/styles/panels.css'
 import '@/styles/chat.css'
@@ -53,11 +55,36 @@ function PetPanelApp() {
   usePetChatStatus()
   useDesktopEvents({
     // 面板整个窗口只为一个工程服务，直接按载荷刷新文件树（主窗口做当前工程过滤+节流）
-    onFsChanged: (p) => { useFileStore.getState().notifyExternalChange(p.paths) },
+    onFsChanged: (p) => {
+      // 只处理当前工程的变更：watcher 按根目录注册，切工程后旧根的事件仍在途
+      if (!p.projectRoot || p.projectRoot === useAppStore.getState().projectPath) {
+        useFileStore.getState().notifyExternalChange(p.paths)
+      }
+    },
   })
 
   return (
     <div className="pet-panel">
+      {/* 创建项目对话框（ProjectsTab「创建项目」按钮写 store，此处渲染）——须在 <Dialogs /> 之前，
+          否则创建/克隆失败的 showAlert 弹窗会被本对话框的遮罩盖住（同 z-index 按 DOM 顺序取胜） */}
+      <CreateProjectDialog />
+      {/* 全局弹窗（showConfirm / showAlert / showPrompt 所在）——面板无此组件则编辑重发等功能永久挂起 */}
+      <Dialogs />
+      {/* 标题栏：可拖拽 + 关闭 */}
+      <div className="pet-panel__titlebar">
+        <div className="pet-panel__titlebar-drag" />
+        <button
+          className="pet-panel__titlebar-btn pet-panel__titlebar-btn--close"
+          title="关闭"
+          onClick={() => window.desktopAPI?.closePanel()}
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <line x1="2" y1="2" x2="10" y2="10" />
+            <line x1="10" y1="2" x2="2" y2="10" />
+          </svg>
+        </button>
+      </div>
+
       {/* 内容区：铺满 nav 上方 */}
       <div className="pet-panel__content">
         {tab === 'projects' ? <ProjectsTab /> : <ChatPanel showHeaderActions={false} />}

@@ -54,6 +54,10 @@ export interface AppConfig {
   contextCompressThreshold?: number
   /** 主窗口关闭行为：缺省/ask=每次询问；minimize=隐藏窗口保留桌宠；quit=退出整个应用 */
   closeAction?: 'minimize' | 'quit'
+  /** 桌宠音效开关：缺省 false（静音）；true 时播放 MP4 内置音轨 */
+  petSound?: boolean
+  /** CLI 模式最近对话轮数（重放降级路径序列化多少轮 user+assistant+tool；缺省 8） */
+  cliRecentRounds?: number
 }
 
 /** 新数组字段 + 旧单目录字段合并去重（旧字段排前，保持存量用户主目录序） */
@@ -127,6 +131,9 @@ export async function getConfig(): Promise<AppConfig> {
       memExtractRounds: clampRounds(parsed.memExtractRounds),
       contextCompressThreshold: clampCompressThreshold(parsed.contextCompressThreshold),
       closeAction: parsed.closeAction === 'minimize' || parsed.closeAction === 'quit' ? parsed.closeAction : undefined,
+      petSound: parsed.petSound === true ? true : undefined,
+      cliRecentRounds: typeof parsed.cliRecentRounds === 'number' && parsed.cliRecentRounds >= 2 && parsed.cliRecentRounds <= 40
+        ? Math.floor(parsed.cliRecentRounds) : undefined,
     }
     configCache = cfg; configCacheAt = Date.now()
     return cfg

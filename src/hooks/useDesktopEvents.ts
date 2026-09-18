@@ -7,16 +7,21 @@
  *  - usePetChatStatus：本窗口对话状态上报主进程，聚合驱动桌宠动画。
  */
 import { useEffect } from 'react'
-import { useAppStore, type Theme } from '@/store/useAppStore'
+import { useAppStore, checkpointFileStore, type Theme } from '@/store/useAppStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useChatStore } from '@/store/useChatStore'
+import { useFileStore } from '@/store/useFileStore'
+import { useAgentStore } from '@/store/useAgentStore'
+import { useStartupStore } from '@/store/useStartupStore'
+import { basename } from '@/utils/path'
 import {
+  api,
   onBuildOutput, onBuildExit, onAiDelta, onAiReasoning,
   onCliToolEvent, onCliToolResult, onCliAgentEvent,
   onChatMirror, onChatRequestDone,
   onFsChanged as subscribeFsChanged,
   onElementPicked,
-  onConfigChanged, isDesktop, setPetChatState,
+  onConfigChanged, onProjectChanged, isDesktop, setPetChatState,
 } from '@/services/desktop'
 
 export interface DesktopEventHooks {
@@ -72,7 +77,56 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
       ...(onFsChanged ? [subscribeFsChanged((p) => onFsChanged(p))] : []),
       onElementPicked((p) => useChatStore.getState().setPendingElement(p)),
       // 多窗口配置同步：任一窗口/主进程改配置后，本窗口按变化键刷新镜像
-      onConfigChanged(() => { void useAppStore.getState().refreshRemoteConfig() }),
+      onConfigChanged(() => {
+        const app = useAppStore.getState()
+        void app.refreshRemoteConfig()
+        // 密钥增删（main 在 set/delete_secret 后补发本事件）也在此刷新——
+        // 面板无 SettingsDialog，不补这条则 hasApiKey 直到重启都不会更新
+        void app.refreshHasApiKey()
+      }),
+      // 跨窗口项目同步：另一窗口切换项目后，本窗口静默切换（不广播，不触发远端 openProject）
+      onProjectChanged((p) => {
+        const app = useAppStore.getState()
+        // 关闭项目：只清理本窗口该工程的 store，不触碰其余工程
+        if (p.closedProject) {
+          useBuildStore.getState().closeProject(p.closedProject)
+          useChatStore.getState().closeProject(p.closedProject)
+          useAgentStore.getState().closeProject(p.closedProject)
+          if (app.projectPath === p.closedProject) {
+            useFileStore.getState().reset()
+            // 置空 projectPath：否则重开同一项目时 p.projectPath === app.projectPath，
+            // 重载分支被跳过 → 端侧躺在已删除的 store 上什么也不加载
+            app.setProjectPath(null)
+            api.setWindowTitle('轻驭').catch(() => {})
+          }
+        }
+        // 同步 openProjects 列表：双窗口取并集（再剔除被关闭项）——任一窗口广播的都只是
+        // 全局打开集的子集，直接覆盖会把对方打开的项目从 ProjectSwitcher/ProjectsTab 挤掉
+        app.setOpenProjects(
+          [...new Set([...p.openProjects, ...useAppStore.getState().openProjects])].filter((x) => x !== p.closedProject),
+        )
+        // 切换项目：静默版——不调 openProject（避免重入广播），直接更新所有 store
+        if (p.projectPath && p.projectPath !== app.projectPath) {
+          // 切走前快照当前工程文件态（与 openProject 一致；漏掉则切回时恢复旧快照，未保存编辑丢失）
+          if (app.projectPath) checkpointFileStore(app.projectPath)
+          // setProjectPath 同步刷新项目级镜像（startupCommands / projectSkillsDirs / projectSkillMetas）
+          app.setProjectPath(p.projectPath)
+          // 补齐 openProject 会做的 store 同步（轻量版，不触发广播）
+          useBuildStore.getState().ensureProject(p.projectPath)
+          useBuildStore.getState().setCurrent(p.projectPath)
+          useAgentStore.getState().ensureProject(p.projectPath)
+          useAgentStore.getState().setCurrent(p.projectPath)
+          useStartupStore.getState().setCurrentProject(p.projectPath)
+          useFileStore.getState().openProject(p.projectPath).catch(() => {})
+          // 订阅该工程文件变更（openProject 同款）——否则本窗口不在 watcher 名单，文件树不自动刷新
+          void api.startWatching(p.projectPath).catch(() => {})
+          // 标题跟随当前工程（openProject 的 setWindowTitle 只作用于发送方窗口）
+          api.setWindowTitle(`${basename(p.projectPath)} — 轻驭`).catch(() => {})
+          void useChatStore.getState().ensureProjectFromDb(p.projectPath)
+          // 项目级 Skill（fire-and-forget，与 openProject 一致）
+          void app.loadProjectSkills()
+        }
+      }),
     ]
     return () => { offs.forEach((f) => f()) }
   }, [])

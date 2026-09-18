@@ -77,7 +77,11 @@ export function ChatInput() {
       return
     }
     const userText = text.trim()
-    if ((!userText && selectedSkills.length === 0 && !pendingElement) || busy || disabledHint) return
+    if ((!userText && selectedSkills.length === 0 && !pendingElement) || busy || disabledHint) {
+      if (disabledHint) console.warn('[chat-input] 发送被禁用：', disabledHint)
+      if (busy) console.warn('[chat-input] 忙碌状态：', status)
+      return
+    }
     const meta: import('@/types').MessageMeta = {}
     if (pendingElement) {
       meta.element = { selector: pendingElement.selector, tag: pendingElement.tag, id: pendingElement.id, text: pendingElement.text }

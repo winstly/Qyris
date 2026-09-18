@@ -190,7 +190,7 @@ const desktopAPI = {
   pickParentDir: () => ipcRenderer.invoke('pick_parent_dir') as Promise<string | null>,
 
   // AI
-  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; systemPrompt?: string; outputFormat?: string }) =>
+  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string }) =>
     ipcRenderer.invoke('ai_chat_stream', { requestId, provider, baseUrl, model, messages, tools, dispatchMode: dispatchMode ?? 'api', projectRoot: projectRoot ?? null, opts: opts ?? null }),
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
     ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api' }),
@@ -214,6 +214,14 @@ const desktopAPI = {
   petContextMenu: () => ipcRenderer.send('pet:context-menu'),
   /** 本窗口当前对话状态上报（桌宠动画聚合：任一窗口生成中→working，等你回答→waiting） */
   setPetChatState: (status: string) => ipcRenderer.send('pet:chat-state', { status }),
+  /** 面板窗口控制（无原生标题栏，由渲染层自绘按钮触发） */
+  closePanel: () => ipcRenderer.send('pet:panel-close'),
+  /** 跨窗口项目同步：通知其余窗口 projectPath / openProjects 变化 */
+  notifyProjectChanged: (projectPath: string | null, openProjects: string[], closedProject?: string | null) =>
+    ipcRenderer.send('project:changed', { projectPath, openProjects, closedProject }),
+  /** 桌宠视频路径解析：dev 走本地服务器，打包后走 file:// */
+  resolveVideoUrl: (filename: string): Promise<string> =>
+    ipcRenderer.invoke('pet:resolve-video', filename),
 
   // 对话镜像（桌宠面板 ↔ 主窗口同一场对话）：发起窗口推送稳定点，主进程转发给其余窗口
   relayChatMirror: (p: ChatMirrorPayload) => ipcRenderer.send('chat:mirror-relay', p),
@@ -241,6 +249,7 @@ const desktopAPI = {
     subscribe('memory-changed', cb),
   onFsChanged: (cb: (payload: { paths: string[]; projectRoot?: string }) => void): Unsubscribe => subscribe('fs-changed', cb),
   onConfigChanged: (cb: (payload: string[]) => void): Unsubscribe => subscribe('config:changed', cb),
+  onProjectChanged: (cb: (payload: { projectPath: string | null; openProjects: string[]; closedProject?: string | null }) => void): Unsubscribe => subscribe('project:changed', cb),
   onPetState: (cb: (state: string) => void): Unsubscribe => subscribe('pet:state', cb),
   onCloseRequest: (cb: () => void): Unsubscribe => subscribe('app:close-request', cb),
   /** 关闭询问被主进程兜底收口（渲染层 10s 未响应按最小化处理）时推送，渲染层收起询问框 */

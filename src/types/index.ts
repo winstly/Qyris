@@ -140,6 +140,10 @@ export interface AppConfig {
   contextCompressThreshold?: number
   /** 主窗口关闭行为：缺省（未设置）=每次询问；minimize=隐藏窗口保留桌宠；quit=退出整个应用 */
   closeAction?: 'minimize' | 'quit'
+  /** 桌宠音效开关：缺省 false（静音）；true 时播放 MP4 内置音轨 */
+  petSound?: boolean
+  /** CLI 模式最近对话轮数（重放降级路径序列化多少轮；缺省 8） */
+  cliRecentRounds?: number
 }
 
 export interface AiToolCall {
