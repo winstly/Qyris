@@ -12,11 +12,12 @@ import { StatusBar } from '@/components/shell/StatusBar'
 import { SettingsDialog } from '@/components/shell/SettingsDialog'
 import { ClosePromptDialog } from '@/components/shell/ClosePromptDialog'
 import { Dialogs } from '@/components/common/Dialogs'
-import { IconAlert } from '@/components/common/icons'
+import { IconAlert, IconChevron } from '@/components/common/icons'
 export default function App() {
   const booted = useAppStore((s) => s.booted)
   const splitRatio = useAppStore((s) => s.splitRatio)
   const setSplitRatio = useAppStore((s) => s.setSplitRatio)
+  const chatPanelCollapsed = useAppStore((s) => s.chatPanelCollapsed)
   const isWide = useIsWide()
   const theme = useAppStore((s) => s.theme)
   const bodyRef = useRef<HTMLDivElement>(null)
@@ -106,7 +107,11 @@ export default function App() {
         </div>
       )}
 
-      <div className="app__body" ref={bodyRef} data-ready={booted || undefined}>
+      <div
+        className={`app__body ${chatPanelCollapsed ? 'app__body--chat-collapsed' : ''}`}
+        ref={bodyRef}
+        data-ready={booted || undefined}
+      >
         <MemorySidebar />
         <div
           ref={workspaceRef}
@@ -127,6 +132,18 @@ export default function App() {
         )}
 
         <ChatPanel />
+
+        {/* 对话栏折叠后的展开把手：贴右缘全高竖条，点击恢复（就地交互，不依赖快捷键/状态栏） */}
+        {chatPanelCollapsed && (
+          <button
+            className="edge-grip edge-grip--chat"
+            onClick={useAppStore.getState().toggleChatPanel}
+            aria-label="展开对话栏"
+            title="展开对话栏"
+          >
+            <IconChevron size={14} />
+          </button>
+        )}
       </div>
 
       <StatusBar />

@@ -7,3 +7,7 @@ export const BrowserWindow = Object.assign(function BrowserWindow(): void {}, {
   getAllWindows: (): unknown[] => [],
 })
 export const dialog = { showOpenDialog: async () => ({ canceled: true, filePaths: [] as string[] }) }
+/** pet.ts 传递依赖（smoke 只触达 computePanelPosition 纯函数，不触达窗口/菜单路径） */
+export const Menu = { buildFromTemplate: (): unknown => ({ popup: (): void => {} }) }
+export const screen = { getDisplayMatching: (): unknown => ({ workArea: { x: 0, y: 0, width: 0, height: 0 } }) }
+export const ipcMain = { on: (): void => {}, handle: (): void => {} }

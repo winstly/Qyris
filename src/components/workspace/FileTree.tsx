@@ -146,6 +146,14 @@ export function FileTree() {
           >
             <IconTarget size={12} />
           </button>
+          <button
+            className="filetree__toolbar-btn"
+            onClick={() => useAppStore.getState().toggleFileTree()}
+            title="折叠文件树"
+            aria-label="折叠文件树"
+          >
+            <IconChevron size={12} className="chev-left" />
+          </button>
         </div>
       </div>
       <div className="filetree" onKeyDown={(e) => {

@@ -654,3 +654,123 @@ body.dragging-row, body.dragging-row * { cursor: row-resize !important; }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ============ 栏折叠（对话栏 / 文件树） ============ */
+/* 设计口径：布局连续动画——栏宽过渡到 0、内容锁宽被边缘裁切推出（不挤压重排），
+   workspace 同步吃满。display:none 的瞬跳是「怪感」根源，已废弃。
+   状态与 DOM 全程保留（chat store / Monaco 不重挂载） */
+
+.chat {
+  transition: flex-grow 260ms cubic-bezier(0.4, 0, 0.2, 1),
+              min-width 260ms cubic-bezier(0.4, 0, 0.2, 1),
+              border-left-width 260ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* 内容锁宽：收缩期间子元素保持原宽，被 overflow 裁掉而非重排 */
+.chat > * { min-width: 300px; }
+/* grow 互补：chat 1→0、workspace 0→1，每帧恒填满，无瞬跳 */
+.app__body--chat-collapsed .chat {
+  flex-grow: 0;
+  flex-shrink: 0;
+  flex-basis: 0;
+  min-width: 0;
+  overflow: hidden;
+  border-left-width: 0;
+  pointer-events: none;
+}
+.app__divider { transition: opacity 200ms cubic-bezier(0.4, 0, 0.2, 1); }
+.app__body--chat-collapsed .app__divider { opacity: 0; pointer-events: none; }
+.app__workspace { transition: flex-grow 260ms cubic-bezier(0.4, 0, 0.2, 1); }
+.app__body--chat-collapsed .app__workspace { flex-grow: 1 !important; }
+
+/* 状态栏栏开关：折叠态降透明度提示「有东西被藏起来了」，hover 恢复 */
+.statusbar__toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 18px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  padding: 0;
+  opacity: 0.85;
+}
+.statusbar__toggle:hover { background: var(--border-soft); color: var(--fg); opacity: 1; }
+.statusbar__toggle--off { opacity: 0.4; }
+.statusbar__toggle--off:hover { opacity: 0.9; }
+
+/* 栏折叠就地交互：头部收起按钮 + 折叠后边缘展开把手 */
+/* 收起按钮：常态带 pill 底色，从无底色的功能按钮群里跳出来（可发现性） */
+.chat__collapse-btn {
+  margin-left: auto;
+  background: var(--border-soft);
+  border-radius: var(--radius-sm);
+}
+.chat__head-actions + .chat__collapse-btn { margin-left: 0; }
+.chat__collapse-btn:hover { background: var(--border); }
+
+/* 展开把手：耳 tab——从屏幕边缘伸出的抽屉拉手，外侧贴边直角、内侧圆角，
+   有阴影浮起感；hover 时 accent 竖线亮起 + chevron 朝展开方向轻移 */
+.edge-grip {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 18px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  z-index: 5;
+  padding: 0;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 0.14);
+  animation: grip-in 200ms 120ms var(--ease-standard) both;
+}
+.edge-grip--chat {
+  right: 0;
+  border-right: none;
+  border-radius: 10px 0 0 10px;
+}
+.edge-grip--tree {
+  left: 0;
+  border-left: none;
+  border-radius: 0 10px 10px 0;
+}
+.edge-grip:hover { color: var(--fg); background: var(--s1); }
+.edge-grip::after {
+  content: "";
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  opacity: 0;
+  transition: opacity 160ms var(--ease-standard);
+}
+.edge-grip--chat::after { left: 3px; }
+.edge-grip--tree::after { right: 3px; }
+.edge-grip:hover::after { opacity: 1; }
+.edge-grip:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.edge-grip svg { transition: transform 160ms var(--ease-standard); }
+.edge-grip--chat svg { transform: rotate(180deg); }
+.edge-grip--chat:hover svg { transform: rotate(180deg) translateX(2px); }
+.edge-grip--tree:hover svg { transform: translateX(2px); }
+@keyframes grip-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat, .app__workspace, .app__divider, .split__first, .split__handle, .edge-grip svg {
+    transition: none !important;
+  }
+  .edge-grip { animation: none; }
+}
+
+.chev-left { transform: rotate(180deg); }

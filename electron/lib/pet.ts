@@ -70,10 +70,21 @@ export function clearWindowChatState(windowId: number): void {
 
 const PET_SIZE = 128
 
-function getRendererUrl(page: string): string {
+/** 按环境加载桌宠家族页面：dev 走 Vite dev server（loadURL），打包走本地文件（loadFile），
+ *  与主窗口加载分支完全对齐。禁止用 loadURL 喂裸文件路径——Electron 会把
+ *  "E:\...\pet\index.html" 当 URL 解析 → ERR_INVALID_URL(-300) → did-fail-load →
+ *  透明空白窗口（打包后"桌宠消失"的根因；dev 有 ELECTRON_RENDERER_URL 走 http 分支，
+ *  恰好掩盖了打包分支是坏的）。 */
+function loadPetPage(win: BrowserWindow, page: string): void {
   const rendererUrl = process.env['ELECTRON_RENDERER_URL']
-  if (rendererUrl) return `${rendererUrl}/${page}`
-  return path.join(__dirname, `../renderer/${page}`)
+  if (rendererUrl) {
+    const url = `${rendererUrl}/${page}`
+    mainLog.info(`[pet] 加载(dev) ${page}: ${url}`)
+    void win.loadURL(url)
+  } else {
+    mainLog.info(`[pet] 加载(packaged) ${page}`)
+    void win.loadFile(path.join(__dirname, '../renderer/', page))
+  }
 }
 
 export function createPetWindow(): void {
@@ -115,8 +126,6 @@ export function createPetWindow(): void {
   // 不注册的话查不到此窗口，所有状态推送被静默丢弃，桌宠动画永远停在 idle
   registerWindow(petWin)
 
-  const url = getRendererUrl('pet/index.html')
-  mainLog.info(`[pet] 加载 URL: ${url}`)
   petWin.once('ready-to-show', () => {
     mainLog.info('[pet] ready-to-show，显示桌宠窗口')
     petWin?.show()
@@ -124,7 +133,7 @@ export function createPetWindow(): void {
   petWin.webContents.on('did-fail-load', (_e, code, desc) => {
     mainLog.error(`[pet] 加载失败: ${code} ${desc}`)
   })
-  void petWin.loadURL(url)
+  loadPetPage(petWin, 'pet/index.html')
 
   petWin.on('closed', () => {
     petWin = null
@@ -153,6 +162,56 @@ export function isPetFamilyWindowId(id: number): boolean {
 
 // ---------- 面板窗口 ----------
 
+/** 面板与桌宠图标间的间距 */
+const PANEL_GAP = 8
+
+/** 面板定位纯函数（导出供 smoke 矩阵测试）：以桌宠 bounds 为基准决定面板 x/y。
+ *  垂直：上方优先（不遮桌宠），不足放下方；下方也放不下时贴工作区底缘——
+ *  此时面板会盖住桌宠，但保证自身完整可见可交互（极矮屏下无第三种选择）。
+ *  水平：面板中线对齐桌宠中线。
+ *  X/Y 最终钳制在给定工作区内；极窄工作区（竖屏侧屏）下保左/上缘完整、
+ *  对侧可溢出，不自动缩窗（面板可手动 resize）。 */
+export function computePanelPosition(
+  petBounds: { x: number; y: number; width: number; height: number },
+  workArea: { x: number; y: number; width: number; height: number },
+  panelSize: { width: number; height: number },
+): { x: number; y: number } {
+  const { x: waX, y: waY, width: waW, height: waH } = workArea
+  const { width: panelW, height: panelH } = panelSize
+
+  let x = petBounds.x + petBounds.width / 2 - panelW / 2
+  const spaceAbove = petBounds.y - waY
+  let y: number
+  if (spaceAbove >= panelH + PANEL_GAP) {
+    y = petBounds.y - panelH - PANEL_GAP
+  } else {
+    const yBelow = petBounds.y + petBounds.height + PANEL_GAP
+    y = yBelow + panelH <= waY + waH ? yBelow : waY + waH - panelH
+  }
+  x = Math.max(waX, Math.min(x, waX + waW - panelW))
+  y = Math.max(waY, Math.min(y, waY + waH - panelH))
+  return { x: Math.round(x), y: Math.round(y) }
+}
+
+/** 以桌宠当前图标位置为基准给面板定位：创建与每次重新显示共用，
+ *  保证面板始终贴着被拖动的桌宠。钳制基准是桌宠所在显示器的工作区
+ *  （桌宠可被拖到副屏）——按主屏钳制会让面板弹到离桌宠很远的另一块屏上。 */
+function positionPanelNearPet(win: BrowserWindow): void {
+  if (!petWin || petWin.isDestroyed()) return
+  const petBounds = petWin.getBounds()
+  const workArea = screen.getDisplayMatching(petBounds).workArea
+  // 用面板实际尺寸（用户可能手动 resize 过），不用创建时常量
+  const { x, y } = computePanelPosition(petBounds, workArea, win.getBounds())
+  win.setPosition(x, y)
+}
+
+/** 面板可见时跟随桌宠重定位（拖拽实时跟随路径调用；面板隐藏/不存在时静默跳过） */
+export function repositionPanelIfVisible(): void {
+  if (panelWin && !panelWin.isDestroyed() && panelWin.isVisible()) {
+    positionPanelNearPet(panelWin)
+  }
+}
+
 export function togglePanelWindow(): void {
   if (panelWin && !panelWin.isDestroyed()) {
     if (panelWin.isVisible()) {
@@ -161,6 +220,8 @@ export function togglePanelWindow(): void {
       mainLog.info('[pet] 面板隐藏（store 状态保留，未销毁）')
       if (process.platform === 'darwin' && petWin && !petWin.isDestroyed()) petWin.setFocusable(true)
     } else {
+      // 复用窗口也要按桌宠当前位置重新定位——否则面板停在旧位置，不跟随被拖动的桌宠
+      positionPanelNearPet(panelWin)
       panelWin.show()
       panelWin.focus()
       mainLog.info('[pet] 面板重新显示（复用既有窗口，状态应完整）')
@@ -176,26 +237,9 @@ export function togglePanelWindow(): void {
   // 桌宠保持可见但不接受键盘焦点，面板正常接收文本输入
   if (process.platform === 'darwin') petWin.setFocusable(false)
 
-  const petBounds = petWin.getBounds()
-  // 钳制基准是桌宠所在显示器的工作区（桌宠可被拖到副屏）——按主屏钳制会让面板
-  // 弹到离桌宠很远的另一块屏上
-  const { x: waX, y: waY, width: screenW, height: screenH } = screen.getDisplayMatching(petBounds).workArea
-  const panelW = 400
-  const panelH = 600
-
-  // 面板在桌宠上方弹出；如果上方空间不够则放下方
-  let panelX = petBounds.x + PET_SIZE / 2 - panelW / 2
-  let panelY = petBounds.y - panelH - 8
-  if (panelY < waY) panelY = petBounds.y + PET_SIZE + 8
-  // 钳制在桌宠所在屏的工作区内
-  panelX = Math.max(waX, Math.min(panelX, waX + screenW - panelW))
-  panelY = Math.max(waY, Math.min(panelY, waY + screenH - panelH))
-
   panelWin = new BrowserWindow({
-    x: panelX,
-    y: panelY,
-    width: panelW,
-    height: panelH,
+    width: 400,
+    height: 600,
     frame: false,
     transparent: false,
     alwaysOnTop: true,
@@ -214,7 +258,10 @@ export function togglePanelWindow(): void {
   // config:changed 走 emitToAllWindows——不注册则面板里这些事件全部静默丢失
   registerWindow(panelWin)
 
-  void panelWin.loadURL(getRendererUrl('pet/panel.html'))
+  // 创建后、显示前按桌宠当前位置定位（show: false，不会闪现中间位置）
+  positionPanelNearPet(panelWin)
+
+  loadPetPage(panelWin, 'pet/panel.html')
   panelWin.once('ready-to-show', () => panelWin?.show())
 
   const panelWinId = panelWin.id

@@ -131,6 +131,12 @@ interface AppState {
   /** 文件 Tab 内搜索面板展开/收起 */
   searchOpen: boolean
   toggleSearch: () => void
+  /** 对话栏整栏折叠（折叠后工作区占满，StatusBar 开关 / Ctrl+J 恢复） */
+  chatPanelCollapsed: boolean
+  toggleChatPanel: () => void
+  /** 文件 Tab 内文件树整栏折叠（编辑器占满，StatusBar 开关 / Ctrl+B 恢复） */
+  fileTreeCollapsed: boolean
+  toggleFileTree: () => void
   setSplitRatio: (r: number) => void
   setFilesSplitRatio: (r: number) => void
   setGitPanelRatio: (r: number) => void
@@ -187,6 +193,8 @@ export const useAppStore = create<AppState>()(
       activeTab: 'preview',
       memorySidebarOpen: false,
       searchOpen: false,
+      chatPanelCollapsed: false,
+      fileTreeCollapsed: false,
       splitRatio: 0.74,
       filesSplitRatio: 0.26,
       gitPanelRatio: 0.45,
@@ -213,6 +221,8 @@ export const useAppStore = create<AppState>()(
       setTab: (t) => set({ activeTab: t }),
       toggleMemorySidebar: () => set((s) => ({ memorySidebarOpen: !s.memorySidebarOpen })),
       toggleSearch: () => set((s) => ({ searchOpen: !s.searchOpen })),
+      toggleChatPanel: () => set((s) => ({ chatPanelCollapsed: !s.chatPanelCollapsed })),
+      toggleFileTree: () => set((s) => ({ fileTreeCollapsed: !s.fileTreeCollapsed })),
       setSplitRatio: (r) => set({ splitRatio: Math.min(0.85, Math.max(0.5, r)) }),
       setFilesSplitRatio: (r) => set({ filesSplitRatio: Math.min(0.5, Math.max(0.15, r)) }),
       setGitPanelRatio: (r) => set({ gitPanelRatio: Math.min(0.75, Math.max(0.2, r)) }),
@@ -627,6 +637,8 @@ export const useAppStore = create<AppState>()(
         gitPanelRatio: s.gitPanelRatio,
         searchPanelRatio: s.searchPanelRatio,
         theme: s.theme,
+        chatPanelCollapsed: s.chatPanelCollapsed,
+        fileTreeCollapsed: s.fileTreeCollapsed,
       }),
     },
   ),

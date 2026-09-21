@@ -105,3 +105,15 @@ registerCommand({
     requestAnimationFrame(() => globalSearchFocusRef?.())
   },
 })
+
+registerCommand({
+  id: 'view.toggleFileTree',
+  label: '切换文件树折叠',
+  run: () => useAppStore.getState().toggleFileTree(),
+})
+
+registerCommand({
+  id: 'view.toggleChatPanel',
+  label: '切换对话栏折叠',
+  run: () => useAppStore.getState().toggleChatPanel(),
+})

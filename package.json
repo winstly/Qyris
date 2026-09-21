@@ -14,7 +14,9 @@
     "smoke:env": "esbuild scripts/smoke-env.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --outfile=node_modules/.cache/smoke-env.cjs && node node_modules/.cache/smoke-env.cjs",
     "smoke:memory": "esbuild scripts/smoke-memory.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --external:better-sqlite3 --external:sqlite-vec --external:@huggingface/transformers --external:onnxruntime-web --outfile=node_modules/.cache/smoke-memory.cjs && node node_modules/.cache/smoke-memory.cjs",
     "smoke:memory-agent": "esbuild scripts/smoke-memory-agent.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --external:better-sqlite3 --external:sqlite-vec --external:@huggingface/transformers --external:onnxruntime-web --outfile=node_modules/.cache/smoke-memory-agent.cjs && node node_modules/.cache/smoke-memory-agent.cjs",
-    "dist": "electron-vite build && electron-builder"
+    "smoke:pet": "esbuild scripts/smoke-pet-panel.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --outfile=node_modules/.cache/smoke-pet-panel.cjs && node node_modules/.cache/smoke-pet-panel.cjs",
+    "dist": "electron-vite build && electron-builder && node scripts/verify-dist.mjs",
+    "verify:dist": "node scripts/verify-dist.mjs"
   },
   "devDependencies": {
     "@fontsource/ibm-plex-sans": "^5.1.0",

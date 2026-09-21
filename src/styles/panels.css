@@ -2110,3 +2110,21 @@
   border-radius: 2px;
   padding: 0 1px;
 }
+
+/* 文件 Tab：文件树整栏折叠——树栏宽度过渡到 0，内容锁宽（220px，与拖拽 minFirst 一致）
+   被左缘裁切推出；分割条淡出。SplitPane 与 EditorPane(Monaco) 保持挂载，展开零重初始化。
+   拖拽分割条期间（body.dragging-col）禁过渡：inline basis 每帧更新必须即时跟手 */
+.split__first { transition: flex-basis 260ms cubic-bezier(0.4, 0, 0.2, 1); }
+body.dragging-col .split__first { transition: none; }
+.files-tab--tree-collapsed .split__first {
+  flex-basis: 0% !important;
+  min-width: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.files-tab--tree-collapsed .split__first > * { min-width: 220px; }
+.split__handle { transition: opacity 200ms cubic-bezier(0.4, 0, 0.2, 1); }
+.files-tab--tree-collapsed .split__handle { opacity: 0; pointer-events: none; }
+
+/* 折叠把手定位基准 */
+.files-tab { position: relative; }

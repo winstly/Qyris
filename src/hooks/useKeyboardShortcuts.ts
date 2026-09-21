@@ -7,6 +7,8 @@ import { executeCommand, canRunCommand } from '@/services/commands'
  * - Cmd/Ctrl + S  file.save（有活动文件时可执行）
  * - Cmd/Ctrl + M  view.toggleMemorySidebar
  * - Cmd/Ctrl + F  file.find（编辑器内搜索或聚焦文件树搜索框）
+ * - Cmd/Ctrl + B  view.toggleFileTree（对齐 VSCode 侧栏开关肌肉记忆）
+ * - Cmd/Ctrl + J  view.toggleChatPanel（对齐 VSCode 面板开关肌肉记忆）
  * 新命令在 services/commands.ts 注册，键位绑定只认 id。
  * 注意：已绑定的键一律 preventDefault（漏给 Chromium 会触发默认行为，如 Ctrl+S 存网页），
  * when 谓词只决定命令是否执行。
@@ -16,6 +18,8 @@ const KEY_BINDINGS: Record<string, string> = {
   s: 'file.save',
   m: 'view.toggleMemorySidebar',
   f: 'file.find',
+  b: 'view.toggleFileTree',
+  j: 'view.toggleChatPanel',
 }
 
 /** 需要同时按 Shift 的快捷键（Ctrl+Shift+X） */

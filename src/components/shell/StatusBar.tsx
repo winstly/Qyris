@@ -2,10 +2,15 @@ import { useAppStore } from '@/store/useAppStore'
 import { useBuildStore, selectCurrentBuild } from '@/store/useBuildStore'
 import { useFileStore } from '@/store/useFileStore'
 import { basename, languageLabel, extOf } from '@/utils/path'
+import { IconFile, IconSend } from '@/components/common/icons'
 
 export function StatusBar() {
   const projectPath = useAppStore((s) => s.projectPath)
   const activeTab = useAppStore((s) => s.activeTab)
+  const chatPanelCollapsed = useAppStore((s) => s.chatPanelCollapsed)
+  const fileTreeCollapsed = useAppStore((s) => s.fileTreeCollapsed)
+  const toggleChatPanel = useAppStore((s) => s.toggleChatPanel)
+  const toggleFileTree = useAppStore((s) => s.toggleFileTree)
   const { slots, slotOrder } = useBuildStore(selectCurrentBuild)
   const activePath = useFileStore((s) => s.activePath)
   const isDirty = useFileStore((s) => (activePath ? !!s.dirty[activePath] : false))
@@ -43,6 +48,25 @@ export function StatusBar() {
       </div>
 
       <div className="statusbar__group">
+        {/* 栏开关：折叠时高亮提示「这里有点东西被藏起来了」，点击或快捷键恢复 */}
+        <button
+          type="button"
+          className={`statusbar__toggle ${fileTreeCollapsed ? 'statusbar__toggle--off' : ''}`}
+          aria-pressed={!fileTreeCollapsed}
+          title={fileTreeCollapsed ? '展开文件树 (Ctrl+B)' : '折叠文件树 (Ctrl+B)'}
+          onClick={toggleFileTree}
+        >
+          <IconFile size={13} />
+        </button>
+        <button
+          type="button"
+          className={`statusbar__toggle ${chatPanelCollapsed ? 'statusbar__toggle--off' : ''}`}
+          aria-pressed={!chatPanelCollapsed}
+          title={chatPanelCollapsed ? '展开对话栏 (Ctrl+J)' : '折叠对话栏 (Ctrl+J)'}
+          onClick={toggleChatPanel}
+        >
+          <IconSend size={13} />
+        </button>
         {lastSavedAt && (
           <span className="statusbar__meta statusbar__saved">
             已保存 {new Date(lastSavedAt).toLocaleTimeString('zh-CN', { hour12: false })}

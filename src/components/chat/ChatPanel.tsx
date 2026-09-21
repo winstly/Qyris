@@ -7,7 +7,7 @@ import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
 import { AgentView } from './AgentPanel'
 import { Select } from '@/components/common/Select'
-import { IconGear, IconTrash, IconUndo } from '@/components/common/icons'
+import { IconChevron, IconGear, IconTrash, IconUndo } from '@/components/common/icons'
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   idle: '待命',
@@ -101,6 +101,17 @@ export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: bo
               <IconGear size={15} />
             </button>
           </div>
+        )}
+        {/* 折叠对话栏：主窗口专属——桌宠面板复用本组件（showHeaderActions=false），不渲染此按钮 */}
+        {showHeaderActions && (
+          <button
+            className="icon-btn chat__collapse-btn"
+            onClick={useAppStore.getState().toggleChatPanel}
+            aria-label="折叠对话栏"
+            title="折叠对话栏"
+          >
+            <IconChevron size={15} />
+          </button>
         )}
       </header>
 

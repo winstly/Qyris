@@ -380,6 +380,8 @@ function registerIpc(): void {
     if (petWin && !petWin.isDestroyed()) {
       const [x, y] = petWin.getPosition()
       petWin.setPosition(x + ix, y + iy)
+      // 面板实时跟随拖动：开着面板拖桌宠时，面板贴着图标走而不是停在原地
+      pet.repositionPanelIfVisible()
     }
   })
   // 主窗口生命周期：关闭询问回调（挂起中才受理，超时兜底已收口）+ 桌宠面板「打开主窗口」入口

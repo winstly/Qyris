@@ -499,7 +499,6 @@ async function claudeCliChatStreamAttempt(
       : undefined)
     mainLog.info(`[ai-cli] replay 模式：prompt=${prompt.length}字`)
   }
-  const isWin = process.platform === 'win32'
 
   return new Promise<AiCompletion>((resolve, reject) => {
     let child: ChildProcess
