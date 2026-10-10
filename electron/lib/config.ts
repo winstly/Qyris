@@ -20,6 +20,23 @@ export interface StartCommand {
   url?: string
 }
 
+/** 发布 tab 的服务器配置（非敏感；密码/口令走 secrets，key=ssh:<id>） */
+export interface DeployServer {
+  id: string
+  name: string
+  host: string
+  port: number
+  username: string
+  auth: 'password' | 'key'
+  privateKeyPath?: string
+  remotePath?: string
+  note?: string
+  /** 已部署服务标签（nginx / nacos / app-server / blog-portal …）——卡片展示 + AI 部署上下文 */
+  tags?: string[]
+  /** 部署策略（AI 判定或手动指定）：单机 / 微服务 / 集群 */
+  strategy?: 'single' | 'microservice' | 'cluster'
+}
+
 export interface AppConfig {
   lastProjectPath: string | null
   aiBaseUrl: string | null
@@ -31,6 +48,10 @@ export interface AppConfig {
   aiDispatchMode: 'api' | 'claude-cli'
   /** CLI 可执行文件名/路径：缺省 'claude'（Windows 经 cmd.exe 查 PATH），可改为自定义路径 */
   aiCliCommand?: string | null
+  /** 主对话工具循环轮数上限（API/CLI 通用，CLI 落为 --max-turns）：null=缺省 60；合法域 [4,500] */
+  aiMaxTurns?: number | null
+  /** 子 agent 单任务工具循环轮数上限：null=缺省 20；合法域 [2,200] */
+  aiSubagentMaxTurns?: number | null
   /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
   aiCliPermission: 'auto' | 'readonly'
   recentProjects?: RecentProject[]
@@ -56,6 +77,12 @@ export interface AppConfig {
   closeAction?: 'minimize' | 'quit'
   /** 桌宠音效开关：缺省 false（静音）；true 时播放 MP4 内置音轨 */
   petSound?: boolean
+  /** 隐藏桌宠：true 时桌宠窗口隐藏（不销毁，设置里可恢复） */
+  petHidden?: boolean
+  /** 发布 tab：服务器列表（密码不在此，走 secrets） */
+  deployServers?: DeployServer[]
+  /** 发布 tab：部署脚本草稿（serverId → 脚本内容，手写或 AI 生成） */
+  deployScripts?: Record<string, string>
   /** CLI 模式最近对话轮数（重放降级路径序列化多少轮 user+assistant+tool；缺省 8） */
   cliRecentRounds?: number
 }
@@ -87,6 +114,20 @@ function clampCompressThreshold(v: unknown): number | undefined {
   return n
 }
 
+/** 主对话工具循环轮数归一：合法区间 4..500，非法回 null（消费方取缺省 60） */
+function clampMaxTurns(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  const n = Math.floor(v)
+  return n >= 4 ? Math.min(500, n) : null
+}
+
+/** 子 agent 工具循环轮数归一：合法区间 2..200，非法回 null（消费方取缺省 20） */
+function clampSubagentMaxTurns(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  const n = Math.floor(v)
+  return n >= 2 ? Math.min(200, n) : null
+}
+
 /** 内存缓存：getConfig 被热路径频繁调用（memorySearch / embed / memAgent），避免每次读磁盘+JSON.parse */
 let configCache: AppConfig | null = null
 let configCacheAt = 0
@@ -112,6 +153,8 @@ export async function getConfig(): Promise<AppConfig> {
       aiDispatchMode: parsed.aiDispatchMode === 'claude-cli' ? 'claude-cli' : 'api',
       aiCliPermission: parsed.aiCliPermission === 'readonly' ? 'readonly' : 'auto',
       aiCliCommand: typeof parsed.aiCliCommand === 'string' && parsed.aiCliCommand.trim() ? parsed.aiCliCommand.trim() : null,
+      aiMaxTurns: clampMaxTurns(parsed.aiMaxTurns),
+      aiSubagentMaxTurns: clampSubagentMaxTurns(parsed.aiSubagentMaxTurns),
       recentProjects: Array.isArray(parsed.recentProjects) ? parsed.recentProjects : [],
       skillsDirs: mergeSkillDirs(parsed.skillsDirs, parsed.skillsDir),
       // 旧字段原样透传：渲染层启动迁移（并入 skillsDirs 后写 null 清空）依赖读到它
@@ -132,6 +175,13 @@ export async function getConfig(): Promise<AppConfig> {
       contextCompressThreshold: clampCompressThreshold(parsed.contextCompressThreshold),
       closeAction: parsed.closeAction === 'minimize' || parsed.closeAction === 'quit' ? parsed.closeAction : undefined,
       petSound: parsed.petSound === true ? true : undefined,
+      petHidden: parsed.petHidden === true ? true : undefined,
+      // 发布 tab：服务器列表/脚本草稿（重启持久化——此前漏在白名单外导致重启即丢）
+      deployServers: Array.isArray(parsed.deployServers) ? parsed.deployServers : undefined,
+      deployScripts:
+        parsed.deployScripts && typeof parsed.deployScripts === 'object' && !Array.isArray(parsed.deployScripts)
+          ? parsed.deployScripts
+          : undefined,
       cliRecentRounds: typeof parsed.cliRecentRounds === 'number' && parsed.cliRecentRounds >= 2 && parsed.cliRecentRounds <= 40
         ? Math.floor(parsed.cliRecentRounds) : undefined,
     }
@@ -141,14 +191,19 @@ export async function getConfig(): Promise<AppConfig> {
     const fallback: AppConfig = {
       lastProjectPath: null, aiBaseUrl: null, aiModel: null, aiProvider: null,
       aiTiers: undefined,
-      aiDispatchMode: 'api', aiCliPermission: 'auto', aiCliCommand: null,
+      aiDispatchMode: 'api', aiCliPermission: 'auto', aiCliCommand: null, aiMaxTurns: null, aiSubagentMaxTurns: null,
       recentProjects: [], skillsDirs: [], skillsDir: null,
       startupCommands: undefined, projectSkillsDirsMap: undefined,
       dataDir: null, embedModel: null, embedRemoteHost: null,
       memExtractRounds: undefined, contextCompressThreshold: undefined,
       closeAction: undefined,
     }
-    configCache = fallback; configCacheAt = Date.now()
+    // 损坏的原文件先备份再放行默认值；默认值不进缓存——缓存后 mergeConfig 会把
+    // 默认值当用户配置整体写回，等于清空用户配置
+    try {
+      const file = configPath()
+      await fsp.copyFile(file, `${file}.corrupt-${Date.now()}`)
+    } catch { /* 备份失败不阻断 */ }
     return fallback
   }
 }
@@ -171,7 +226,10 @@ export async function setConfig(config: AppConfig): Promise<void> {
     throw new Error(`无法获取应用数据目录：${errorMessage(e)}`)
   }
   try {
-    await fsp.writeFile(file, JSON.stringify(config, null, 2), 'utf8')
+    // 临时文件 + rename 原子替换：直接 writeFile 被中断会留下截断 JSON，下次读失败走默认值
+    const tmp = `${file}.tmp`
+    await fsp.writeFile(tmp, JSON.stringify(config, null, 2), 'utf8')
+    await fsp.rename(tmp, file)
   } catch (e) {
     throw new Error(`配置写入失败：${errorMessage(e)}`)
   }

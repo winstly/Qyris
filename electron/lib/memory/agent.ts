@@ -10,10 +10,9 @@
  *  - 输出 = 严格 JSON ops（create/patch/archive，no-op 合法）+ 滚动 summary（last-write-wins）；
  *    解析剥 code fence，失败按 no-op 处理并告警；非法 op 条目剔除不拖垮合法部分。
  *  - 防自食：本模块绝不写 messages 表（memU MEMU_BRIDGING_RUN 教训），断言见 smoke ③。
- *  - LLM 通道双 adapter，均为 headless 单轮：API 模式复用 aiChatStream（system=蒸馏指令，
- *    tools 传 undefined）；CLI 模式走 callCliJson 直调（--system-prompt 蒸馏指令 +
- *    --output-format json 单次返回，readonly 工具白名单 + --max-turns 1 + cwd 固定 homedir——
- *    记忆蒸馏绝不持项目写权限，也不给工具循环留口子）；
+ *  - LLM 通道统一走 ModelProvider（见 callAgent）：API 档按 aiProvider 分流 anthropic/openai，
+ *    CLI 档走 claude-cli（--safe-mode + --tools "" 无任何工具——记忆蒸馏绝不持项目写权限，
+ *    比 readonly 白名单更硬）。蒸馏指令走 system，结构化输出走 options.jsonSchema。
  *    模型取 aiTiers.middle 缺省回退主模型；API Key 缺失（getSecretInternal）→ 静默禁用。
  *  - 并发防护：per-project 串行队列 + 提取中标志，同 (project, session) 重复触发合并。
  *  - 失败退避（P3）：连续 LLM 失败按 min(2^count×60s, 30min) 退避，maybe_extract/run_now
@@ -22,17 +21,15 @@
  *    故 source_json 落 { messageSeqs: [...] } 而非 messageIds。
  * 测试钩子：setLlmHook（注入假 LLM，同时绕过启用检查）/ setClock（注入假时钟），smoke 全链路离线可测。
  */
-import { randomUUID } from 'node:crypto'
 import type { SqliteDb } from '../db'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { homedir } from 'node:os'
+import { basename } from 'node:path'
 import { getDb, projectKey } from '../db'
 import { getConfig } from '../config'
 import { getSecretInternal } from '../secrets'
 import { SECRET_ACCOUNT } from '../ai-api'
-import { aiChatStream } from '../ai'
-import { buildCliArgs } from '../ai-cli'
-import { registerOnceProc, cancelRunOnce, detectCommand } from '../proc'
+import { detectCommand } from '../proc'
+import { resolveProvider, type ProviderKind } from '../model/providers/registry'
+import type { ContentPart, Message, ModelProvider } from '../model/types'
 import { emitToAllWindows } from '../emitter'
 import * as service from './service'
 import { parseAgentJson } from './parse'
@@ -46,9 +43,10 @@ export const SYSTEM_PROMPT = `你是记忆蒸馏器。输入分两节：【增�
 铁律：
 1. 空操作是完全合格的产出——不要为了证明跑过而编造记忆（no-op 输出 {"ops":[],"summary":null}）
 2. 合并优先于新建：与现有记忆同主题时，输出 patch 更新原条目（targetId 从【现有记忆清单】里取），不要另起一条
-3. 只记稳定事实：用户偏好（包管理器/代码风格/工作流习惯）、项目结构与选型事实、踩坑教训、可复用的工作流技能；一次性的任务细节不值得记
-4. 读不到的不许猜：转录里没有的不要脑补；工具结果里的密钥/token/密码绝对不能进记忆
-5. title 一行以内，具体不含糊（「包管理器用 pnpm」好，「用户偏好」坏）
+3. scope 看内容指向哪个工程（【当前工程】= 本次蒸馏所属工程，见输入）：内容讲的是【当前工程】自身的事才产出；讲别的具名工程（哪怕是排查它的故障、哪怕转录里出现它的名字）→ no-op，绝不产出；两可（分不清指向哪个工程）→ 也 no-op。宁可漏记，不许串工程污染
+4. 只记稳定事实：用户偏好（包管理器/代码风格/工作流习惯）、项目结构与选型事实、踩坑教训、可复用的工作流技能；一次性的任务细节不值得记
+5. 读不到的不许猜：转录里没有的不要脑补；工具结果里的密钥/token/密码绝对不能进记忆
+6. title 一行以内，具体不含糊（「包管理器用 pnpm」好，「用户偏好」坏）
 
 输出格式：严格输出一个 JSON 对象（单行），禁止 markdown 代码块、禁止任何解释文字、禁止在 JSON 前后输出任何文字：
 {"ops":[{"op":"create","scope":"project|user","tier":"long","category":"preference|fact|event|lesson|skill","title":"一行标题","content":"记忆正文","importance":0.5,"sources":["#seq"]}],"summary":"本会话摘要或null"}
@@ -64,7 +62,7 @@ export const SYSTEM_PROMPT = `你是记忆蒸馏器。输入分两节：【增�
     不对/没意义 → "project"（仅本工程：目录结构、技术选型与约定、接口配置、本项目踩坑教训）
   · user 正例：「用户偏好 pnpm 而非 npm」「用户要求注释用中文」「用户常用 tailwind」
   · project 正例：「本项目用 sqlite-vec」「本项目的 IPC 五层接线约定」
-  · 两可时选 project（宁少污染跨工程视野）
+  · scope 判定的前置是铁律 3：内容必须指向【当前工程】才谈 scope；指向别的具名工程或两可 → 直接 no-op
 - 【现有记忆清单】为「（暂无）」时是首次蒸馏：更倾向 create，但依然只记稳定事实、禁止编造
 - 无产出时输出：{"ops":[],"summary":null}
 JSON 安全规则（违反必然解析失败）：
@@ -225,19 +223,16 @@ export async function memoryMaybeExtract(projectRoot: string, sessionId: string)
   const db = await getDb()
   let cur = cursors.get(ck)
   if (!cur) {
-    // 首见：优先恢复持久化游标（重启/接管场景）；无持久化记录 → 从 messages 表取 MAX(seq) 作为基线
-    //（避免基线 0 导致「重启后重扫全部旧消息→LLM 超时→失败→退避」的连锁故障）
+    // 首见：优先恢复持久化游标（重启/接管场景，含基线 0 的记录）；无持久化记录 = 从未蒸馏 →
+    // 基线 0（该会话历史整体进蒸馏窗口）。旧的 MAX(seq) 回退会把首轮误标为已蒸馏、
+    // 新会话前 N 轮永不蒸馏（P2 修复回归的靶子）；存量长会话的重扫规模由转录预算兜底。
     const persisted = await loadPersistedCursor(db, ck)
     if (persisted !== null) {
       cur = { cursor: persisted, lastRunAt: 0 }
     } else {
-      const maxSeq = await maxSeqOf(db, key, sessionId)
-      cur = { cursor: maxSeq, lastRunAt: 0 }
-      if (maxSeq > 0) {
-        console.info(`[mem-agent] 首见游标（无持久化记录），从 messages 表取 MAX(seq)=${maxSeq} 作为基线（不回溯旧消息）`)
-        // 持久化基线，防止下次重启再取
-        await persistCursor(db, ck, maxSeq)
-      }
+      cur = { cursor: 0, lastRunAt: 0 }
+      // 落盘基线 0：重启后恢复的是「从头蒸馏」而不是再次落进首见分支
+      await persistCursor(db, ck, 0)
     }
     cursors.set(ck, cur)
   }
@@ -314,7 +309,7 @@ async function latestSessionId(projectRoot: string): Promise<string | null> {
 /** 手动「立即整理」（记忆面板按钮）：对当前 session 立即增量提取（无视冷却，仍防并发）。
  *  未启用回 ok=false；无会话时从 messages 表兜底查找。返回 ops 供面板区分"有产出"和"no-op"。 */
 export async function memoryRunNow(projectRoot: string): Promise<{ ok: boolean; error?: string; ops?: number }> {
-  if (!(await resolveRunContext())) return { ok: false, error: '记忆蒸馏未启用：未配置 API Key 或模型。请在设置中配置 AI 助手。' }
+  if (!(await resolveModelProvider())) return { ok: false, error: '记忆蒸馏未启用：未配置 API Key 或模型。请在设置中配置 AI 助手。' }
   const key = projectKey(projectRoot)
   const sessionId = lastSession.get(key) ?? await latestSessionId(projectRoot)
   if (!sessionId) return { ok: false, error: '当前无活跃会话，请先发送一条消息。' }
@@ -371,11 +366,12 @@ interface TranscriptRow {
   tool_json: string | null
 }
 
-/** 最近一次提取错误（memoryRunNow 返回后清空） */
+/** 最近一次提取错误（每次提取开始时清空，memoryRunNow 只看本轮的错误） */
 let lastExtractError: string | null = null
 
 /** 提取主流程：读增量 → 组装 → LLM → 解析 → 执行 ops → 推进游标。异常只告警（游标不动，下轮重试）。返回实际应用的 ops 数。 */
 async function runExtraction(projectRoot: string, sessionId: string, trigger: string): Promise<number> {
+  lastExtractError = null // 每轮独立记账：不把上一轮的陈旧错误算进本轮
   try {
     return await runExtractionInner(projectRoot, sessionId, trigger)
   } catch (e) {
@@ -412,7 +408,7 @@ async function runExtractionInner(projectRoot: string, sessionId: string, trigge
     }
     return 0
   }
-  if (!(await resolveRunContext())) return 0
+  if (!(await resolveModelProvider())) return 0
   return extractWithRows(projectRoot, sessionId, trigger, ck, rows)
 }
 
@@ -427,7 +423,10 @@ async function extractWithRows(
   const titles = (await service.listContextTitles(projectRoot, sessionId, CONTEXT_TITLES_LIMIT))
     .map((t) => `- [${t.category}] ${t.title}（${t.id}）`)
   // 两节的角色标注进提示（patch/archive 的 targetId 从清单取；「（暂无）」标记被 smoke 断言钉死）
+  // 【当前工程】锚点：铁律 3 的 scope 判定基准——不给工程名，模型无从判断内容指向哪个工程，
+  // 「排查 BetaProject 卡死」会被误记进当前工程的 project 记忆（串工程污染）
   const user = [
+    `【当前工程】${basename(projectRoot)}`,
     '【增量转录】（#序号 发言人：内容；工具调用为一行摘要）',
     transcript.text,
     '【现有记忆清单】（- [分类] 标题（id）；patch/archive 的 targetId 从这里取）',
@@ -439,7 +438,7 @@ async function extractWithRows(
   let out: AgentOutput | null = null
 
   try {
-    raw = llmHook ? await llmHook(SYSTEM_PROMPT, user) : await callLlm(SYSTEM_PROMPT, user)
+    raw = await callAgent(SYSTEM_PROMPT, user)
   } catch (e) {
     failCount++
     backoffUntil = clock() + backoffDelayFor(failCount)
@@ -465,9 +464,7 @@ async function extractWithRows(
         `你上一次的错误输出（供参考）：\n${raw.slice(0, 2000)}`,
       ].join('\n')
       try {
-        raw = llmHook
-          ? await llmHook(SYSTEM_PROMPT, `${user}\n\n${feedback}`)
-          : await callLlm(SYSTEM_PROMPT, `${user}\n\n${feedback}`)
+        raw = await callAgent(SYSTEM_PROMPT, `${user}\n\n${feedback}`)
       } catch (e) {
         lastExtractError = `LLM 重试调用失败：${String(e)}`
         console.warn(`[mem-agent] ${lastExtractError}`)
@@ -608,30 +605,18 @@ function toolArgSummary(args: Record<string, unknown>): string {
   return firstLine.length > TOOL_SUMMARY_MAX ? `${firstLine.slice(0, TOOL_SUMMARY_MAX)}…` : firstLine
 }
 
-// ---------- LLM 调用（仅 API adapter，headless 单轮） ----------
+// ---------- LLM 调用（ModelProvider headless 单轮） ----------
 
-interface RunContext {
-  provider: string
-  baseUrl: string
-  model: string
-  dispatchMode: string
-}
-
-let disabledLogged = false
-/** 连续未启用计数：首次打 warn，后续每 10 次打一条（防刷屏但保持可观测） */
-let disabledSkipCount = 0
-
-/** 启用检查：llmHook 存在 = 测试模式直通。
- *  蒸馏跟随主模型调度（aiDispatchMode）：CLI / API。
- *  配置不完整 / Key 缺失 / CLI 未安装静默禁用。 */
-async function resolveRunContext(): Promise<RunContext | null> {
-  if (llmHook) return { provider: 'openai', baseUrl: 'test://llm-hook', model: 'test-model', dispatchMode: 'api' }
+/** 按配置解析模型来源（统一走 ModelProvider，见 model/types.ts）。
+ *  API 直连按 aiProvider 分流 anthropic / openai；CLI 档走 claude-cli。
+ *  换 Codex / OpenCode 只改这里的 kind，上层 callAgent 零改动——这正是「模型是服务」的验收点。 */
+async function resolveModelProvider(): Promise<ModelProvider | null> {
   const cfg = await getConfig()
   const dispatchMode = cfg.aiDispatchMode ?? 'api'
   if (dispatchMode === 'claude-cli') {
     const cliCmd = cfg.aiCliCommand || 'claude'
     if ((await detectCommand(cliCmd)) === false) return disabled(`CLI 命令 '${cliCmd}' 不可用`)
-    return { provider: 'openai', baseUrl: '', model: cfg.aiModel || '', dispatchMode: 'claude-cli' }
+    return resolveProvider('claude-cli', { kind: 'claude-cli', cliCommand: cliCmd })
   }
   if (!cfg.aiBaseUrl || !cfg.aiModel) return disabled('API 配置不完整（未设置 Base URL 或模型）')
   let key: string | null = null
@@ -641,8 +626,13 @@ async function resolveRunContext(): Promise<RunContext | null> {
     key = null
   }
   if (!key) return disabled('API Key 缺失（请在设置中配置）')
-  return { provider: cfg.aiProvider ?? 'openai', baseUrl: cfg.aiBaseUrl, model: cfg.aiModel, dispatchMode: 'api' }
+  const kind: ProviderKind = (cfg.aiProvider ?? '').toLowerCase().includes('anthropic') ? 'anthropic' : 'openai'
+  return resolveProvider(kind, { kind, apiKey: key, baseUrl: cfg.aiBaseUrl, model: cfg.aiModel })
 }
+
+let disabledLogged = false
+/** 连续未启用计数：首次打 warn，后续每 10 次打一条（防刷屏但保持可观测） */
+let disabledSkipCount = 0
 
 function disabled(reason: string): null {
   disabledSkipCount++
@@ -655,49 +645,9 @@ function disabled(reason: string): null {
   return null
 }
 
-/** headless 单轮调用：requestId 独立前缀（与渲染层 uid 空间隔离）；windowId=null 不定向路由 */
-async function callLlm(system: string, user: string): Promise<string> {
-  const ctx = await resolveRunContext()
-  if (!ctx) throw new Error('mem-agent 未启用')
-
-  if (ctx.dispatchMode === 'claude-cli') {
-    // CLI 模式：--system-prompt + --output-format json，单次返回完整结果，不走流式解析
-    const result = await callCliJson(system, user, ctx.model)
-    service.addDistillTokens(
-      Math.ceil((system.length + user.length) / 4),
-      Math.ceil(result.length / 4),
-    )
-    return result
-  }
-
-  const completion = await aiChatStream(
-    `mem-agent-${randomUUID()}`,
-    ctx.provider,
-    ctx.baseUrl,
-    ctx.model,
-    [
-      { role: 'system' as const, content: system },
-      { role: 'user' as const, content: user },
-    ],
-    undefined,
-    'api',
-    null,
-    null,
-  )
-  service.addDistillTokens(
-    Math.ceil((system.length + user.length) / 4),
-    Math.ceil((completion.content ?? '').length / 4),
-  )
-  return completion.content ?? ''
-}
-
-/** CLI 直调：--system-prompt + --output-format json + --json-schema，spawn 子进程拿完整结果。
- *  纪律三件套：readonly 工具白名单（蒸馏绝不持写权限）/ max-turns 1（headless 单轮，不给工具
- *  循环留口子）/ 超时树杀（挂起必须能自愈，否则 per-project 串行队列被永久占死） */
-const MEM_AGENT_CLI_TIMEOUT_MS = 10 * 60_000
-
-/** 记忆蒸馏 JSON Schema（--json-schema 强制输出结构，彻底消除格式偏差） */
-const DISTILL_JSON_SCHEMA = JSON.stringify({
+/** 记忆蒸馏输出契约（结构化，彻底消除格式偏差）。
+ *  传对象给 provider，由它按各自方言落地（claude 走 --json-schema，codex 走临时文件）。 */
+const DISTILL_JSON_SCHEMA = {
   type: 'object',
   properties: {
     ops: {
@@ -721,98 +671,48 @@ const DISTILL_JSON_SCHEMA = JSON.stringify({
     },
     summary: { type: ['string', 'null'] },
   },
-  required: ['ops'],
-})
+  // 根级不设 required:['ops']：空转录时模型只会给 summary/空对象，强求 ops 会让
+  // CLI 的 structured-output 校验连挂 5 次后 exit 1（实测报「must have required property 'ops'」）。
+  // 提取指令里已约定 no-op 输出 {"ops":[],"summary":null}，缺 ops 由 parseAgentJson 归一成 []。
+} as const
 
-async function callCliJson(systemPrompt: string, userMessage: string, model: string): Promise<string> {
-  const prompt = `<conversation>\n用户：${userMessage}\n</conversation>`
-  // --bare：跳过 hooks/skills/MCP/CLAUDE.md，蒸馏是纯文本→JSON 单轮任务，不需要这些
-  // readonly 档（--allowedTools 白名单，只读）而非 auto（--dangerously-skip-permissions）
-  // --json-schema 强制输出结构：ops 字段名、op 类型、category 枚举全部由 schema 保证
-  const args = buildCliArgs(model, 'readonly', { bare: true, systemPrompt, outputFormat: 'json', maxTurns: 1, jsonSchema: DISTILL_JSON_SCHEMA })
-  const isWin = process.platform === 'win32'
-  const cfg = await getConfig()
-  const cliCmd = cfg.aiCliCommand || 'claude'
+/** 从内容块抽纯文本（补全结果的权威正文） */
+function textOfContent(parts: readonly ContentPart[]): string {
+  return parts
+    .filter((p): p is Extract<ContentPart, { type: 'text' }> => p.type === 'text')
+    .map((p) => p.text)
+    .join('')
+}
 
-  return new Promise<string>((resolve, reject) => {
-    let child: ChildProcess
-    try {
-      child = spawn(isWin ? 'cmd.exe' : cliCmd, isWin ? ['/C', cliCmd, ...args] : args, {
-        cwd: homedir(),
-        stdio: ['pipe', 'pipe', 'pipe'],
-        windowsHide: true,
-      })
-    } catch (e) {
-      reject(new Error(`CLI 启动失败：${String(e)}`))
-      return
-    }
-    // 登记进 onceProc 取消链：超时/退出清理走统一 cancelRunOnce（Windows cmd.exe /C 需树杀）。
-    // token 必须私有（传参取消），无参 cancelRunOnce 会误杀全部在途一次性子进程
-    const token = `mem-agent-cli-${randomUUID()}`
-    const unregister = registerOnceProc(token, child)
-    let stdout = ''
-    let stderr = ''
-    let settled = false
-    let interrupted = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const settle = (fn: () => void): void => {
-      if (settled) return
-      settled = true
-      if (timer) clearTimeout(timer)
-      unregister()
-      fn()
-    }
-    timer = setTimeout(() => {
-      interrupted = true
-      cancelRunOnce(token) // 只杀自己，不碰聊天主链路的在途 CLI 子进程
-    }, MEM_AGENT_CLI_TIMEOUT_MS)
+/** 蒸馏调用入口：统一走 ModelProvider（无状态补全，provider 不碰会话）。
+ *  上层传参/交互与原 callLlm 一致；smoke 仍走 llmHook 离线直通。 */
+async function callAgent(system: string, user: string): Promise<string> {
+  const hook = llmHook
+  if (hook) {
+    const raw = await hook(system, user)
+    service.addDistillTokens(Math.ceil((system.length + user.length) / 4), Math.ceil(raw.length / 4))
+    return raw
+  }
 
-    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
-    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
+  const provider = await resolveModelProvider()
+  if (!provider) throw new Error('mem-agent 未启用')
 
-    if (!child.stdin) {
-      settle(() => reject(new Error('CLI stdin 不可用')))
-      return
-    }
-    child.stdin.write(prompt)
-    child.stdin.end()
+  const messages: Message[] = [
+    { role: 'system', content: [{ type: 'text', text: system }] },
+    { role: 'user', content: [{ type: 'text', text: user }] },
+  ]
 
-    child.on('close', (code) => {
-      settle(() => {
-        if (interrupted) {
-          reject(new Error(`CLI 蒸馏超过 ${MEM_AGENT_CLI_TIMEOUT_MS / 60_000} 分钟未返回，已中止`))
-          return
-        }
-        if (code !== 0) {
-          reject(new Error(`CLI 退出码 ${code}：${stderr.slice(-500)}`))
-          return
-        }
-        // --output-format json 返回 {"result":"...","structured_output":{...}}
-        // --json-schema 时 structured_output 是 schema 约束的 JSON，优先使用
-        try {
-          const parsed = JSON.parse(stdout) as { result?: string; structured_output?: unknown; is_error?: boolean }
-          if (parsed.is_error) {
-            reject(new Error(`CLI 报告错误：${parsed.result ?? '未知'}`))
-            return
-          }
-          // 优先取 structured_output（--json-schema 约束的结构化结果）
-          if (parsed.structured_output && typeof parsed.structured_output === 'object') {
-            const so = JSON.stringify(parsed.structured_output)
-            console.info(`[mem-agent] CLI json 返回 structured_output 长度=${so.length}，前300字：${so.slice(0, 300)}`)
-            resolve(so)
-          } else {
-            const resultText = parsed.result ?? stdout
-            console.info(`[mem-agent] CLI json 返回 result 长度=${resultText.length}，前300字：${resultText.slice(0, 300)}`)
-            resolve(resultText)
-          }
-        } catch {
-          // 如果不是 JSON，直接用原始输出
-          console.info(`[mem-agent] CLI json 返回非JSON，原始输出前300字：${stdout.slice(0, 300)}`)
-          resolve(stdout.trim())
-        }
-      })
-    })
+  // 增量优先、done.message 兜底（与 runner 同口径）；provider 已保证 done 正文 === 增量拼接
+  let text = ''
+  for await (const ev of provider.complete({ messages, options: { jsonSchema: DISTILL_JSON_SCHEMA } })) {
+    if (ev.type === 'text-delta') text += ev.text
+    else if (ev.type === 'done') text = textOfContent(ev.message.content) || text
+    else if (ev.type === 'error') throw ev.error
+  }
 
-    child.on('error', (e) => settle(() => reject(e)))
-  })
+  service.addDistillTokens(
+    Math.ceil((system.length + user.length) / 4),
+    Math.ceil(text.length / 4),
+  )
+  return text
 }

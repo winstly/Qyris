@@ -10,4 +10,6 @@ export const DEFAULT_SETTINGS: AiSettings = {
   dispatchMode: 'api',
   cliPermission: 'auto',
   cliCommand: null,
+  maxTurns: null,
+  subagentMaxTurns: null,
 }

@@ -2,17 +2,21 @@
  * git 操作过场弹窗：运行中（转圈，不可关闭）→ 成功（✓ + 输出）/ 失败（✗ + 原因）→ 用户手动关闭。
  * 挂载于 FilesTab 一次；GitPanel 按钮与文件树右键的 git 操作共用。
  */
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { useGitStore } from '@/store/useGitStore'
 import { IconAlert, IconCheck, IconClose } from '@/components/common/icons'
 
 export function GitOpDialog() {
   const dialog = useGitStore((s) => s.opDialog)
   const closeOpDialog = useGitStore((s) => s.closeOpDialog)
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
+
   if (!dialog) return null
   const done = dialog.state !== 'running'
 
   return (
     <div
+      ref={trapRef}
       className="modal-mask"
       onMouseDown={(e) => { if (e.target === e.currentTarget && done) closeOpDialog() }}
     >

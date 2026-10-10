@@ -108,7 +108,9 @@ async function runOne(task: SubTask, threadId: string, project: string): Promise
     return { text: result, kind }
   }
 
-  for (let round = 0; round < MAX_ROUNDS; round++) {
+  // 轮数上限：设置 aiSubagentMaxTurns 可调（loadSettings 已归一），未设置走 MAX_ROUNDS
+  const maxRounds = settings.subagentMaxTurns ?? MAX_ROUNDS
+  for (let round = 0; round < maxRounds; round++) {
     if (useChatStore.getState().byProject[project]?.cancelled) return finish('cancelled', '（主对话已取消，子任务中止）')
     let completion: AiCompletion
     // 子 agent 请求带内部前缀：镜像窗口按 INTERNAL_REQUEST_RE 拒绝认领/收口这些旁路流
@@ -152,7 +154,7 @@ async function runOne(task: SubTask, threadId: string, project: string): Promise
       const out = tc.name === 'dispatch_subtasks'
         // 结构化成败协议（与主对话侧 executeTool 同口径）
         ? { ok: false, result: '错误：子任务内不能再派发子任务（禁止嵌套），请自行完成该工作。', summary: '禁止嵌套派发' }
-        : await executeTool(tc.name, args, project)
+        : await executeTool(tc.name, args, '', project)
       const ok = out.ok
       useAgentStore.getState().patchTool(threadId, tc.id, {
         status: ok ? 'done' : 'error',

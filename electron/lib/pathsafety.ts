@@ -21,13 +21,14 @@ function splitComponents(p: string): string[] {
   return p.split(/[\\/]+/).filter((s) => s.length > 0)
 }
 
-/** 组件级前缀比较（大小写敏感） */
+/** 组件级前缀比较（Windows 路径大小写不敏感；其余平台敏感） */
 function startsWithComponents(root: string, target: string): boolean {
   const r = splitComponents(root)
   const t = splitComponents(target)
   if (t.length < r.length) return false
+  const fold = process.platform === 'win32' ? (s: string) => s.toLowerCase() : (s: string) => s
   for (let i = 0; i < r.length; i++) {
-    if (r[i] !== t[i]) return false
+    if (fold(r[i]) !== fold(t[i])) return false
   }
   return true
 }

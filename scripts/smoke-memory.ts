@@ -89,7 +89,8 @@ async function main(): Promise<void> {
   const extraDirs: string[] = [] // 迁移段临时目录（dirB/dirC/dirD），finally 统一清理
   try {
     console.log('① 初始化：')
-    initDbAt(dir)
+    // initDbAt 内部先 await closeDb() 再落 overrideDir：不 await 会在 override 生效前就读 dataDir
+    await initDbAt(dir)
     check('库文件已创建', () => assert.ok(existsSync(path.join(dir, 'qyris.db'))))
     await checkAsync('dataDir() 返回显式目录', async () => assert.equal(await dataDir(), dir))
     await checkAsync('空库 recent 回空形', async () => assert.deepEqual(await messagesRecent(root), {
@@ -257,6 +258,8 @@ async function main(): Promise<void> {
     await checkAsync('命中回写 access_count/last_accessed_at', async () => {
       const before = (await memoryList(root)).items.find((i) => i.id === itemA.id)
       await memorySearch('登录鉴权', root)
+      // 回写是 setImmediate 延迟落库（不阻塞检索响应）：让一拍再读，否则读到旧计数
+      await new Promise((r) => setImmediate(r))
       const after = (await memoryList(root)).items.find((i) => i.id === itemA.id)
       assert.equal(after!.accessCount, before!.accessCount + 1)
       assert.ok(after!.lastAccessedAt !== null)
@@ -500,7 +503,8 @@ async function main(): Promise<void> {
     await memoryClear('all')
     await checkAsync('clear(all) 清空全部', async () => assert.equal((await memoryStats()).total, 0))
   } finally {
-    closeDb()
+    // 先 await 关库再删临时目录：Windows 上 Worker 还握着 db 文件时 rm 会 EPERM
+    await closeDb()
     rmSync(dir, { recursive: true, force: true })
     for (const d of extraDirs) rmSync(d, { recursive: true, force: true })
   }
@@ -510,6 +514,8 @@ async function main(): Promise<void> {
     process.exit(1)
   }
   console.log('\n全部断言通过')
+  // sqlite worker 的 MessagePort 在 closeDb 后仍挂事件循环，不显式退出则 npm run 永不收口
+  process.exit(0)
 }
 
 void main().catch((e) => {

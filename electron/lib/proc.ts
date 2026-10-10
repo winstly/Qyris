@@ -1,7 +1,7 @@
 /** 子进程管理 —— 多槽版本：每个命名服务一个槽，互不干扰；同名槽重启 = 先杀旧再启 */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { SequencerByKey } from '../../shared/base/async'
-import { promises as fsp, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, promises as fsp, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import path from 'node:path'
 import type { Readable } from 'node:stream'
 import { app, net } from 'electron'
@@ -46,9 +46,42 @@ function getStreamEncoding(): string {
   return _streamEncoding
 }
 
-/** 每个流独立 TextDecoder——并发流共享单例会导致 GBK/Shift_JIS 多字节状态交叉污染 */
-function newStreamDecoder(): InstanceType<typeof TextDecoder> {
-  return new TextDecoder(getStreamEncoding())
+/** 每个流独立 TextDecoder——并发流共享单例会导致 GBK/Shift_JIS 多字节状态交叉污染。
+ *  解码策略：UTF-8 优先 + U+FFFD 才回落 OEM 代码页。单一编码解一切必有一半是乱码：
+ *  npm/git/node 等现代 CLI 输出 UTF-8（chcp 936 硬解 → 「鈫/鈥」类反乱码），
+ *  而 cmd.exe 自身报错与老式命令输出 OEM（GBK）。先按 UTF-8 流式解（跨块保住被
+ *  切断的多字节序列），出现「非法字节产生的 U+FFFD」才回落 OEM 流式解。
+ *  回落判定排除文本自带的 U+FFFD 字面量（EF BF BD）；回落时重置 UTF-8 流状态，
+ *  OEM 解码器同样走 stream，跨块双字节序列不被 chunk 边界切断。 */
+export function makeStreamDecoder(): {
+  decode(chunk?: Buffer | string, opts?: { stream?: boolean }): string
+} {
+  const UFFFD_BYTES = Buffer.from([0xef, 0xbf, 0xbd])
+  let utf8 = new TextDecoder('utf-8', { fatal: false })
+  const oemEncoding = getStreamEncoding()
+  // Windows 上 chcp 探测失败（超时/异常）也保留 GBK 兜底——cmd.exe 报错恒是系统代码页
+  const oemName = IS_WIN ? (oemEncoding !== 'utf-8' ? oemEncoding : 'gbk') : null
+  const oem = oemName ? new TextDecoder(oemName, { fatal: false }) : null
+  return {
+    decode(chunk?: Buffer | string, opts?: { stream?: boolean }): string {
+      if (typeof chunk === 'string') return chunk
+      if (chunk === undefined) return utf8.decode()
+      const stream = opts?.stream ?? false
+      const asUtf8 = utf8.decode(chunk, { stream })
+      const badBytes = asUtf8.includes('�') && !chunk.includes(UFFFD_BYTES)
+      if (oem && badBytes) {
+        // 非法 UTF-8：丢弃 UTF-8 侧残留状态，整块按 OEM 流式解（跨块双字节由 oem 流状态续接）
+        utf8 = new TextDecoder('utf-8', { fatal: false })
+        return oem.decode(chunk, { stream })
+      }
+      return asUtf8
+    },
+  }
+}
+
+/** 每条流各持一个解码器实例（同 makeStreamDecoder 的并发纪律） */
+function newStreamDecoder(): ReturnType<typeof makeStreamDecoder> {
+  return makeStreamDecoder()
 }
 
 /** 从流中按行回调：实时场景（runProject 日志）。Windows 用 OEM 代码页解码原始字节 */
@@ -70,8 +103,15 @@ function pipeLines(stream: Readable | null, onLine: (line: string) => void): voi
   })
 }
 
-/** 从流中收集全部行：一次性命令场景（runOnce 输出）。tag 非空时每行加 `[tag]` 前缀 */
-function collectLines(stream: Readable | null, lines: string[], cap: number, tag?: string): void {
+/** 从流中收集全部行：一次性命令场景（runOnce 输出）。tag 非空时每行加 `[tag]` 前缀；
+ *  onLine 提供时逐行实时回调（工具执行期给聊天窗喂进度，避免长命令静默数分钟） */
+function collectLines(
+  stream: Readable | null,
+  lines: string[],
+  cap: number,
+  tag?: string,
+  onLine?: (line: string) => void,
+): void {
   if (!stream) return
   const dec = newStreamDecoder()
   const prefix = tag ? `[${tag}] ` : ''
@@ -80,7 +120,9 @@ function collectLines(stream: Readable | null, lines: string[], cap: number, tag
     tail += dec.decode(chunk, { stream: true })
     let nl: number
     while ((nl = tail.indexOf('\n')) >= 0) {
-      lines.push(prefix + tail.slice(0, nl).replace(/\r$/, ''))
+      const text = prefix + tail.slice(0, nl).replace(/\r$/, '')
+      lines.push(text)
+      onLine?.(text)
       if (lines.length > cap) lines.splice(0, lines.length - cap)
       tail = tail.slice(nl + 1)
     }
@@ -188,7 +230,14 @@ export function killRunningForCleanup(): void {
   for (const key of [...slots.keys()]) takeAndKillOne(key)
 }
 
-export async function runProject(projectRoot: string, name: unknown, command: string, windowId: number | null = null): Promise<number> {
+export interface RunProjectHooks {
+  /** 每行输出回调（已剥 ANSI）：工具层镜像槽位状态用（权威状态机在渲染层 useBuildStore） */
+  onLine?: (stream: 'stdout' | 'stderr', line: string) => void
+  /** 进程退出回调（与 build-exit 同刻） */
+  onExit?: (code: number | null) => void
+}
+
+export async function runProject(projectRoot: string, name: unknown, command: string, windowId: number | null = null, hooks?: RunProjectHooks): Promise<number> {
   try {
     const st = await fsp.stat(projectRoot)
     if (!st.isDirectory()) throw new Error(`项目目录不存在：${projectRoot}`)
@@ -233,8 +282,16 @@ export async function runProject(projectRoot: string, name: unknown, command: st
     else emitToRenderer(channel, msg)
   }
 
-  pipeLines(proc.stdout, (line) => emit('build-output', { stream: 'stdout', line: stripAnsi(line) }))
-  pipeLines(proc.stderr, (line) => emit('build-output', { stream: 'stderr', line: stripAnsi(line) }))
+  pipeLines(proc.stdout, (line) => {
+    const clean = stripAnsi(line)
+    hooks?.onLine?.('stdout', clean)
+    emit('build-output', { stream: 'stdout', line: clean })
+  })
+  pipeLines(proc.stderr, (line) => {
+    const clean = stripAnsi(line)
+    hooks?.onLine?.('stderr', clean)
+    emit('build-output', { stream: 'stderr', line: clean })
+  })
 
   // spawn 异步失败：以 build-exit{-1} 收口
   const isCurrent = (): boolean => slots.get(key)?.proc === proc
@@ -242,6 +299,7 @@ export async function runProject(projectRoot: string, name: unknown, command: st
     if (isCurrent()) {
       slots.delete(key)
       emit('build-exit', { code: -1 })
+      hooks?.onExit?.(-1)
     }
     if (proc.pid) unregisterServiceProc(proc.pid)
   })
@@ -250,6 +308,7 @@ export async function runProject(projectRoot: string, name: unknown, command: st
     if (!isCurrent()) return
     slots.delete(key)
     emit('build-exit', { code: code ?? -1 })
+    hooks?.onExit?.(code ?? -1)
   })
 
   slots.set(key, { name: key, proc })
@@ -280,6 +339,16 @@ export async function detectCommand(command: string): Promise<boolean | null> {
   const token = firstToken(command)
   if (!token) return null
   if (process.platform === 'win32' && CMD_BUILTINS.has(token.toLowerCase())) return true
+  // 含路径分隔符 = 显式路径：where.exe 只认「文件名模式」（cwd+PATH 搜索），
+  // 绝对/相对路径模式直接报「无效模式」exit 2，会被当成探测失败误报「未找到 CLI 命令」
+  // ——显式路径改走存在性检查（Windows 无扩展名时按可执行扩展名补全）
+  if (/[\\/]/.test(token)) {
+    const candidates = [token, ...(process.platform === 'win32' ? ['.cmd', '.bat', '.exe'].map((e) => token + e) : [])]
+    if (candidates.some((c) => existsSync(c))) return true
+    // 绝对路径不存在 = 确定没有（false）；相对路径的解析依赖 cwd，spawn 侧（projectRoot）
+    // 与本进程 cwd 可能不同（./gradlew、node_modules/.bin/*），不能误杀，交回给调用方按 null 放行
+    return path.isAbsolute(token) ? false : null
+  }
   return new Promise((resolve) => {
     try {
       const isWin = process.platform === 'win32'
@@ -469,12 +538,23 @@ const runOnceSequencer = new SequencerByKey<string>()
 
 /** 执行一条跑完即退的命令：不建服务槽、不产生 build-output 事件，返回退出码与尾部输出（回传 AI）。
  *  同工程并发调用按到达顺序排队执行。cancelToken：在途期间登记进 onceProcs，供 cancelRunOnce 硬中断 */
-export function runOnce(projectRoot: string, command: string, cancelToken?: unknown): Promise<{ code: number | null; output: string }> {
+export function runOnce(
+  projectRoot: string,
+  command: string,
+  cancelToken?: unknown,
+  /** 逐行实时回调：工具执行期把输出喂给聊天窗，长命令不再静默数分钟 */
+  hooks?: { onLine?: (stream: 'stdout' | 'stderr', line: string) => void },
+): Promise<{ code: number | null; output: string }> {
   const key = projectRoot.replace(/[\\/]+$/, '').toLowerCase()
-  return runOnceSequencer.queue(key, () => runOnceInner(projectRoot, command, cancelToken))
+  return runOnceSequencer.queue(key, () => runOnceInner(projectRoot, command, cancelToken, hooks))
 }
 
-async function runOnceInner(projectRoot: string, command: string, cancelToken?: unknown): Promise<{ code: number | null; output: string }> {
+async function runOnceInner(
+  projectRoot: string,
+  command: string,
+  cancelToken?: unknown,
+  hooks?: { onLine?: (stream: 'stdout' | 'stderr', line: string) => void },
+): Promise<{ code: number | null; output: string }> {
   try {
     const st = await fsp.stat(projectRoot)
     if (!st.isDirectory()) throw new Error(`项目目录不存在：${projectRoot}`)
@@ -500,7 +580,9 @@ async function runOnceInner(projectRoot: string, command: string, cancelToken?: 
         stdio: ['ignore', 'pipe', 'pipe'],
         windowsHide: true,
         detached: !isWin,
-        env: { ...buildChildEnv(), NO_COLOR: '1', FORCE_COLOR: '0' },
+        // CI=1：脚手架类（npm create 等）走非交互默认值快速通过——stdin 已 ignore，
+        // 交互式提示读不到输入，不设 CI 会在「等输入」上挂满整个超时窗口（聊天窗表现为静默假死）
+        env: { ...buildChildEnv(), NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', npm_config_yes: 'true' },
       })
     } catch (e) {
       reject(new Error(`命令启动失败：${errorMessage(e)}`))
@@ -512,8 +594,8 @@ async function runOnceInner(projectRoot: string, command: string, cancelToken?: 
     }
 
     const lines: string[] = []
-    collectLines(child.stdout, lines, RUN_ONCE_TAIL_LINES, 'stdout')
-    collectLines(child.stderr, lines, RUN_ONCE_TAIL_LINES, 'stderr')
+    collectLines(child.stdout, lines, RUN_ONCE_TAIL_LINES, 'stdout', hooks?.onLine && ((l) => hooks.onLine!('stdout', l)))
+    collectLines(child.stderr, lines, RUN_ONCE_TAIL_LINES, 'stderr', hooks?.onLine && ((l) => hooks.onLine!('stderr', l)))
 
     const timer = setTimeout(() => {
       if (child.pid) killTree(child.pid)

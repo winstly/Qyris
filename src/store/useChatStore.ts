@@ -108,7 +108,7 @@ interface ChatState {
   current: string | null
   byProject: Record<string, ChatSlice>
 
-  send: (text: string, meta?: import('@/types').MessageMeta) => Promise<void>
+  send: (text: string, meta?: import('@/types').MessageMeta) => Promise<boolean>
   setPendingElement: (el: PickedElement | null) => void
   appendDelta: (requestId: string, delta: string, projectRoot?: string) => void
   appendReasoning: (requestId: string, delta: string, projectRoot?: string) => void
@@ -164,12 +164,23 @@ const agentFinishTimers = new Map<string, ReturnType<typeof setTimeout>>() // th
 const COMPLETED_MAP_TTL = 30_000 // 30s 后自动清理
 
 function findProjectByRequest(requestId: string): string | undefined {
+  if (droppedRequests.has(requestId)) return undefined
   const s = useChatStore.getState()
   for (const [project, slice] of Object.entries(s.byProject)) {
     if (slice.activeRequestId === requestId) return project
   }
   // 回退：已结束请求的残留映射
   return completedRequestMap.get(requestId)
+}
+
+/** 弃用请求名单：clear()/editAndResend() 换代时登记旧 requestId，
+ *  残留 IPC 事件（迟到 delta / 工具结果）到达时直接拒收——否则经
+ *  completedRequestMap 的 30s 残留映射路由回新会话，空会话冒出旧流碎片（P0） */
+const droppedRequests = new Set<string>()
+function dropRequest(requestId: string | null | undefined): void {
+  if (!requestId || droppedRequests.has(requestId)) return
+  droppedRequests.add(requestId)
+  setTimeout(() => droppedRequests.delete(requestId), COMPLETED_MAP_TTL)
 }
 
 /** 标记请求完成但不立即清除映射（IPC 残留事件仍需路由） */
@@ -186,6 +197,7 @@ const INTERNAL_REQUEST_RE = /^(mem-agent-|ctx-compress-|sub-agent-)/
  *  的窄窗口 → 认领为镜像请求（adoption）。subagent/ctx-compress/mem-agent 等旁路请求因
  *  主请求占据 activeRequestId（或前缀守卫）而天然被挡，绝不误认领。 */
 function resolveProjectForEvent(projectRoot: string | null | undefined, requestId: string): string | undefined {
+  if (droppedRequests.has(requestId)) return undefined
   const s = useChatStore.getState()
   if (projectRoot) {
     const slice = s.byProject[projectRoot]
@@ -231,9 +243,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       current: path,
     }))
     try {
+      const epoch0 = getSlice(path)?.epoch ?? 0
       const resp = await api.messagesRecent(path)
       const s = getSlice(path)
       if (!s) return
+      // 换代守卫：拉取期间 clear()/editAndResend() 换了代，过期响应不得覆盖新代次的切片
+      if (s.epoch !== epoch0) return
       if (resp.sessionId !== null && resp.sessionId !== s.sessionId && before && before.messages.length > 0) {
         // 对方换了会话（clear/editAndResend）：整体对齐
         patchSlice(path, { messages: resp.messages, sessionId: resp.sessionId, hasMoreOlder: resp.hasMore, oldestSeq: resp.oldestSeq })
@@ -254,7 +269,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
         oldestSeq: resp.oldestSeq,
       })
       const tok = await api.loadSessionTokens(path, resp.sessionId).catch(() => null)
-      if (tok) patchSlice(path, { usage: { input: tok.input, output: tok.output } })
+      if (tok && getSlice(path)?.epoch === epoch0) patchSlice(path, { usage: { input: tok.input, output: tok.output } })
     } catch { /* 静默 */ }
   },
 
@@ -262,6 +277,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // 会话收尾提取：关工程 = 会话终止，趁旧 sessionId 还在手先通知（fire-and-forget）
     const cur = get().byProject[path]
     if (cur && cur.messages.length > 0) void api.sessionEnded(path, cur.sessionId).catch(() => {})
+    // 关工程时唤醒悬空的 askUser（agent loop 的 await 不再吊死），
+    // 并清掉工程级 Map 残留（cancelSources / reasoningPersistTs 的本工程条目）
+    askResolvers.get(path)?.('（项目已关闭）')
+    askResolvers.delete(path)
+    cancelSources.delete(path)
+    // 键是纯 msgId（无工程前缀）：按本工程消息 id 集合匹配清理
+    if (cur) {
+      const ids = new Set(cur.messages.map((m) => m.id))
+      for (const msgId of [...reasoningPersistTs.keys()]) {
+        if (ids.has(msgId)) reasoningPersistTs.delete(msgId)
+      }
+    }
+    dropRequest(cur?.activeRequestId)
     set((s) => {
       const byProject = { ...s.byProject }
       delete byProject[path]
@@ -270,6 +298,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   send: async (text, meta) => {
+    // 返回是否真正入列：false = early return（无项目/状态异常/空文本），
+    // ChatInput 据此回填输入框，用户输入不再凭空消失（func-chat P1-2）
+    let ok = false
     let project = get().current
     // fallback：current 为空时从 appStore 取 projectPath 兜底（面板独立窗口首次启动场景）
     if (!project) {
@@ -281,27 +312,29 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     }
     if (!project) {
       console.warn('[chat-send] 无项目选中，消息未发送。请先在项目 tab 选择一个工程。')
-      return
+      return false
     }
     const cur = getSlice(project)
     if (!cur || (cur.status !== 'idle' && cur.status !== 'error')) {
       console.warn('[chat-send] 状态异常：', cur?.status ?? '无切片')
-      return
+      return false
     }
     const trimmed = text.trim()
-    if (!trimmed && !meta?.element) return
+    if (!trimmed && !meta?.element) return false
     const el = meta?.element
     const content = el
       ? `[用户选中的预览页元素]\n选择器: ${el.selector}\n标签: ${el.tag}${el.id ? `\nID: ${el.id}` : ''}${el.text ? `\n文本: ${el.text}` : ''}${trimmed ? `\n\n${trimmed}` : ''}`
       : trimmed
     const userMsg: ChatMessage = { id: uid(), role: 'user', content, meta }
     patchSlice(project, { messages: [...cur.messages, userMsg], status: 'streaming', cancelled: false, pendingElement: null })
+    ok = true
     resetCancelSource(project)
     // 稳定点：用户消息立即落库，seq 由 append 返回后回挂
     persistUpsert(project, userMsg)
     // 镜像管道：对方窗口立即接入这条用户消息（打字机效果从第一条 delta 起两端同步）
     relayChatMirror({ kind: 'user-message', projectRoot: project, message: userMsg })
     await runAgentLoop(project)
+    return ok
   },
 
   setPendingElement: (el) => {
@@ -467,7 +500,32 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (getSlice(project)?.cancelled) return
     const agentSlice = useAgentStore.getState().byProject[project]
     const thread = agentSlice && Object.values(agentSlice.threads).find((t) => t.cardId === p.parentId)
-    if (!thread) return
+    if (!thread) {
+      // 无线程命中 = 普通工具卡的执行期实时输出（run_command 等）：
+      // 追加到对应工具卡的 output，长命令执行期聊天窗有活体反馈而不是静默假死
+      if (p.kind === 'text') {
+        useChatStore.setState((st) => {
+          const cur = st.byProject[project]
+          if (!cur) return st
+          const messages = [...cur.messages]
+          for (let i = messages.length - 1; i >= 0; i--) {
+            const tcs = messages[i].toolCalls
+            const hit = tcs?.find((tc) => tc.id === p.parentId)
+            if (hit) {
+              messages[i] = {
+                ...messages[i],
+                toolCalls: tcs!.map((tc) =>
+                  tc.id === hit.id ? { ...tc, output: (tc.output ?? '') + (p.text ?? '') + '\n' } : tc,
+                ),
+              }
+              break
+            }
+          }
+          return { byProject: { ...st.byProject, [project]: { ...cur, messages } } }
+        })
+      }
+      return
+    }
     const store = useAgentStore.getState()
     console.log(`[cli-agent] ${p.kind} thread=${thread.id} id=${p.id ?? '-'}`)
 
@@ -547,28 +605,41 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const cur = getSlice(project)
     if (!cur) return
     if (cur.status !== 'idle') get().cancel()
-    if (opts?.deleteMessages) {
-      // 真删除：清掉库内本会话全部消息（seq>0）。此时不做收尾提取——消息都要删了，蒸出的记忆违背预期
-      void api.messagesTruncate(project, cur.sessionId, 0).catch(() => {})
-    } else if (!opts?.skipFinalExtract && cur.messages.length > 0) {
-      // 会话收尾提取：换代前旧 sessionId 还在手，通知主进程做收尾整理 + 短期晋升判断（fire-and-forget）。
-      // skipFinalExtract（勾选删除记忆时）必须跳过：否则清空记忆后立刻从旧消息蒸出新记忆，等于没删
-      void api.sessionEnded(project, cur.sessionId).catch(() => {})
-    }
-    // 清除压缩缓存（换会话后旧压缩结果不适用）
-    clearCompressCache(cur.sessionId)
-    // 开新会话：换 sessionId/epoch，旧消息保留但不再自动加载（saveCurrentSession 写 meta 表）
+    const oldSessionId = cur.sessionId
+    const oldEpoch = cur.epoch
+    const hadMessages = cur.messages.length > 0
+    // 换代弃用：旧流若仍在 IPC 队列里（aiCancel fire-and-forget 未即时生效），
+    // 残留 delta 不得经 30s 残留映射路由进新会话
+    dropRequest(cur.activeRequestId)
+    dropRequest(cur.mirrored)
+    // ① 同步换代先行：任何 await 之前本地已是空新会话——别窗口即使这一刻 resync，
+    //    读回的旧 meta 也会被 epoch/sessionId 守卫挡掉，不会整表覆盖回刚清空的 slice
     const newSessionId = uid()
+    const epoch = oldEpoch + 1
     patchSlice(project, {
       messages: [], status: 'idle', pendingAsk: null, activeRequestId: null,
-      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: newSessionId, cliSkills: [], epoch: cur.epoch + 1,
+      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: newSessionId, cliSkills: [], epoch,
       lastSummary: null,
       hasMoreOlder: false, oldestSeq: null, loadingOlder: false,
     })
-    // 持久化新 session ID 到 meta 表：messagesRecent 优先查它，不回退旧会话
-    void api.saveCurrentSession(project, newSessionId).catch(() => {})
-    // 镜像管道：对方窗口延迟从库校正（新空会话），两端对齐换代
+    // ② 落盘新 meta（落库前校验 epoch：期间又 clear/editAndResend 换了代，本次写入作废，
+    //    不让旧 sessionId 的 meta 后到覆盖新 meta）
+    if (getSlice(project)?.epoch === epoch) {
+      void api.saveCurrentSession(project, newSessionId).catch(() => {})
+    }
+    // ③ 广播 cleared：对端收到后从库校正，两端对齐换代
     relayChatMirror({ kind: 'cleared', projectRoot: project })
+    // ④ 收尾（旧 sessionId 的账，全部 fire-and-forget，顺序无关）：
+    //    clearCompressCache 走 oldSessionId——压缩缓存挂在旧会话名下，新会话 id 无缓存可清
+    clearCompressCache(oldSessionId)
+    if (opts?.deleteMessages) {
+      // 真删除：清掉库内旧会话全部消息（seq>0）。此时不做收尾提取——消息都要删了，蒸出的记忆违背预期
+      void api.messagesTruncate(project, oldSessionId, 0).catch(() => {})
+    } else if (!opts?.skipFinalExtract && hadMessages) {
+      // 会话收尾提取：通知主进程做收尾整理 + 短期晋升判断。
+      // skipFinalExtract（勾选删除记忆时）必须跳过：否则清空记忆后立刻从旧消息蒸出新记忆，等于没删
+      void api.sessionEnded(project, oldSessionId).catch(() => {})
+    }
   },
 
   loadOlder: async () => {
@@ -611,6 +682,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       ...cur.messages.slice(0, idx),
       { ...cur.messages[idx], content: trimmed, meta: finalMeta, reasoning: undefined, toolCalls: undefined, toolResults: undefined },
     ]
+    // 编辑重发同样换代：旧流残留事件不得污染截断后的新序列
+    dropRequest(cur.activeRequestId)
+    dropRequest(cur.mirrored)
     patchSlice(project, {
       messages,
       status: 'streaming',
@@ -735,7 +809,7 @@ async function resyncMirrored(project: string): Promise<void> {
       if (!before) return
       const resp = await api.messagesRecent(project)
       const s = getSlice(project)
-      if (!s || s.sessionId !== before.sessionId) return // 等待期间本地已换代
+      if (!s || s.sessionId !== before.sessionId || s.epoch !== before.epoch) return // 等待期间本地已换代
       if (resp.sessionId !== null && resp.sessionId !== s.sessionId) {
         // 对方 clear() 开了新会话：整体换代对齐（不触发本地 clear 的副作用）
         patchSlice(project, {
@@ -980,7 +1054,7 @@ async function fetchMemoryContext(project: string, epoch: number, messages: Chat
   return {
     summary,
     // 「【此前会话进展】」标题是 CLI 序列化路径（electron/lib/ai-cli.ts serializeConversation）的
-    // 双拷贝契约——tsconfig 隔离无法共享常量，改动必须两处同步并跑 smoke:cli
+    // 双拷贝契约——tsconfig 隔离无法共享常量，改动必须两处同步并跑 smoke:protocol
     summaryBlock: summary ? `【此前会话进展】\n${summary}` : null,
     memoryBlock: searched && searched.hits.length > 0
       ? '【长期记忆（供参考，可能过时）】\n' + searched.hits.map(memoryLine).join('\n')
@@ -1005,6 +1079,15 @@ const compressCache = new Map<string, { summaryBlock: string; messageCount: numb
 /** 清除某工程的压缩缓存（clear / editAndResend 时调用） */
 function clearCompressCache(sessionId: string): void {
   compressCache.delete(sessionId)
+}
+
+/** 压缩输出收口：剥 <analysis> 草稿（只提密度不留痕），取 <summary> 正文；模型没按标签输出时兜底回退原文。 */
+function formatCompactSummary(raw: string): string {
+  const s = (raw ?? '').trim()
+  if (!s) return ''
+  const body = s.match(/<summary>([\s\S]*?)<\/summary>/i)?.[1]
+  if (body && body.trim()) return body.trim()
+  return s.replace(/<analysis>[\s\S]*?<\/analysis>/gi, '').trim() || s
 }
 
 /** 默认上下文压缩阈值（token） */
@@ -1062,7 +1145,25 @@ async function maybeCompressContext(
   try {
     const requestId = `ctx-compress-${Date.now()}`
     const settings = useSettingsStore.getState().settings
-    const compressSystem = '你是上下文压缩器。请将以下对话历史压缩为精简摘要（200-500字），保留：①关键事实与决策 ②用户偏好与约束 ③未完成的任务与待办 ④重要的技术细节（文件路径、配置值、版本号）。不要保留寒暄、确认性回复、已完成的中间步骤。输出纯文本摘要，不要加任何前缀或格式标记。'
+    // 9 节结构化压缩（对齐 claude-code compact/prompt.ts 的 BASE_COMPACT_PROMPT）：
+    // 纯文本 200-500 字摘要会把文件名/代码片段/函数签名挤没，结构化 9 节保住细节密度
+    const compressSystem = [
+      '你是上下文压缩器。把下面的对话历史压成结构化摘要，供后续对话在无原文时继续工作。',
+      '输出两块：先用 <analysis> 包住梳理草稿（按时间顺序逐段核对：用户明确诉求、你的做法、关键决策与技术概念、文件名、完整代码片段、函数签名、文件改动、报错与修法、用户让你改做法的反馈），再用 <summary> 包住正式摘要。',
+      '',
+      '<summary> 必须按这 9 节组织，宁全勿缺：',
+      '1. 主要请求与意图：用户所有明确诉求与目标（含被修正过的意图）',
+      '2. 关键技术概念：涉及的技术、框架、架构决策',
+      '3. 文件与代码片段：逐一列出读过/改过的文件，附完整代码片段、函数签名、改动原因（这一节是恢复上下文的命脉，不许省略）',
+      '4. 错误与修复：所有报错原文、修法、用户对错误的反馈',
+      '5. 问题解决：已解决的问题与仍在排查的问题',
+      '6. 全部用户消息：逐条列出用户消息（工具结果除外）',
+      '7. 未完成任务：用户明确交代过的待办',
+      '8. 当前工作：摘要生成前正在做的事（含最近的文件与代码细节）',
+      '9. 下一步：与最近工作直接相关的下一步；附最近对话的原文引用防漂移；若任务已结束则写「无」',
+      '',
+      '不要保留寒暄、确认性回复、已完成的中间步骤。用简体中文写摘要。',
+    ].join('\n')
     const completion = await api.aiChatStream(
       requestId, settings.provider, settings.baseUrl, settings.model,
       [
@@ -1074,7 +1175,7 @@ async function maybeCompressContext(
     )
     // 压缩 LLM 调用期间会话已换代：丢弃结果
     if (getSlice(project)?.epoch !== epoch) return { history, contextSummary: null }
-    const summary = (completion.content ?? '').trim()
+    const summary = formatCompactSummary(completion.content ?? '')
     if (!summary) return { history, contextSummary: null }
 
     // 缓存并返回
@@ -1133,7 +1234,8 @@ async function runAgentLoop(project: string) {
         for (const tc of m.tool_calls) inputTok += estimateTokens(tc.function.arguments ?? '')
       }
     }
-    patchSlice(project, { usage: { input: inputTok, output: getSlice(project)?.usage.output ?? 0 } })
+    // 多轮工具循环每轮重算 input：取 max 语义为「本次请求累计输入」而非末轮覆写
+    patchSlice(project, { usage: { input: Math.max(inputTok, getSlice(project)?.usage.input ?? 0), output: getSlice(project)?.usage.output ?? 0 } })
 
     let completion: AiCompletion
     let attempt = 0

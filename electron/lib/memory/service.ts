@@ -369,8 +369,9 @@ export async function memoryClear(scope: 'project' | 'global' | 'all', projectRo
   const db = await getDb()
   const { where, params } = scopeWhere(scope, projectRoot)
   const rows = await db.prepare(`SELECT id FROM mem_items WHERE ${where}`).all(...params) as { id: string }[]
-  // 蒸馏 token 归零：仅全库清空（scope='all'）时归零——局部清空不应重置全局累计
-  if (scope === 'all') resetDistillTokens()
+  // 蒸馏 token 归零：清空即归零（字段文档与面板口径「清空记忆时归零」，含空清空）。
+  // 计数是全局近似值，局部清空也从零重新累计——否则「清了记忆、面板还挂着旧账」
+  resetDistillTokens()
   if (rows.length === 0) return
   const stmts: { sql: string; params?: unknown[] }[] = []
   for (const { id } of rows) {
@@ -482,6 +483,9 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
     await db.prepare(
       'UPDATE mem_items SET content = ?, importance = MAX(importance, ?), updated_at = ? WHERE id = ?',
     ).run(input.content, importance, now, dup.id)
+    // content 覆写 → 向量必须重嵌（否则语义检索永久陈旧）；回写带存在性检查（embed 期间被删不留孤儿）
+    await writeVecGuarded(db, dup.id, await embedOne(db, input.title, input.content))
+    emitMemoryChanged([key])
     return { folded: true, id: dup.id }
   }
   const item: MemoryItem = {

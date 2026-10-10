@@ -80,6 +80,10 @@ export interface AiSettings {
   cliPermission: 'auto' | 'readonly'
   /** CLI 可执行文件名/路径（缺省 'claude'） */
   cliCommand?: string | null
+  /** 主对话工具循环轮数上限（API/CLI 通用）；null=缺省 60 */
+  maxTurns?: number | null
+  /** 子 agent 单任务工具循环轮数上限；null=缺省 20 */
+  subagentMaxTurns?: number | null
   /** 可选档位模型 */
   tiers?: ModelTiers
 }
@@ -112,6 +116,23 @@ export interface SkillMeta {
   scope?: 'user' | 'project'
 }
 
+/** 发布 tab 的服务器配置（非敏感；密码/口令在主进程 secrets，key=ssh:<id>） */
+export interface DeployServer {
+  id: string
+  name: string
+  host: string
+  port: number
+  username: string
+  auth: 'password' | 'key'
+  privateKeyPath?: string
+  remotePath?: string
+  note?: string
+  /** 已部署服务标签（nginx / nacos / app-server / blog-portal …）——卡片展示 + AI 部署上下文 */
+  tags?: string[]
+  /** 部署策略（AI 判定或手动指定）：单机 / 微服务 / 集群 */
+  strategy?: 'single' | 'microservice' | 'cluster'
+}
+
 export interface AppConfig {
   lastProjectPath: string | null
   aiBaseUrl: string | null
@@ -125,6 +146,10 @@ export interface AppConfig {
   aiCliPermission?: 'auto' | 'readonly'
   /** CLI 可执行文件名/路径（缺省 'claude'） */
   aiCliCommand?: string | null
+  /** 主对话工具循环轮数上限（API/CLI 通用，CLI 落为 --max-turns）：null=缺省 60；合法域 [4,500] */
+  aiMaxTurns?: number | null
+  /** 子 agent 单任务工具循环轮数上限：null=缺省 20；合法域 [2,200] */
+  aiSubagentMaxTurns?: number | null
   recentProjects?: RecentProject[]
   /** Skills 目录列表（兼容旧单目录 skillsDir 字段，读取时合并去重） */
   skillsDirs?: string[]
@@ -142,6 +167,12 @@ export interface AppConfig {
   closeAction?: 'minimize' | 'quit'
   /** 桌宠音效开关：缺省 false（静音）；true 时播放 MP4 内置音轨 */
   petSound?: boolean
+  /** 隐藏桌宠：true 时桌宠窗口隐藏（不销毁，设置里可恢复） */
+  petHidden?: boolean
+  /** 发布 tab：服务器列表（密码不在此，走 secrets） */
+  deployServers?: DeployServer[]
+  /** 发布 tab：部署脚本草稿（serverId → 脚本内容） */
+  deployScripts?: Record<string, string>
   /** CLI 模式最近对话轮数（重放降级路径序列化多少轮；缺省 8） */
   cliRecentRounds?: number
 }
@@ -171,6 +202,8 @@ export interface ToolCall {
   resultSummary?: string
   /** 展开详情时显示（已截断） */
   result?: string
+  /** 执行期实时输出（run_command 等长命令的逐行流；经 cli-agent-event kind=text 追加） */
+  output?: string
 }
 
 export interface ToolResultEntry {
@@ -206,6 +239,8 @@ export interface MessageMeta {
   skills?: { id: string; name: string }[]
   /** AI 启动项目（显示卡片用） */
   projectStart?: boolean
+  /** AI 部署阶段标记：聊天里只显示「部署」meta 卡，指令原文不展示 */
+  deployStart?: boolean
   /** 预览页选中的元素（显示卡片用） */
   element?: { selector: string; tag: string; id: string; text: string }
   /** 本条消息触发的记忆检索命中（引用 chip 展示用，纯 UI 元数据，不参与 AI payload） */

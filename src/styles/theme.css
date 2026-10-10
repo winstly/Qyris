@@ -1,0 +1,104 @@
+/* ============================================================
+ * @theme 映射 —— Tailwind 工具类 ↔ tokens.css CSS 变量
+ *
+ * ⚠️ 必须 @theme【inline】：普通 @theme 会把 var() 求值快照固化进 :root，
+ *    data-theme 切换时工具类不跟色。inline 让每个工具类就地引用 var()，
+ *    运行时解析 —— 主题切换立即生效。
+ *
+ * 命名对照（Tailwind 前缀 → canonical token）：
+ *   bg / panel / elevated / solid / surface-hover / card  → 表面族
+ *   line / line-soft / hairline / glass-bd                → 边框族
+ *   txt / txt-strong / txt-muted / txt-soft / txt-faint   → 文字族
+ *   accent / ok / bad / warn / think-* / user-bub / agent-bub / tool-* → 语义族
+ *
+ * 渐变与复杂值（--glass-hl / --card-sheen / --accent-grad / --bg-grad）
+ * Tailwind 渐变工具组合不了 —— 留在 tokens.css，由 components.css
+ * 的复用类直接 var() 引用。
+ * ============================================================ */
+@theme inline {
+  /* ---- 表面 ---- */
+  --color-bg: var(--bg);
+  --color-panel: var(--bg-panel);
+  --color-elevated: var(--bg-elevated);
+  --color-solid: var(--surface-solid);
+  --color-surface-hover: var(--surface-hover);
+  --color-card: var(--card-bg);
+  --color-fill: var(--bg-fill-tertiary);
+  --color-fill-2: var(--bg-fill-secondary);
+
+  /* ---- 边框 ---- */
+  --color-line: var(--border);
+  --color-line-strong: var(--border-strong);
+  --color-line-soft: var(--border-soft);
+  --color-hairline: var(--divider);
+  --color-glass-bd: var(--glass-border);
+  --color-input-bd: var(--input-border);
+
+  /* ---- 文字 ---- */
+  --color-txt: var(--text);
+  --color-txt-strong: var(--text-strong);
+  --color-txt-muted: var(--text-muted);
+  --color-txt-soft: var(--text-soft);
+  --color-txt-faint: var(--text-faint);
+
+  /* ---- 强调 / 语义 ---- */
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-selected: var(--selected);
+  --color-selected-soft: var(--selected-soft);
+  --color-ok: var(--green);
+  --color-bad: var(--red);
+  --color-warn: var(--amber);
+  --color-info: var(--blue);
+  --color-violet: var(--purple);
+
+  /* ---- 思考块 / 气泡 ---- */
+  --color-think-bg: var(--think-bg);
+  --color-think-bd: var(--think-border);
+  --color-think-txt: var(--think-txt);
+  --color-user-bub: var(--user-bubble);
+  --color-user-bub-bd: var(--user-border);
+  --color-agent-bub: var(--agent-bubble);
+  --color-agent-bub-bd: var(--agent-border);
+
+  /* ---- 五色工具条 kernel ---- */
+  --color-tool-mcp: var(--tool-mcp);
+  --color-tool-skill: var(--tool-skill);
+  --color-tool-tool: var(--tool-tool);
+  --color-tool-cmd: var(--tool-cmd);
+  --color-tool-shell: var(--tool-shell);
+
+  /* ---- 圆角（theme-v2-chat 档位） ---- */
+  --radius-btn: 10px;
+  --radius-bubble: 14px;
+  --radius-card: 16px;
+  --radius-shell: 20px;
+
+  /* ---- 字体 ---- */
+  --font-ui: var(--font-ui);
+  --font-mono: var(--font-mono);
+
+  /* ---- 阴影 ---- */
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-glass: var(--shadow-glass);
+  --shadow-glow: var(--glow-accent);
+  --shadow-ring: var(--focus-ring);
+
+  /* ---- 动画（tw-animate-css 之上补产品自有节奏） ----
+     ⚠️ @keyframes 本体在 components.css 常驻声明——@theme 内的 keyframes
+     只在对应工具类被消费时才产出，components 层类直接引用动画名不会
+     触发按需产出。两处同名同内容，互不冲突。 */
+  --animate-msg-in: msg-in 200ms var(--curve-product) both;
+  --animate-status-pulse: status-pulse 2s ease-in-out infinite;
+  --animate-typing-bounce: typing-bounce 1.2s ease-in-out infinite;
+  --animate-blink: blink 1s ease-in-out infinite;
+  --animate-dot-breathe: dot-breathe 2.4s ease-in-out infinite;
+  --animate-dot-alert: dot-alert 1.4s ease-in-out infinite;
+  --animate-pip-pulse: pip-pulse 2.2s var(--curve-product) infinite;
+  --animate-type-cursor: type-cursor 1.1s steps(2) infinite;
+  --animate-grip-in: grip-in 200ms 120ms var(--curve-product) both;
+  --animate-col-collapse: col-collapse 200ms var(--curve-product) both;
+}

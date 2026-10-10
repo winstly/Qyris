@@ -1,6 +1,7 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { useAppStore } from '@/store/useAppStore'
-import { api } from '@/services/desktop'
+import { api, onCloneProgress } from '@/services/desktop'
 import { IconClose, IconFolder, IconPlus, IconTrash } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
 
@@ -22,6 +23,7 @@ const IDLE_ROW: UrlRowState = { status: 'idle', branches: [], branch: '', error:
  * 挂载方写 <CreateProjectDialog /> 即可，无需逐窗口手工接线 open/onClose。
  */
 export function CreateProjectDialog() {
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
   const open = useAppStore((s) => s.createProjectOpen)
   const openProjectWithChoice = useAppStore((s) => s.openProjectWithChoice)
   const showAlert = useAppStore((s) => s.showAlert)
@@ -39,6 +41,13 @@ export function CreateProjectDialog() {
   const [cloneParent, setCloneParent] = useState('')
 
   const [creating, setCreating] = useState(false)
+  /** 克隆实时进度（主进程解析 git --progress 后广播）：仓库名 + 阶段 + 百分比 */
+  const [cloneProgress, setCloneProgress] = useState<{ index: number; total: number; name: string; stage: string; pct: number | null } | null>(null)
+
+  // 克隆进度事件接线（主进程 git --progress 逐行解析后广播）
+  useEffect(() => {
+    return onCloneProgress((p) => setCloneProgress(p))
+  }, [])
 
   // 最新仓库地址列表（异步「测试连接」回包时校验该行仍未变，防过期结果写错行）
   const cloneUrlsRef = useRef(cloneUrls)
@@ -105,7 +114,9 @@ export function CreateProjectDialog() {
       await openProjectWithChoice(openPath)
       handleClose()
     } catch (e) {
-      await showAlert('克隆失败', String(e))
+      const msg = String(e)
+      if (/取消/.test(msg)) await showAlert('克隆已取消', '克隆过程已中止，已下载的内容保留在目标目录。')
+      else await showAlert('克隆失败', msg)
     } finally {
       setCreating(false)
     }
@@ -161,7 +172,7 @@ export function CreateProjectDialog() {
   }
 
   return (
-    <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !creating) handleClose() }}>
+    <div ref={trapRef} className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !creating) handleClose() }}>
       <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label="创建项目">
         <div className="modal__head">
           <span>创建项目</span>
@@ -307,13 +318,20 @@ export function CreateProjectDialog() {
             </div>
 
             <div className="modal__actions">
-              <button className="btn btn--ghost" onClick={handleClose} disabled={creating}>取消</button>
+              <button className="btn btn--ghost" onClick={handleClose} disabled={creating}>关闭</button>
+              {creating && (
+                <button className="btn btn--ghost" onClick={() => void api.cloneCancel()}>取消克隆</button>
+              )}
               <button
                 className="btn btn--primary"
                 onClick={handleClone}
                 disabled={!cloneUrls.some((u) => u.trim()) || !cloneParent.trim() || creating}
               >
-                {creating ? '克隆中…' : '克隆'}
+                {creating
+                  ? (cloneProgress
+                    ? `克隆中 ${cloneProgress.name} · ${cloneProgress.stage}${cloneProgress.pct != null ? ` ${cloneProgress.pct}%` : ''}（${cloneProgress.index + 1}/${cloneProgress.total}）`
+                    : '克隆中…')
+                  : '克隆'}
               </button>
             </div>
           </>

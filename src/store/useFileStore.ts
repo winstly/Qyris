@@ -77,6 +77,8 @@ interface FileState {
   cut: (path: string) => void
   copy: (path: string) => void
   paste: (destDir: string) => Promise<void>
+  /** rename/move 后迁移打开中的页签：保 dirty 与未保存内容，保存落到新路径 */
+  renameOpenTab: (oldPath: string, newPath: string) => void
 }
 
 export const useFileStore = create<FileState>()((set, get) => ({
@@ -176,6 +178,9 @@ export const useFileStore = create<FileState>()((set, get) => ({
   loadChildren: async (dir) => {
     const { rootPath } = get()
     if (!rootPath) return
+    // 并发去重：快速双击展开/收起/展开会打两次 IPC，第二次返回时覆盖第一次的
+    // 新数据（结果一致无碍），但 loading 指示器会闪两轮——已加载中直接跳过
+    if (get().loadingDirs[dir]) return
     set((s) => ({ loadingDirs: { ...s.loadingDirs, [dir]: true } }))
     try {
       const nodes = await api.listDir(rootPath, dir)
@@ -304,7 +309,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
       dirs.push(dir)
       dir = get().parentOf(dir)
     }
-    if (dirs.length === 0) return
+    // 不对 dirs.length===0 早退：文件直接位于根下时 dirs 为空，但根目录自身可能处于
+    // 收起状态，仍需走下面的 expanded[rootPath] 展开逻辑
     dirs.reverse()
 
     // 需要加载的目录（子项未缓存且未展开）
@@ -321,9 +327,10 @@ export const useFileStore = create<FileState>()((set, get) => ({
       } catch { /* 加载失败不阻塞展开 */ }
     }
 
-    // 一次性展开所有层级
+    // 一次性展开所有层级；根目录强制展开——只展开子层时子节点不渲染
     set((s) => {
       const expanded = { ...s.expanded }
+      expanded[rootPath] = true
       for (const d of dirs) expanded[d] = true
       return { expanded }
     })
@@ -396,7 +403,8 @@ export const useFileStore = create<FileState>()((set, get) => ({
       })
       set((s) => {
         const dirty = { ...s.dirty }
-        delete dirty[target]
+        // 仅当缓存内容仍是本次写盘快照时清 dirty：保存往返期间继续键入的编辑必须保持 dirty
+        if (s.contents[target] === content) delete dirty[target]
         // 保存后清掉非当前文件的缓存条目：切回该文件时 openFile 会重新读盘，
         // 外部进程（git checkout/pull、其他编辑器）改了该文件也不会因缓存在而绕过磁盘。
         // 当前文件不能清：contentForEditor 会变 undefined 导致编辑器变空白；
@@ -528,9 +536,14 @@ export const useFileStore = create<FileState>()((set, get) => ({
     if (!rootPath || !clipboard) return
     try {
       if (clipboard.mode === 'cut') {
+        // 脏文件确认【先于】移动：取消则中止粘贴（幂等）。
+        // 反过来（先 move 再 closeTab）会让取消后的 tab 指向已移动的幽灵路径，
+        // 保存时写坏盘（func-workspace P0-1）
+        if (get().openTabs.includes(clipboard.srcPath)) {
+          await get().closeTab(clipboard.srcPath)
+          if (get().openTabs.includes(clipboard.srcPath)) return // 用户取消，什么都不动
+        }
         await api.moveEntry(rootPath, clipboard.srcPath, destDir)
-        const fs = get()
-        if (fs.openTabs.includes(clipboard.srcPath)) fs.closeTab(clipboard.srcPath)
         set({ clipboard: null })
       } else {
         await api.copyEntry(rootPath, clipboard.srcPath, destDir)
@@ -544,4 +557,20 @@ export const useFileStore = create<FileState>()((set, get) => ({
       void useAppStore.getState().showAlert('粘贴失败', String(e))
     }
   },
+
+  renameOpenTab: (oldPath, newPath) => set((s) => {
+    if (!s.openTabs.includes(oldPath)) return s
+    const contents = { ...s.contents }
+    contents[newPath] = contents[oldPath] ?? ''
+    delete contents[oldPath]
+    const dirty = { ...s.dirty }
+    dirty[newPath] = dirty[oldPath] ?? false
+    delete dirty[oldPath]
+    return {
+      openTabs: s.openTabs.map((t) => (t === oldPath ? newPath : t)),
+      contents,
+      dirty,
+      activePath: s.activePath === oldPath ? newPath : s.activePath,
+    }
+  }),
 }))

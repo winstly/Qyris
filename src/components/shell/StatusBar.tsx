@@ -48,7 +48,8 @@ export function StatusBar() {
       </div>
 
       <div className="statusbar__group">
-        {/* 栏开关：折叠时高亮提示「这里有点东西被藏起来了」，点击或快捷键恢复 */}
+        {/* 栏开关（theme-v2-chat statusbar__toggle）：文字胶囊 + 图标，
+            折叠态降透明度提示「有东西被藏起来了」，点击或快捷键恢复 */}
         <button
           type="button"
           className={`statusbar__toggle ${fileTreeCollapsed ? 'statusbar__toggle--off' : ''}`}
@@ -57,6 +58,7 @@ export function StatusBar() {
           onClick={toggleFileTree}
         >
           <IconFile size={13} />
+          <span>文件树</span>
         </button>
         <button
           type="button"
@@ -66,6 +68,7 @@ export function StatusBar() {
           onClick={toggleChatPanel}
         >
           <IconSend size={13} />
+          <span>对话</span>
         </button>
         {lastSavedAt && (
           <span className="statusbar__meta statusbar__saved">

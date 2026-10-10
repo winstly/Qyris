@@ -6,9 +6,11 @@
  * 否则窗口找回后残留的死按钮会打在已失效的 pending 位上（点了没反应）。
  */
 import { useEffect, useState } from 'react'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { onCloseCancel, onCloseRequest } from '@/services/desktop'
 
 export function ClosePromptDialog() {
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
   const [open, setOpen] = useState(false)
   const [remember, setRemember] = useState(false)
 
@@ -32,7 +34,7 @@ export function ClosePromptDialog() {
   }
 
   return (
-    <div className="modal-mask" role="dialog" aria-modal="true" aria-label="关闭主窗口">
+    <div ref={trapRef} className="modal-mask" role="dialog" aria-modal="true" aria-label="关闭主窗口">
       <div className="modal">
         <div className="modal__head"><span>关闭主窗口</span></div>
         <p className="modal__msg">

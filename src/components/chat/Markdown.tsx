@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import hljs from 'highlight.js/lib/common'
@@ -36,6 +36,9 @@ export function Markdown({ source }: { source: string }) {
 
 function CodeBlock({ code, lang }: { code: string; lang?: string }) {
   const [copied, setCopied] = useState(false)
+  const copyTimerRef = useRef<number>(0)
+  // 卸载清理：复制态 timer 不打在已卸载组件上
+  useEffect(() => () => { if (copyTimerRef.current) window.clearTimeout(copyTimerRef.current) }, [])
 
   let html = ''
   try {
@@ -54,7 +57,8 @@ function CodeBlock({ code, lang }: { code: string; lang?: string }) {
     try {
       await navigator.clipboard.writeText(code)
       setCopied(true)
-      window.setTimeout(() => setCopied(false), 1500)
+      // 卸载清理：组件卸载后 setCopied 打在已卸载组件上（React 18 无害但留句柄泄漏）
+      copyTimerRef.current = window.setTimeout(() => setCopied(false), 1500)
     } catch { /* 剪贴板不可用时静默 */ }
   }
 

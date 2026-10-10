@@ -3,12 +3,12 @@
  * - AgentPanel：dispatch_subtasks 工具卡片内的批次面板（进度 + 每个 agent 一行 + 行内展开实时转录）
  * - AgentView：对话面板的专注视图（通过头部切换器选中某个 agent 后整屏查看）
  */
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type { ToolCall } from '@/types'
 import { useAgentStore, selectCurrentAgent, type AgentThread, type AgentEntryTool } from '@/store/useAgentStore'
 import { fmtTok } from '@/utils/tokens'
 import { IconAlert, IconBranch, IconCheck, IconTerminal } from '@/components/common/icons'
-import { TOOL_META } from './ToolCallCard'
+import { TOOL_META, stripMcpPrefix } from './ToolCallCard'
 
 export const AGENT_STATUS_LABEL: Record<string, string> = {
   pending: '待执行', running: '运行中', done: '完成', error: '异常', cancelled: '已取消',
@@ -17,7 +17,9 @@ export const AGENT_STATUS_LABEL: Record<string, string> = {
 /** 子 agent 转录中的工具条目：复用 ToolCallCard 风格的折叠卡片 */
 function AgentToolEntry({ entry }: { entry: AgentEntryTool }) {
   const [open, setOpen] = useState(false)
-  const meta = TOOL_META[entry.name] ?? { label: entry.name, icon: <IconTerminal size={13} /> }
+  // 历史数据带 mcp__ 全名落库：查表前剥前缀（与 ToolCallCard 同口径）
+  const base = stripMcpPrefix(entry.name)
+  const meta = TOOL_META[base] ?? { label: base, icon: <IconTerminal size={13} /> }
   const args = entry.args ?? {}
   const target = String(
     args.file_path ?? args.path ?? args.dir ?? args.command
@@ -26,7 +28,7 @@ function AgentToolEntry({ entry }: { entry: AgentEntryTool }) {
 
   return (
     <button
-      className={`toolcard toolcard--${entry.status}`}
+      className={`toolcard toolcard--k-cmd toolcard--${entry.status}`}
       onClick={() => entry.result && setOpen((v) => !v)}
       aria-expanded={open}
     >
@@ -67,17 +69,18 @@ export function AgentTranscript({ thread, embedded = false }: { thread: AgentThr
       {entryCount === 0 && thread.status === 'running' && <div className="agentview__empty">启动中…</div>}
       {thread.entries.map((e, i) =>
         e.kind === 'text' ? (
-          <div key={i} className="agentview__text">{e.content}</div>
+          <div key={`t${i}`} className="agentview__text">{e.content}</div>
         ) : (
-          <AgentToolEntry key={i} entry={e} />
+          <AgentToolEntry key={e.id ?? `e${i}`} entry={e} />
         ),
       )}
     </div>
   )
 }
 
-/** dispatch_subtasks 卡片内的批次面板 */
-export function AgentPanel({ cardId }: { cardId: string }) {
+/** dispatch_subtasks 卡片内的批次面板。fallback：无线程时的兜底渲染——
+ *  MCP 模式的历史卡（子进程里编排事件丢失，createBatch 从未发生）不再渲染成空壳 */
+export function AgentPanel({ cardId, fallback }: { cardId: string; fallback?: ReactNode }) {
   const { order, threads: threadsMap } = useAgentStore(selectCurrentAgent)
   const threads = useMemo(
     () => order.map((id) => threadsMap[id]).filter((t): t is AgentThread => !!t && t.cardId === cardId),
@@ -86,7 +89,7 @@ export function AgentPanel({ cardId }: { cardId: string }) {
   const selectThread = useAgentStore((s) => s.selectThread)
   const [openId, setOpenId] = useState<string | null>(null)
 
-  if (threads.length === 0) return null
+  if (threads.length === 0) return fallback ?? null
   const settled = threads.filter((t) => t.status !== 'pending' && t.status !== 'running').length
 
   return (
@@ -143,7 +146,13 @@ export function AgentToolCard({ call }: { call: ToolCall }) {
           {call.status === 'error' && <IconAlert size={12} />}
         </span>
       </button>
-      {open && <AgentPanel cardId={call.id} />}
+      {open && (
+        <AgentPanel
+          cardId={call.id}
+          // 历史卡/异常卡兜底：无线程时直接展示工具结果（MCP 子进程编排事件丢失的形态）
+          fallback={call.result ? <pre className="toolcard__detail mono">{call.result}</pre> : null}
+        />
+      )}
     </div>
   )
 }

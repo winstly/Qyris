@@ -33,7 +33,7 @@ export function MemorySidebar() {
 
   return (
     <div className={`sidebar ${open ? 'sidebar--open' : ''}`}>
-      {/* 图标列：始终可见 */}
+      {/* 图标列：始终可见；折叠开关住在轨道底部（它管的就是这条轨） */}
       <div className="sidebar__icons">
         <button
           className={`sidebar__icon-btn ${open && section === 'projects' ? 'sidebar__icon-btn--active' : ''}`}
@@ -51,18 +51,33 @@ export function MemorySidebar() {
         >
           <IconLayers size={16} />
         </button>
+        {/* 设置入口：住在项目折叠钮上方（产品指令：对话窗设置迁至此处） */}
+        <button
+          className="sidebar__icon-btn sidebar__icon-btn--settings"
+          onClick={() => useAppStore.getState().setSettingsOpen(true)}
+          title="设置"
+          aria-label="设置"
+        >
+          <i className="od-icon ri-settings-3-line" />
+        </button>
+        <button
+          className="sidebar__icon-btn sidebar__icon-btn--fold"
+          onClick={toggle}
+          title={open ? '收起侧栏 (Ctrl+M)' : '展开侧栏 (Ctrl+M)'}
+          aria-label={open ? '收起侧栏' : '展开侧栏'}
+          aria-pressed={open}
+        >
+          <i className={`od-icon ${open ? 'ri-menu-fold-line' : 'ri-menu-unfold-line'}`} />
+        </button>
       </div>
 
-      {/* 展开面板 */}
+      {/* 展开面板（收起走轨底 fold 钮 / 再点选中图标） */}
       {open && (
         <div className="sidebar__panel">
           <div className="sidebar__panel-head">
             <span className="sidebar__panel-title">
               {section === 'projects' ? '项目' : '用户记忆'}
             </span>
-            <button className="icon-btn" onClick={toggle} aria-label="收起面板" title="收起">
-              ‹
-            </button>
           </div>
           <div className="sidebar__panel-body">
             {section === 'projects' ? <ProjectsTab /> : <UserMemorySection />}

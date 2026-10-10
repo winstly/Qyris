@@ -1,210 +1,563 @@
 /* ============================================================
- * 设计令牌 —— 「策展人的工作台」v2
- * 克制暖灰为底，柔蓝灰为点缀，温暖藏在文字和细节里。
+ * 设计令牌 —— theme-v2-chat「深空玻璃拟态」
+ * 「深空底 + 紫雾氛围光 + 玻璃分层面；紫 accent 全面接管选中/CTA。」
+ *
+ * 来源：Qyris-new/workbench-v2.html 的设计令牌（暗/亮双主题）。
+ * 旧 open-design 中性灰体系退役：品牌绿 → 紫 accent；选中态改用彩色；
+ * primary CTA 改 accent-grad 渐变。这是换血后的目标口径，不是 bug。
+ *
+ * 主题机制（Qyris 契约，保持不变）：
+ *   :root               = 暗色（默认）
+ *   [data-theme='light'] = 亮色
+ *   system 模式在 JS 层解析成具体 data-theme。
+ *
+ * 命名策略：canonical 词表沿用 open-design 词表（消费方 CSS 零改名）；
+ * Qyris 旧名保留为薄别名（见文件末尾「Qyris 别名层」）。
+ *
+ * ⚠️ [HEX] 锁：被 EditorPane.tsx 的 withAlpha() / Monaco 主题读取的 token
+ *    在两个主题下都必须是 7 位字面量 #rrggbb，不能是 rgb()/color-mix()/rgba()。
+ *    参考稿的发丝 rgba(255,255,255,.06) 边框在锁内 token 上取合成近似实色，
+ *    真发丝效果走锁外的 --divider / --glass-border。
+ *    清单见「Monaco 通道 [HEX] 锁」一节。
  * ============================================================ */
 
 :root {
-  /* ----- 核心：五档表面 + 两档边缘（干净暖灰，不棕不脏） ----- */
-  --bg: #131315;            /* 窗口底座 */
-  --s1: #1a1a1c;            /* 一级面板：Tab 栏 / 文件树 / 状态栏 */
-  --s2: #1f1f22;            /* 二级面板：编辑器 / 预览区 / 输入区 */
-  --s3: #26262a;            /* 三级浮层：模态 / 菜单 / 悬浮 */
+  color-scheme: dark;
 
-  --edge: #34343a;          /* 结构边框 */
-  --edge-hair: #28282e;     /* 发丝分隔线 */
+  /* ============================================================
+   * 表面 —— 深空色阶（暗色）
+   * --bg 是近黑深空底；chrome/浮层用 --surface-solid (#0e0f13) 抬一档。
+   * 半透明白叠层（.04/.08/.12/.16）提供 hover/填充梯度。
+   * ============================================================ */
+  --bg: #06070a;
+  --bg-app: #06070a;
+  --bg-panel: #0e0f13;
+  --bg-subtle: rgba(255, 255, 255, 0.08);
+  --bg-muted: rgba(255, 255, 255, 0.12);
+  --bg-fill-tertiary: rgba(255, 255, 255, 0.04);
+  --bg-fill-secondary: rgba(255, 255, 255, 0.08);
+  --bg-fill: rgba(255, 255, 255, 0.16);
+  --bg-elevated: #0e0f13;
 
-  /* ----- 文字三档（暖白系） ----- */
-  --fg: #e8e4df;
-  --fg-2: #a8a29e;
-  --muted: #6b6560;
 
-  /* ----- 信号色（柔蓝灰点缀 + 柔化状态色）----- */
-  --accent: #7c8da4;        /* 柔蓝灰：主按钮 / focus / 链接 / 选中 */
-  --accent-on: #131315;
-  --meta: #8a9ab0;          /* 地址 / mono 数据 */
-  --success: #6bba7a;
-  --warn: #c4a265;
-  --danger: #c47070;
+  /* Liquid Glass —— 浮动功能层（菜单/弹出/工具条）的磨砂材质 */
+  --glass-regular: rgba(14, 15, 19, 0.66);
+  --glass-regular-blur: 28px;
+  --glass-edge-highlight: rgba(255, 255, 255, 0.08);
 
-  /* ----- 状态灯光晕 ----- */
-  --glow-build: 0 0 5px 1px rgba(124, 141, 164, 0.3);
-  --glow-deploy: 0 0 5px 1px rgba(196, 162, 101, 0.3);
-  --glow-run: 0 0 6px 1px rgba(107, 186, 122, 0.35);
-  --glow-error: 0 0 5px 1px rgba(196, 112, 112, 0.3);
+  /* 全屏底玻璃（theme-v2-chat .app surface）：整个应用坐在同一块 4% 白玻璃上，
+     深空底 + 紫雾从下面透出来——「全局同一块玻璃，无内嵌方框」。
+     chat 卡（--card-bg）是比它高一档的第二层玻璃。 */
+  --app-surface: #0e0f13;
+  /* ---- 玻璃分层面（theme-v2-chat 签名材质） ----
+     玻璃感 = 分层面 + 顶部受光 + 发丝线 + 阴影，不用 backdrop-filter
+     （背后是纯色平面时模糊无内容可融）。卡片受光只有一束：从上方落下。 */
+  --card-bg: #16171f;
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-top: rgba(255, 255, 255, 0.05);
+  --divider: rgba(255, 255, 255, 0.06);
+  --input-border: rgba(255, 255, 255, 0.1);
+  --input-bg: rgba(255, 255, 255, 0.04);
 
-  /* 明暗方向 token */
+  /* ---- 边框 ----- */
+  --border: #1b1c21;
+  --border-strong: #33343d;
+  --border-selected: #7c7aff;
+  --border-soft: #131318;
+
+  /* ---- 文字 ----- */
+  --text: #e8e8ec;
+  --text-strong: #f5f5f8;
+  --text-muted: #8b8b97;
+  --text-soft: #6b6b78;
+  --text-faint: #3a3a44;
+
+  /* ----- 强调色：紫 accent（theme-v2-chat 全面接管） -----
+     选中态用 --selected，主 CTA 用 --accent-grad 渐变，可以同屏共存。 */
+  --accent: #7c7aff;
+  --accent-contrast: #ffffff;
+  --accent-strong: #918fff;
+  --accent-soft: rgba(124, 122, 255, 0.12);
+  --accent-tint: rgba(124, 122, 255, 0.08);
+  --accent-hover: #8d8bff;
+  --accent-grad: linear-gradient(135deg, #7c7aff, #6366f1);
+  --accent-glow: rgba(124, 122, 255, 0.15);
+
+  /* 「当前选中项」指示色 —— 紫（新口径：选中态就是彩色） */
+  --selected: #7c7aff;
+  --selected-soft: rgba(124, 122, 255, 0.12);
+
+  /* ----- 品牌：绿退役，紫接管（名字保留防漏改） ----- */
+  --brand: var(--accent);
+  --brand-weak: rgba(124, 122, 255, 0.28);
+  --brand-soft: rgba(124, 122, 255, 0.1);
+  --brand-text: #a5a3ff;
+  --brand-ink: #a5a3ff;
+  --brand-surface: rgba(124, 122, 255, 0.1);
+
+
+  /* ----- 语义色（按色相命名） ----- */
+  --green: #34d399;
+  --green-bg: rgba(52, 211, 153, 0.12);
+  --green-border: rgba(52, 211, 153, 0.28);
+  --blue: #3b82f6;
+  --blue-bg: rgba(59, 130, 246, 0.1);
+  --blue-border: rgba(59, 130, 246, 0.28);
+  --purple: #a855f7;
+  --purple-bg: rgba(168, 85, 247, 0.08);
+  --purple-border: rgba(168, 85, 247, 0.24);
+  --red: #f87171;
+  --red-bg: rgba(248, 113, 113, 0.1);
+  --red-border: rgba(248, 113, 113, 0.28);
+  --amber: #fbbf24;
+  --amber-bg: rgba(251, 191, 36, 0.1);
+  --amber-border: rgba(251, 191, 36, 0.28);
+
+  /* ----- 思考块（琥珀） ----- */
+  --think-bg: rgba(251, 191, 36, 0.07);
+  --think-border: rgba(251, 191, 36, 0.28);
+  --think-txt: #fbbf24;
+
+  /* ----- 聊天气泡 ----- */
+  --user-bubble: rgba(124, 122, 255, 0.12);
+  --user-border: rgba(124, 122, 255, 0.2);
+  --agent-bubble: rgba(255, 255, 255, 0.04);
+  --agent-border: rgba(255, 255, 255, 0.08);
+
+  /* ----- 五色工具条（toolcard kernel 色） -----
+     每色三档：本色 / -bg(5% 底) / -bd(20% 边)。 */
+  --tool-mcp: #a855f7;
+  --tool-mcp-bg: rgba(168, 85, 247, 0.05);
+  --tool-mcp-bd: rgba(168, 85, 247, 0.2);
+  --tool-skill: #3b82f6;
+  --tool-skill-bg: rgba(59, 130, 246, 0.05);
+  --tool-skill-bd: rgba(59, 130, 246, 0.2);
+  --tool-tool: #34d399;
+  --tool-tool-bg: rgba(52, 211, 153, 0.05);
+  --tool-tool-bd: rgba(52, 211, 153, 0.2);
+  --tool-cmd: #fb923c;
+  --tool-cmd-bg: rgba(251, 146, 60, 0.05);
+  --tool-cmd-bd: rgba(251, 146, 60, 0.2);
+  --tool-shell: #22d3ee;
+  --tool-shell-bg: rgba(34, 211, 238, 0.05);
+  --tool-shell-bd: rgba(34, 211, 238, 0.2);
+
+  /* ----- 代码面 ----- */
+  --code-header-bg: #0d0e13;
+  --code-body-bg: #0b0c10;
+  --code-font-size: 13px;
+  --code-line-height: 1.65;
+  --prose-font-size: 13px;
+  --prose-line-height: 1.7;
+
+  /* ----- 阴影（深空黑族 + 玻璃顶部受光） ----- */
+  --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3), 0 4px 16px rgba(0, 0, 0, 0.2);
+  --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 8px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.55), 0 6px 16px rgba(0, 0, 0, 0.35);
+  /* 玻璃签名阴影：三段 + 顶部受光内描（参考稿 --shadow） */
+  --shadow-glass:
+    0 1px 2px rgba(0, 0, 0, 0.3),
+    0 4px 16px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --glow-accent: 0 2px 8px rgba(124, 122, 255, 0.25), inset 0 1px 0 rgba(255, 255, 255, 0.2);
+
+  /* ============================================================
+   * 圆角 / 描边 —— Shape Consistency Lock（theme-v2-chat 档位）
+   * 2/4 微档不动；10/14/16 主档；20 留给 chat 主窗。
+   * ============================================================ */
+  --radius-none: 0px;
+  --radius-small: 2px;
+  --radius-medium: 4px;
+  --radius-large: 10px;
+  --radius-xlarge: 14px;
+  --radius-2xlarge: 16px;
+  --radius-xxlarge: var(--radius-2xlarge);
+  --radius-shell: 20px;
+  /* 派生档（五档之外的三类专用角色，收编散落字面量） */
+  --radius-row: 6px;      /* 列表/菜单行 hover */
+  --radius-chip: 3px;     /* 徽标/标签微圆角 */
+  --radius-avatar: 11px;  /* 品牌头像 38px 档 / 消息头像 30px 档 */
+  --radius-circular: 50%;
+  --stroke-thin: 1px;
+  --stroke-thick: 2px;
+  --stroke-thicker: 3px;
+  --stroke-thickest: 4px;
+  --radius-xs: var(--radius-small);
+  --radius-sm: var(--radius-medium);
+  --radius: var(--radius-large);
+  --radius-md: var(--radius-large);
+  --radius-lg: var(--radius-xlarge);
+  --radius-2xl: var(--radius-2xlarge);
+  --radius-xl: var(--radius-2xlarge);
+  --radius-pill: 999px;
+
+  /* ============================================================
+   * 动效
+   * ease-out only（禁止 ease-in）；入场 ~200ms / 退场 ~140ms（不对称）；
+   * 永不从 transform: scale(0) 起步。
+   * --curve-product 是 theme-v2-chat 的高光曲线
+   * cubic-bezier(.23,1,.32,1)，对话窗/流水线步骤共用。
+   * ============================================================ */
+  --duration-ultra-fast: 50ms;
+  --duration-faster: 100ms;
+  --duration-fast: 150ms;
+  --duration-normal: 200ms;
+  --duration-gentle: 250ms;
+  --duration-slow: 300ms;
+  --duration-slower: 400ms;
+  --duration-ultra-slow: 500ms;
+  --curve-linear: cubic-bezier(0, 0, 1, 1);
+  --curve-accelerate-mid: cubic-bezier(1, 0, 1, 1);
+  --curve-decelerate-mid: cubic-bezier(0, 0, 0, 1);
+  --curve-easy-ease: cubic-bezier(0.33, 0, 0.67, 1);
+  --curve-product: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-out: var(--curve-decelerate-mid);
+  --dur-quick: var(--duration-faster);
+  --dur-enter: var(--duration-normal);
+  --dur-exit: var(--duration-fast);
+
+  /* ----- 字号（open-design 刻度，沿用） ----- */
+  --font-size-12: 12px;
+  --font-size-13: 13px;
+  --font-size-14: 14px;
+  --font-size-16: 16px;
+  --font-size-18: 18px;
+  --font-size-20: 20px;
+  --font-size-24: 24px;
+  --font-size-28: 28px;
+  --font-size-32: 32px;
+  --font-size-36: 36px;
+  --font-size-48: 48px;
+  --font-size-52: 52px;
+  --font-size-64: 64px;
+
+  /* ----- 间距（open-design 刻度，沿用） ----- */
+  --spacing-2: 2px;
+  --spacing-4: 4px;
+  --spacing-6: 6px;
+  --spacing-8: 8px;
+  --spacing-10: 10px;
+  --spacing-12: 12px;
+  --spacing-14: 14px;
+  --spacing-16: 16px;
+  --spacing-18: 18px;
+  --spacing-20: 20px;
+  --spacing-22: 22px;
+  --spacing-24: 24px;
+  --spacing-28: 28px;
+  --spacing-32: 32px;
+  --spacing-36: 36px;
+  --spacing-38: 38px;
+  --spacing-42: 42px;
+  --spacing-48: 48px;
+  --spacing-52: 52px;
+  --spacing-58: 58px;
+  --spacing-62: 62px;
+  --spacing-68: 68px;
+
+  /* ============================================================
+   * 字体 —— 系统栈（theme-v2-chat 方案，@fontsource 本地打包退役）
+   * UI 走 -apple-system/Segoe UI（Windows Electron 下渲染稳定）；
+   * 等宽走 SF Mono/ui-monospace/Consolas 系栈。
+   * ============================================================ */
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-body: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  --font-mono: "SF Mono", "Fira Code", ui-monospace, "Cascadia Code", Consolas, Menlo, monospace;
+  --font-ui: var(--font-body);
+
+  --font-weight-ui: 600;
+  --font-weight-prose: 400;
+  --font-weight-prose-strong: 500;
+  --font-weight-section: 700;
+
+  /* CJK 行高下限：正文 1.7–1.8，display 1.3–1.4 */
+  --leading-body: 1.7;
+  --leading-tight: 1.3;
+
+  /* ============================================================
+   * 浮层层级（沿用）
+   * ============================================================ */
+  --z-handle: 3;
+  --z-grip: 5;
+  --z-diff: 5;
+  --z-hint: 25;
+  --z-slash: 30;
+  --z-modal: 100;
+  --z-menu: 200;
+  --z-guard: 9999;
+
+  /* ============================================================
+   * Qyris 自有面
+   * ============================================================ */
+
+  /* 语法高亮：两主题都必须是 7 位 hex（[HEX] 锁）。
+   * 底色参照 --code-body-bg：暗色 #0b0c10。旧值在近黑底上对比度成立，
+   * 后续如需按新底微调，逐色重校 ≥4.5:1（注释允许 ≥3:1 刻意弱化）。 */
+  /* 语法六色（参考稿 tok-* 族）：紫关键字/绿串/琥珀数字/蓝函数/红变量/灰注释 */
+  --syn-comment: #55555f;
+  --syn-keyword: #a78bfa;
+  --syn-string: #6ee7b7;
+  --syn-number: #fbbf24;
+  --syn-type: #93c5fd;
+  --syn-function: #93c5fd;
+  --syn-variable: #fca5a5;
+  --syn-operator: #8b8b97;
+  --syn-punct: #55555f;
+
+  /* 状态灯光晕（status-dot 光环）：build=紫 / deploy=琥珀 / run=绿 / error=红 */
+  --glow-build: 0 0 5px 1px rgba(124, 122, 255, 0.35);
+  --glow-deploy: 0 0 5px 1px rgba(251, 191, 36, 0.3);
+  --glow-run: 0 0 6px 1px rgba(52, 211, 153, 0.35);
+  --glow-error: 0 0 5px 1px rgba(248, 113, 113, 0.3);
+
+  /* 明暗方向混合搭档（不是涂料） */
   --deepen: black;
   --lift: white;
 
-  /* ----- 字体 ----- */
-  --font-display: "Instrument Serif", "PingFang SC", "Microsoft YaHei UI", Georgia, serif;
-  --font-body: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
-
-  /* ----- 字号 ----- */
-  --text-xs: 12px;
-  --text-sm: 13px;
-  --text-base: 15px;
-  --text-lg: 17px;
-  --text-xl: 22px;
-  --text-micro: 11px;
-
-  --leading-body: 1.55;
-  --leading-tight: 1.06;
-
-  /* ----- 间距：4px 网格 ----- */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-  --space-8: 32px;
-
-  /* ----- 圆角（精致） ----- */
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-pill: 9999px;
-
-  /* ----- 阴影 / 层级 ----- */
-  --elev-flat: none;
-  --elev-ring: 0 0 0 1px var(--edge);
-  --elev-raised: 0 6px 20px rgba(0, 0, 0, 0.30), 0 1px 2px rgba(0, 0, 0, 0.20);
-  --focus-ring: 0 0 0 3px rgba(124, 141, 164, 0.2);
-
-  /* ----- 动效 ----- */
-  --motion-fast: 130ms;
-  --motion-base: 220ms;
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
-
-  --statusbar-h: 28px;
-  --tabbar-h: 38px;
-
-  /* ----- 签名元素：极淡台灯氛围 ----- */
-  --lamp-glow: radial-gradient(ellipse 60% 40% at 15% 0%, rgba(124, 141, 164, 0.03), transparent 70%);
+  /* 次位焦点环。主焦点是 outline（2px --accent），input focus 用它。 */
+  --focus-ring: 0 0 0 3px var(--accent-glow);
 
   /* ============================================================
-   * 兼容层
+   * Qyris 别名层 —— 消费方 CSS 零改名的契约
+   * 本层在 Tailwind 全量迁移完成后裁剪到仅剩 [HEX] 锁内的别名
+   * （--s1/--s2/--s3/--edge/--edge-hair/--fg/--fg-2/--muted 等，EditorPane 在读）。
+   *
+   * ⚠️ 反向指针方向：--edge → --border（不是 --border → --edge）。
+   *    canonical 的 --border / --border-soft 已在上面以字面量定义，
+   *    这里只做单向别名，防环。
    * ============================================================ */
-  --surface: var(--s2);
-  --surface-warm: var(--s3);
-  --border: var(--edge);
-  --border-soft: var(--edge-hair);
-  --accent-hover: color-mix(in oklab, var(--accent), white 14%);
-  --accent-active: color-mix(in oklab, var(--accent), white 22%);
+  --s1: var(--bg-panel);       /* chrome：Tab 栏 / 文件树 / 状态栏 */
+  --s2: var(--bg);             /* 内容底座：编辑器 / 预览 / 输入区 */
+  --s3: var(--bg-elevated);    /* 浮层：模态 / 菜单 / 悬浮 */
+  --edge: var(--border);
+  --edge-hair: var(--border-soft);
+  --fg: var(--text);
+  --fg-2: var(--text-muted);
+  /* --muted/--meta 重指 text-muted：深空玻璃底上 text-soft(#55555f) 过暗，
+     旧 CSS 76 处次级文字成片死灰——提亮一档与参考稿 txt2 对齐 */
+  --muted: var(--text-muted);
+  --meta: var(--text-muted);
+  --accent-on: var(--accent-contrast);
+  --accent-active: var(--accent-strong);
+  --success: var(--green);
+  --warn: var(--amber);
+  --danger: var(--red);
 
-  /* ----- 语法高亮：muted 暖调（去饱和，替代 One-Dark 外来饱和盘）----- */
-  --syn-comment: #6b6560;
-  --syn-keyword: #b291c4;
-  --syn-string: #90b57e;
-  --syn-number: #c99c6d;
-  --syn-type: #c6a96b;
-  --syn-function: #8fa8c4;
-  --syn-variable: #c48a8a;
-  --syn-operator: #7fb0ae;
-  --syn-punct: #8b857e;
-}
+  --surface: var(--bg);
+  --surface-solid: #0e0f13;
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --surface-warm: var(--bg-elevated);
 
-:root {
+  --motion-fast: var(--duration-fast);
+  --motion-base: var(--duration-normal);
+  --ease-standard: var(--curve-easy-ease);
+  --ease-spring: var(--curve-decelerate-mid);
+
+  --space-1: var(--spacing-4);
+  --space-2: var(--spacing-8);
+  --space-3: var(--spacing-12);
+  --space-4: var(--spacing-16);
+  --space-5: var(--spacing-20);
+  --space-6: var(--spacing-24);
+  --space-8: var(--spacing-32);
+
+  --text-micro: 11px;                    /* 状态栏需要 */
+  --text-xs: var(--font-size-12);
+  --text-sm: var(--font-size-13);
+  --text-base: var(--font-size-14);
+  --text-lg: var(--font-size-16);
+  --text-xl: var(--font-size-20);
+
+  --elev-flat: none;
+  --elev-ring: 0 0 0 1px var(--border);
+  --elev-raised: var(--shadow-lg);
+
+  --statusbar-h: 30px;
+  --tabbar-h: 52px;
+
+  /* 派生面（原有 Qyris 概念，指到新色阶） */
   --panel-deep: var(--s1);
   --panel: var(--s2);
   --panel-raised: var(--s3);
-  --row-hover: color-mix(in oklab, var(--s2), var(--fg) 4%);
-  --row-active: color-mix(in oklab, var(--accent), transparent 86%);
+  --row-hover: var(--surface-hover);
+  --row-active: var(--selected-soft);
 
   --stage-build: var(--accent);
-  --stage-deploy: var(--warn);
-  --stage-run: var(--success);
-  --stage-error: var(--danger);
+  --stage-deploy: var(--amber);
+  --stage-run: var(--green);
+  --stage-error: var(--red);
+  --stage-build-dim: var(--accent-soft);
+  --stage-deploy-dim: var(--amber-bg);
+  --stage-run-dim: var(--green-bg);
+  --stage-error-dim: var(--red-bg);
 
-  /* 流水线阶段 tint：活跃节点底色，统一收敛到 token（不再各处内联 color-mix）*/
-  --stage-build-dim: color-mix(in oklab, var(--stage-build), transparent 88%);
-  --stage-deploy-dim: color-mix(in oklab, var(--stage-deploy), transparent 88%);
-  --stage-run-dim: color-mix(in oklab, var(--stage-run), transparent 88%);
-  --stage-error-dim: color-mix(in oklab, var(--stage-error), transparent 88%);
+  --ok-dim: var(--green-bg);
+  --warn-dim: var(--amber-bg);
+  --danger-dim: var(--red-bg);
+  --accent-dim: var(--accent-soft);
 
-  --bubble-user: color-mix(in oklab, var(--accent), var(--s2) 80%);
-  --bubble-ai: color-mix(in oklab, var(--s3), var(--fg) 2%);
-
-  --ok-dim: color-mix(in oklab, var(--success), transparent 87%);
-  --warn-dim: color-mix(in oklab, var(--warn), transparent 88%);
-  --danger-dim: color-mix(in oklab, var(--danger), transparent 89%);
-  --accent-dim: color-mix(in oklab, var(--accent), transparent 87%);
-
-  --font-ui: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  /* 聊天气泡：theme-v2-chat 双色（紫 user / 玻璃 agent） */
+  --bubble-user: var(--user-bubble);
+  --bubble-ai: var(--agent-bubble);
 }
 
 /* ============================================================
- * 浅色主题
+ * 亮色主题 —— 覆盖 :root 的暗色值（theme-v2-chat light 镜像）
  * ============================================================ */
-
 [data-theme='light'] {
-  --bg: #f2f0ed;
-  --s1: #f8f7f5;
-  --s2: #ffffff;
-  --s3: #ffffff;
+  color-scheme: light;
 
-  --edge: #dcd8d2;
-  --edge-hair: #e8e5e0;
+  --bg: #f8f9fc;
+  --bg-app: #f8f9fc;
+  --bg-panel: #ffffff;
+  --bg-subtle: rgba(0, 0, 0, 0.05);
+  --bg-muted: rgba(0, 0, 0, 0.09);
+  --bg-fill-tertiary: rgba(0, 0, 0, 0.03);
+  --bg-fill-secondary: rgba(0, 0, 0, 0.06);
+  --bg-fill: rgba(0, 0, 0, 0.12);
+  --bg-elevated: #ffffff;
 
-  --fg: #1a1816;
-  --fg-2: #5a5650;
-  --muted: #8a8478;
-  --meta: #4a6080;
+  --glass-regular: rgba(248, 249, 252, 0.72);
+  --glass-regular-blur: 28px;
+  --glass-edge-highlight: rgba(0, 0, 0, 0.08);
 
-  --accent: #5a6e84;
-  --accent-on: #ffffff;
-  --success: #2e7d52;
-  --warn: #9a7a28;
-  --danger: #b04040;
+  --app-surface: rgba(255, 255, 255, 0.72);
+  --card-bg: rgba(255, 255, 255, 0.92);
+  --glass-border: rgba(0, 0, 0, 0.08);
+  --glass-top: rgba(255, 255, 255, 0.6);
+  --divider: rgba(0, 0, 0, 0.07);
+  --input-border: rgba(0, 0, 0, 0.12);
+  --input-bg: rgba(0, 0, 0, 0.03);
 
-  --glow-build: 0 0 4px 1px rgba(90, 110, 132, 0.2);
-  --glow-deploy: 0 0 4px 1px rgba(154, 122, 40, 0.2);
-  --glow-run: 0 0 4px 1px rgba(46, 125, 82, 0.22);
-  --glow-error: 0 0 4px 1px rgba(176, 64, 64, 0.2);
+  --border: #e3e5ee;
+  --border-strong: #d3d5e0;
+  --border-selected: #5558e8;
+  --border-soft: #eceef4;
+
+  --text: #1a1a2e;
+  --text-strong: #10101c;
+  --text-muted: #6b6b80;
+  --text-soft: #7d7d8f;
+  --text-faint: #c2c2cf;
+
+  --accent: #5558e8;
+  --accent-contrast: #ffffff;
+  --accent-strong: #4f46e5;
+  --accent-soft: rgba(99, 102, 241, 0.12);
+  --accent-tint: rgba(99, 102, 241, 0.08);
+  --accent-hover: #4f46e5;
+  --accent-grad: linear-gradient(135deg, #5558e8, #818cf8);
+  --accent-glow: rgba(99, 102, 241, 0.18);
+
+  --selected: #6366f1;
+  --selected-soft: rgba(99, 102, 241, 0.12);
+
+  --brand: var(--accent);
+  --brand-weak: rgba(99, 102, 241, 0.28);
+  --brand-soft: rgba(99, 102, 241, 0.1);
+  --brand-text: #5145e5;
+  --brand-ink: #5145e5;
+  --brand-surface: rgba(99, 102, 241, 0.1);
+
+
+  --green: #0a8a6b;
+  --green-bg: rgba(16, 185, 129, 0.1);
+  --green-border: rgba(16, 185, 129, 0.28);
+  --blue: #2563eb;
+  --blue-bg: rgba(37, 99, 235, 0.1);
+  --blue-border: rgba(37, 99, 235, 0.28);
+  --purple: #9333ea;
+  --purple-bg: rgba(147, 51, 234, 0.08);
+  --purple-border: rgba(147, 51, 234, 0.24);
+  --red: #dc2626;
+  --red-bg: rgba(239, 68, 68, 0.1);
+  --red-border: rgba(239, 68, 68, 0.28);
+  --amber: #b47308;
+  --amber-bg: rgba(245, 158, 11, 0.1);
+  --amber-border: rgba(245, 158, 11, 0.28);
+
+  --think-bg: rgba(245, 158, 11, 0.09);
+  --think-border: rgba(245, 158, 11, 0.32);
+  --think-txt: #b45309;
+
+  --user-bubble: rgba(99, 102, 241, 0.1);
+  --user-border: rgba(99, 102, 241, 0.15);
+  --agent-bubble: rgba(0, 0, 0, 0.035);
+  --agent-border: rgba(0, 0, 0, 0.07);
+
+  --tool-mcp: #9333ea;
+  --tool-mcp-bg: rgba(147, 51, 234, 0.07);
+  --tool-mcp-bd: rgba(147, 51, 234, 0.25);
+  --tool-skill: #2563eb;
+  --tool-skill-bg: rgba(37, 99, 235, 0.07);
+  --tool-skill-bd: rgba(37, 99, 235, 0.25);
+  --tool-tool: #059669;
+  --tool-tool-bg: rgba(5, 150, 105, 0.07);
+  --tool-tool-bd: rgba(5, 150, 105, 0.25);
+  --tool-cmd: #ea580c;
+  --tool-cmd-bg: rgba(234, 88, 12, 0.07);
+  --tool-cmd-bd: rgba(234, 88, 12, 0.25);
+  --tool-shell: #0891b2;
+  --tool-shell-bg: rgba(8, 145, 178, 0.07);
+  --tool-shell-bd: rgba(8, 145, 178, 0.25);
+
+  --code-header-bg: #f2f3f7;
+  --code-body-bg: #fafafa;
+
+  --shadow-xs: 0 1px 3px rgba(28, 27, 26, 0.05);
+  --shadow-sm: 0 1px 3px rgba(28, 27, 26, 0.04), 0 4px 12px rgba(28, 27, 26, 0.03);
+  --shadow-md: 0 6px 24px rgba(28, 27, 26, 0.07), 0 2px 6px rgba(28, 27, 26, 0.04);
+  --shadow-lg: 0 24px 60px rgba(28, 27, 26, 0.16), 0 8px 16px rgba(28, 27, 26, 0.07);
+  --shadow-glass:
+    0 1px 3px rgba(28, 27, 26, 0.04),
+    0 4px 12px rgba(28, 27, 26, 0.03),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+  --glow-accent: 0 2px 8px rgba(99, 102, 241, 0.18), inset 0 1px 0 rgba(255, 255, 255, 0.5);
+
+  /* 语法高亮（亮色）：同色相压暗到 #fafafa 上 ≥4.5:1（旧值沿用，后续按需重校） */
+  /* 语法六色（参考稿 tok-* 亮色档） */
+  --syn-comment: #6b6b80;
+  --syn-keyword: #6d28d9;
+  --syn-string: #047857;
+  --syn-number: #b45309;
+  --syn-type: #1d4ed8;
+  --syn-function: #1d4ed8;
+  --syn-variable: #b91c1c;
+  --syn-operator: #6b6b80;
+  --syn-punct: #6b6b80;
+
+  --glow-build: 0 0 4px 1px rgba(99, 102, 241, 0.25);
+  --glow-deploy: 0 0 4px 1px rgba(245, 158, 11, 0.2);
+  --glow-run: 0 0 4px 1px rgba(16, 185, 129, 0.22);
+  --glow-error: 0 0 4px 1px rgba(239, 68, 68, 0.2);
 
   --deepen: #8a857e;
   --lift: white;
 
-  --elev-raised: 0 6px 20px rgba(26, 24, 22, 0.08), 0 1px 2px rgba(26, 24, 22, 0.06);
-  --focus-ring: 0 0 0 3px rgba(90, 110, 132, 0.15);
-
-  --lamp-glow: radial-gradient(ellipse 60% 40% at 15% 0%, rgba(90, 110, 132, 0.02), transparent 70%);
+  --surface-solid: #ffffff;
+  --surface-hover: rgba(0, 0, 0, 0.05);
+  --row-hover: var(--surface-hover);
 }
 
-[data-theme='light'] {
-  --panel-deep: var(--s1);
-  --panel: var(--s2);
-  --panel-raised: var(--s3);
-
-  --row-hover: color-mix(in oklab, var(--s2), var(--deepen) 6%);
-  --row-active: color-mix(in oklab, var(--accent), transparent 90%);
-
-  --stage-build: var(--accent);
-  --stage-deploy: var(--warn);
-  --stage-run: var(--success);
-  --stage-error: var(--danger);
-
-  --bubble-user: color-mix(in oklab, var(--accent), white 92%);
-  --bubble-ai: color-mix(in oklab, var(--s2), var(--deepen) 4%);
-
-  --ok-dim: color-mix(in oklab, var(--success), transparent 88%);
-  --warn-dim: color-mix(in oklab, var(--warn), transparent 90%);
-  --danger-dim: color-mix(in oklab, var(--danger), transparent 90%);
-  --accent-dim: color-mix(in oklab, var(--accent), transparent 90%);
-
-  /* 语法高亮（浅色：同色相压暗，保证白底对比度）*/
-  --syn-comment: #8a8478;
-  --syn-keyword: #7a5a92;
-  --syn-string: #4c7a44;
-  --syn-number: #9a6b2e;
-  --syn-type: #8a6d2c;
-  --syn-function: #46618a;
-  --syn-variable: #a24f4f;
-  --syn-operator: #3d7a76;
-  --syn-punct: #8a8478;
-
-  --font-ui: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
-}
+/* ============================================================
+ * Monaco 通道 [HEX] 锁 —— 只读备忘，不产生任何规则
+ *
+ * 下列 token 被 src/components/workspace/EditorPane.tsx 的
+ * applyMonacoTheme() 读取，其中一部分送入 withAlpha()。在【两个主题】下
+ * 都必须是 7 位字面量 #rrggbb —— 换成 rgb()/color-mix() 会让 withAlpha()
+ * 静默吞掉 alpha，选区/光标/滚动条会变实心块。
+ *
+ *   --s1 --s2 --s3 --edge --edge-hair --fg --fg-2 --muted
+ *   --accent --warn --success --danger
+ *   --syn-comment --syn-keyword --syn-string --syn-number --syn-type
+ *   --syn-function --syn-variable --syn-operator --syn-punct
+ *
+ * ⇒ 其 canonical 目标同样是 hex：
+ *   --bg-panel --bg --bg-elevated --border --border-soft
+ *   --text --text-strong --text-muted --text-soft
+ *   --accent --amber --green --red
+ *
+ * 派生/淡色 token（--bg-fill-*、--*-bg、--*-soft、--shadow-*、--glow-*、
+ * 玻璃族/气泡族/五色工具条族）不在 Monaco 通道，可以是 rgba()/color-mix()。
+ * ============================================================ */

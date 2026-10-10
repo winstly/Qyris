@@ -5,6 +5,7 @@
  */
 import { useState } from 'react'
 import { api } from '@/services/desktop'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { useFileStore } from '@/store/useFileStore'
 import { basename } from '@/utils/path'
 import type { SnapshotVersion } from '../../../shared/types'
@@ -22,6 +23,7 @@ function lineClass(line: string): string {
 const versionKey = (v: SnapshotVersion): string => `${v.sessionId}:${v.versionKey ?? 'base'}`
 
 export function SnapshotHistoryDialog() {
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
   const history = useFileStore((s) => s.snapshotHistory)
   const rootPath = useFileStore((s) => s.rootPath)
   const close = useFileStore((s) => s.closeSnapshotHistory)
@@ -45,7 +47,7 @@ export function SnapshotHistoryDialog() {
   }
 
   return (
-    <div className="modal-mask" onClick={close} role="presentation">
+    <div ref={trapRef} className="modal-mask" onClick={close} role="dialog" aria-modal="true">
       <div className="modal modal--wide" onClick={(e) => e.stopPropagation()} role="dialog" aria-label="快照历史">
         <div className="modal__head">
           <span>快照历史 · {basename(history.path)}</span>

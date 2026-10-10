@@ -3,6 +3,7 @@
  * 挂在 App 最外层（main.tsx）；错误详情进 console（渲染层日志经 IPC 汇入主进程日志由 consolebridge 承担）。
  */
 import React from 'react'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { IconAlert } from '@/components/common/icons'
 
 interface State {
@@ -22,26 +23,32 @@ export class ErrorBoundary extends React.Component<{ children: React.ReactNode }
 
   override render(): React.ReactNode {
     if (this.state.error) {
-      return (
-        <div className="modal-mask">
-          <div className="modal" role="alertdialog" aria-label="界面异常">
-            <div className="modal__head">
-              <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                <IconAlert size={14} /> 界面出现异常
-              </span>
-            </div>
-            <div className="modal__msg mono" style={{ maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
-              {this.state.error.message || String(this.state.error)}
-            </div>
-            <div className="modal__actions">
-              <button className="btn btn--primary" onClick={() => window.location.reload()}>
-                重载界面
-              </button>
-            </div>
-          </div>
-        </div>
-      )
+      return <ErrorFallback message={this.state.error.message || String(this.state.error)} />
     }
     return this.props.children
   }
+}
+
+/** 崩溃兜底（函数组件壳）：焦点陷阱 + 重载按钮 */
+function ErrorFallback({ message }: { message: string }) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
+  return (
+    <div ref={trapRef} className="modal-mask">
+      <div className="modal" role="alertdialog" aria-modal="true" aria-label="界面异常">
+        <div className="modal__head">
+          <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <IconAlert size={14} /> 界面出现异常
+          </span>
+        </div>
+        <div className="modal__msg mono" style={{ maxHeight: 200, overflowY: 'auto', whiteSpace: 'pre-wrap' }}>
+          {message}
+        </div>
+        <div className="modal__actions">
+          <button className="btn btn--primary" onClick={() => window.location.reload()}>
+            重载界面
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }

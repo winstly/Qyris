@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { useAppStore } from '@/store/useAppStore'
 import { useFileStore } from '@/store/useFileStore'
 import { useGitStore } from '@/store/useGitStore'
@@ -149,10 +150,11 @@ export function FileTree() {
           <button
             className="filetree__toolbar-btn"
             onClick={() => useAppStore.getState().toggleFileTree()}
-            title="折叠文件树"
+            title="折叠文件树 (Ctrl+B)"
             aria-label="折叠文件树"
           >
-            <IconChevron size={12} className="chev-left" />
+            {/* 与侧栏 fold 钮同款图标（ri-menu-fold-line），风格统一 */}
+            <i className="od-icon ri-menu-fold-line" style={{ fontSize: 14 }} />
           </button>
         </div>
       </div>
@@ -171,7 +173,13 @@ export function FileTree() {
         {results !== null ? (
           <SearchResults results={results} searching={searching} query={query.trim()} />
         ) : (
-          <div role="tree">
+          <div role="tree" tabIndex={0} aria-label="项目文件树" onKeyDown={(e) => {
+            // 容器持焦时的兜底导航：↓ 进第一个 treeitem（行内 keydown 接管后续）
+            if (e.key === 'ArrowDown') {
+              const first = (e.currentTarget as HTMLElement).querySelector<HTMLElement>('[role="treeitem"]')
+              first?.focus()
+            }
+          }}>
             <NodeRow node={rootNode} depth={0} onSwitchBranch={openBranchSwitch} />
           </div>
         )}
@@ -303,13 +311,35 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
         role="treeitem"
         aria-expanded={isFolder ? expanded : undefined}
         aria-selected={activePath === node.path}
-        tabIndex={-1}
+        tabIndex={isActive ? 0 : -1}
         className={`tree-row ${isActive ? 'tree-row--active' : ''}`}
         data-tree-path={node.path}
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={() => {
           if (isFolder) void toggleDir(node.path)
           else void openFile(node.path)
+        }}
+        onKeyDown={(e) => {
+          // WAI-ARIA treeview 模式：Enter/Space 激活、←/→ 收展、↑/↓ 行间移动
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            if (isFolder) void toggleDir(node.path)
+            else void openFile(node.path)
+          } else if (e.key === 'ArrowRight' && isFolder && !expanded) {
+            e.preventDefault()
+            void toggleDir(node.path)
+          } else if (e.key === 'ArrowLeft' && isFolder && expanded) {
+            e.preventDefault()
+            void toggleDir(node.path)
+          } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault()
+            const scope = (e.currentTarget as HTMLElement).closest('[role="tree"]')
+            const rows = scope
+              ? [...scope.querySelectorAll<HTMLElement>('[role="treeitem"]')]
+              : []
+            const idx = rows.indexOf(e.currentTarget as HTMLElement)
+            rows[idx + (e.key === 'ArrowDown' ? 1 : -1)]?.focus()
+          }
         }}
         onContextMenu={(e) => {
           e.preventDefault()
@@ -396,6 +426,24 @@ const CompactNodeRow = React.memo(function CompactNodeRow({ node, depth, onSwitc
         className="tree-row"
         style={{ paddingLeft: 8 + depth * 14 }}
         onClick={handleClick}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            handleClick()
+          } else if (e.key === 'ArrowRight' && !expanded) {
+            e.preventDefault()
+            void expandChain()
+          } else if (e.key === 'ArrowLeft' && expanded) {
+            e.preventDefault()
+            void toggleDir(node.path)
+          } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault()
+            const scope = (e.currentTarget as HTMLElement).closest('[role="tree"]')
+            const rows = scope ? [...scope.querySelectorAll<HTMLElement>('[role="treeitem"]')] : []
+            const idx = rows.indexOf(e.currentTarget as HTMLElement)
+            rows[idx + (e.key === 'ArrowDown' ? 1 : -1)]?.focus()
+          }
+        }}
         onContextMenu={(e) => {
           e.preventDefault()
           setMenuPos({ x: e.clientX, y: e.clientY })
@@ -457,6 +505,7 @@ function buildTreeMenuItems(
   const newEntry = async (isDir: boolean) => {
     const name = await useAppStore.getState().showPrompt(isDir ? '新建文件夹' : '新建文件', isDir ? 'new-folder' : 'untitled.ts')
     if (!name) return
+    if (!validateEntryName(name)) return
     try {
       const created = await api.createEntry(rootPath, dirForNew, name, isDir)
       await afterFsChange(dirForNew)
@@ -470,14 +519,16 @@ function buildTreeMenuItems(
     if (isRoot) return
     const newName = await useAppStore.getState().showPrompt('重命名', target.name)
     if (!newName || newName === target.name) return
+    if (!validateEntryName(newName)) return
     const parentDir = useFileStore.getState().parentOf(target.path) ?? rootPath
     try {
       const newPath = await api.renameEntry(rootPath, target.path, newName)
-      // 打开中的旧路径页签迁移到新路径
+      // 打开中的旧路径页签迁移到新路径（保 dirty 与未保存内容，
+      // closeTab+openFile 会弹脏确认且取消后指向幽灵路径——func-workspace P0-2）
       const fs = useFileStore.getState()
       if (target.kind === 'file' && fs.openTabs.includes(target.path)) {
-        fs.closeTab(target.path)
-        await fs.openFile(newPath)
+        fs.renameOpenTab(target.path, newPath)
+        // Monaco 内容跟随（activePath 变化会触发 EditorPane 重读 contents）
       }
       await afterFsChange(parentDir)
     } catch (e) {
@@ -601,6 +652,7 @@ export function BranchSwitchDialog({ target, onClose, onSwitched }: {
 }) {
   const [branch, setBranch] = useState(target.currentBranch ?? target.branches[0] ?? '')
   const [switching, setSwitching] = useState(false)
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
 
   const confirm = async () => {
     if (!branch || branch === target.currentBranch) {
@@ -623,7 +675,7 @@ export function BranchSwitchDialog({ target, onClose, onSwitched }: {
   }
 
   return (
-    <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !switching) onClose() }}>
+    <div ref={trapRef} className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !switching) onClose() }}>
       <div className="modal" role="dialog" aria-modal="true" aria-label="切换分支">
         <div className="modal__head">
           <span>切换分支 · {target.dir === useFileStore.getState().rootPath ? '项目根目录' : basename(target.dir)}</span>
@@ -651,4 +703,17 @@ export function BranchSwitchDialog({ target, onClose, onSwitched }: {
       </div>
     </div>
   )
+}
+
+/** Windows 文件名校验：非法字符与保留名，失败弹明确提示（而非文件系统层的泛化报错） */
+function validateEntryName(name: string): boolean {
+  if (/[<>:"|?*]/.test(name) || /\u0000/.test(name)) {
+    void useAppStore.getState().showAlert('名称无效', '文件名不能包含 < > : " | ? * 等字符。')
+    return false
+  }
+  if (/^(CON|PRN|AUX|NUL|COM\d|LPT\d)$/i.test(name.trim())) {
+    void useAppStore.getState().showAlert('名称无效', '不能使用 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）。')
+    return false
+  }
+  return true
 }

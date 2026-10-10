@@ -130,7 +130,7 @@ function tryParseJson(slice: string): unknown | undefined {
     return JSON.parse(slice)
   } catch {
     const fixed = stripTrailingCommas(slice)
-      .replace(/[""]/g, "'")
+      .replace(/[\u201C\u201D]/g, '"') // 花引号 → 直双引号（显式码点，防引号归一化改坏）
       .replace(/\\(?!["\\/bfnrt])/g, '/')
     try {
       return JSON.parse(fixed)

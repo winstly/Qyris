@@ -31,11 +31,13 @@ export interface SearchResult {
   truncated: boolean
 }
 
-/** 仅 list_dir 过滤（精确相等、大小写敏感）；其余命令可读/删这些目录内部文件 */
+/** 仅 list_dir 过滤（精确相等、大小写敏感）；其余命令可读/删这些目录内部文件。
+ *  与 watcher.WATCH_IGNORED 对齐（.gradle/bin/mvn 是 Java/Android/前端构建产物，
+ *  1.8 万目录级工程里它们是树与监听的双重噪音源） */
 const IGNORED = [
   'node_modules', '.git', 'dist', 'build', 'target', '.next', '.nuxt',
   '.cache', 'coverage', '__pycache__', '.venv', 'venv', '.idea', '.vscode',
-  '.DS_Store', 'Thumbs.db',
+  '.gradle', 'bin', 'mvn', '.DS_Store', 'Thumbs.db',
 ]
 
 function isIgnored(name: string): boolean {
@@ -95,7 +97,8 @@ export async function listDirBatch(projectRoot: string, dirs: string[]): Promise
   return results
 }
 
-/** 递归按文件名搜索：大小写不敏感子串匹配相对路径；跳过 IGNORED 目录，symlink 不跟随（防环） */
+/** 递归按文件名搜索：大小写不敏感子串匹配相对路径；跳过 IGNORED 目录，symlink 不跟随（防环）。
+ *  目录级并发（大工程串行 IO 是「搜索非常慢」的根因——重写为分批并行）。 */
 export async function searchFiles(
   projectRoot: string, query: string, limit = SEARCH_MAX_RESULTS,
 ): Promise<SearchResult> {
@@ -104,7 +107,9 @@ export async function searchFiles(
   if (!q) return { files: [], truncated: false }
   const results: string[] = []
   let visited = 0
+  let truncated = false
 
+  const CONCURRENCY = 12
   async function walk(dir: string): Promise<void> {
     if (results.length >= limit || visited >= SEARCH_MAX_VISITED) return
     let dirents: Dirent[]
@@ -113,22 +118,31 @@ export async function searchFiles(
     } catch {
       return // 无权限 / 已被删除的目录静默跳过
     }
+    const dirs: string[] = []
     for (const de of dirents) {
-      if (results.length >= limit || visited >= SEARCH_MAX_VISITED) return
+      if (results.length >= limit || visited >= SEARCH_MAX_VISITED) break
       visited++
       if (isIgnored(de.name)) continue
       const abs = path.join(dir, de.name)
       if (de.isFile() && de.name.toLowerCase().includes(q)) {
         results.push(path.relative(root, abs))
-        if (results.length >= limit) return
+        if (results.length >= limit) { truncated = true; return }
       }
       // isDirectory() 不解析 symlink，指向目录的 symlink 不会进入递归
-      if (de.isDirectory()) await walk(abs)
+      if (de.isDirectory()) dirs.push(abs)
+    }
+    for (let i = 0; i < dirs.length && results.length < limit && visited < SEARCH_MAX_VISITED; i += CONCURRENCY) {
+      await Promise.all(dirs.slice(i, i + CONCURRENCY).map((d) => walk(d)))
+      // 协作式让出：大工程全树遍历期间给主进程事件循环留呼吸缝，
+      // 文件树展开等并发 IPC 不被搜索的 IO 风暴挤到超时
+      await new Promise<void>((r) => setImmediate(r))
     }
   }
 
   await walk(root)
-  return { files: results, truncated: results.length >= limit }
+  // 截断如实：visited 上限耗尽同样是截断——原来静默 return 让大工程「假装搜完」（搜索失败根因）
+  if (visited >= SEARCH_MAX_VISITED) truncated = true
+  return { files: results, truncated: truncated || results.length >= limit }
 }
 
 /** 读文本文件：全量进内存 → 截 2MB → 前 8192 字节含 NUL 判二进制 */
@@ -249,6 +263,44 @@ export async function grepFiles(
   let visited = 0
   let truncated = false
 
+  /** 单文件 grep（并发单元）：二进制/大文件跳过 */
+  async function grepOne(abs: string): Promise<void> {
+    if (truncated) return
+    if (globLower && !abs.toLowerCase().endsWith(globLower.replace(/^\*/, ''))) return
+    let stat: Stats
+    try {
+      stat = await fsp.stat(abs)
+    } catch {
+      return
+    }
+    if (stat.size > GREP_MAX_FILE_BYTES || stat.size === 0) return
+    let buf: Buffer
+    try {
+      buf = await fsp.readFile(abs)
+    } catch {
+      return
+    }
+    if (buf.subarray(0, BINARY_SNIFF_BYTES).includes(0)) return // 二进制跳过
+    const lines = buf.toString('utf8').split('\n')
+    for (let i = 0; i < lines.length; i++) {
+      if (truncated) return
+      re.lastIndex = 0
+      if (!re.test(lines[i])) continue
+      hitFiles.add(abs)
+      matches.push({
+        path: path.relative(root, abs),
+        line: i + 1,
+        text: lines[i].trim().slice(0, 200),
+      })
+      if (matches.length >= maxResults) {
+        truncated = true
+        return
+      }
+    }
+  }
+
+  /** 目录级并发遍历（大工程串行 IO 是「搜索非常慢」的根因） */
+  const CONCURRENCY = 12
   async function walk(dir: string): Promise<void> {
     if (truncated || visited >= SEARCH_MAX_VISITED) return
     let dirents: Dirent[]
@@ -257,51 +309,31 @@ export async function grepFiles(
     } catch {
       return
     }
+    const dirs: string[] = []
+    const files: string[] = []
     for (const de of dirents) {
-      if (truncated || visited >= SEARCH_MAX_VISITED) return
+      if (truncated || visited >= SEARCH_MAX_VISITED) break
       visited++
       if (isIgnored(de.name)) continue
       const abs = path.join(dir, de.name)
-      if (de.isDirectory()) {
-        await walk(abs)
-        continue
-      }
-      if (!de.isFile()) continue
-      if (globLower && !abs.toLowerCase().endsWith(globLower.replace(/^\*/, ''))) continue
-      let stat: Stats
-      try {
-        stat = await fsp.stat(abs)
-      } catch {
-        continue
-      }
-      if (stat.size > GREP_MAX_FILE_BYTES || stat.size === 0) continue
-      let buf: Buffer
-      try {
-        buf = await fsp.readFile(abs)
-      } catch {
-        continue
-      }
-      if (buf.subarray(0, BINARY_SNIFF_BYTES).includes(0)) continue // 二进制跳过
-      const lines = buf.toString('utf8').split('\n')
-      for (let i = 0; i < lines.length; i++) {
-        re.lastIndex = 0
-        if (!re.test(lines[i])) continue
-        hitFiles.add(abs)
-        matches.push({
-          path: path.relative(root, abs),
-          line: i + 1,
-          text: lines[i].trim().slice(0, 200),
-        })
-        if (matches.length >= maxResults) {
-          truncated = true
-          break
-        }
-      }
-      if (truncated) return
+      if (de.isDirectory()) dirs.push(abs)
+      else if (de.isFile()) files.push(abs)
+    }
+    // 单目录文件分批并发（每批 CONCURRENCY 路），批次间协作式让出，避免一次拉满主进程 IO
+    for (let i = 0; i < files.length && !truncated; i += CONCURRENCY) {
+      await Promise.all(files.slice(i, i + CONCURRENCY).map((f) => grepOne(f)))
+      await new Promise<void>((r) => setImmediate(r))
+    }
+    for (let i = 0; i < dirs.length && !truncated && visited < SEARCH_MAX_VISITED; i += CONCURRENCY) {
+      await Promise.all(dirs.slice(i, i + CONCURRENCY).map((d) => walk(d)))
+      await new Promise<void>((r) => setImmediate(r))
     }
   }
 
   await walk(root)
+  // 截断如实：visited 上限耗尽同样是截断（原来静默 return = 大工程假装搜完）
+  if (visited >= SEARCH_MAX_VISITED) truncated = true
+  matches.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : a.line - b.line))
   return { matches, fileCount: hitFiles.size, truncated }
 }
 

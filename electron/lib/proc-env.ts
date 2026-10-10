@@ -94,8 +94,24 @@ function probeUnixPath(): string | null {
   return null
 }
 
-/** 构建子进程环境：在 Electron 主进程环境之上重建 PATH。每次返回新对象，防止调用方修改污染缓存 */
+/** SSH 凭据注入键前缀：主进程经 mcp-config env 注入 mcp-server（remote_* 工具专用）。
+ *  任何再往下的子进程 env 都必须剥离——否则 run_command 一句 printenv 就把凭据漏给模型 */
+const CRED_ENV_PREFIX = 'QYRIS_SSH_CRED_'
+
+/** 主进程代行通道键（mcp/proxy.ts）：令牌同级敏感，子进程出口一并剥离 */
+const HOST_TOOL_ENV_PREFIX = 'QYRIS_HOST_TOOL_'
+
+/** 构建子进程环境：在 Electron 主进程环境之上重建 PATH。每次返回新对象，防止调用方修改污染缓存。
+ *  出口统一剥离凭据注入键与代行通道键（防 run_command/git 等 spawn 泄漏） */
 export function buildChildEnv(): NodeJS.ProcessEnv {
+  const env = buildChildEnvRaw()
+  for (const k of Object.keys(env)) {
+    if (k.startsWith(CRED_ENV_PREFIX) || k.startsWith(HOST_TOOL_ENV_PREFIX)) delete env[k]
+  }
+  return env
+}
+
+function buildChildEnvRaw(): NodeJS.ProcessEnv {
   const env = { ...process.env }
   try {
     if (process.platform === 'win32') {

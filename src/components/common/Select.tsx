@@ -28,8 +28,38 @@ export function Select({ value, options, onChange, ariaLabel, searchable, size, 
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const ref = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+
+  /** 菜单键盘导航：↑/↓ 在选项间移动焦点（roving focus）、Home/End 跳首尾、
+   *  Enter 走 button 默认点击、Esc 关闭并把焦点还给触发按钮。 */
+  const onMenuKeyDown = (e: React.KeyboardEvent) => {
+    const opts = menuRef.current
+      ? [...menuRef.current.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+      : []
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      setOpen(false)
+      triggerRef.current?.focus()
+      return
+    }
+    if (e.key === 'Tab') { setOpen(false); return }
+    if (opts.length === 0) return
+    const idx = opts.findIndex((b) => b === document.activeElement)
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault()
+      const dir = e.key === 'ArrowDown' ? 1 : -1
+      const next = idx === -1 ? (dir === 1 ? 0 : opts.length - 1) : (idx + dir + opts.length) % opts.length
+      opts[next].focus()
+    } else if (e.key === 'Home') {
+      e.preventDefault()
+      opts[0].focus()
+    } else if (e.key === 'End') {
+      e.preventDefault()
+      opts[opts.length - 1].focus()
+    }
+  }
   const [menuPos, setMenuPos] = useState<{ left: number; top: number; width: number } | null>(null)
 
   /** 打开：以触发按钮矩形为锚点计算初始位置（挂在下方），钳制在 useLayoutEffect 里做 */
@@ -88,7 +118,9 @@ export function Select({ value, options, onChange, ariaLabel, searchable, size, 
   useEffect(() => {
     if (open) {
       setQuery('')
+      // 焦点承接：可搜索聚焦搜索框；否则聚焦菜单容器（Arrow 键从首项开始）
       if (searchable) searchRef.current?.focus()
+      else menuRef.current?.focus()
     }
   }, [open, searchable])
 
@@ -108,8 +140,15 @@ export function Select({ value, options, onChange, ariaLabel, searchable, size, 
     <div className={`select ${size === 'sm' ? 'select--sm' : ''}`} ref={ref}>
       <button
         type="button"
+        ref={triggerRef}
         className="select__trigger"
         onClick={openMenu}
+        onKeyDown={(e) => {
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+            e.preventDefault()
+            openMenu()
+          }
+        }}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label={ariaLabel}
@@ -125,6 +164,8 @@ export function Select({ value, options, onChange, ariaLabel, searchable, size, 
           ref={menuRef}
           className="select__menu"
           role="listbox"
+          tabIndex={-1}
+          onKeyDown={onMenuKeyDown}
           style={{ left: menuPos.left, top: menuPos.top, width: menuPos.width }}
         >
           {searchable && (

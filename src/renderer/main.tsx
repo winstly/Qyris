@@ -1,22 +1,19 @@
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 
-// 字体本地打包（离线可用，不依赖 CDN）：标题 Instrument Serif / 正文 Outfit（中文回退系统字体），代码 JetBrains Mono
-import '@fontsource/instrument-serif/400.css'
-import '@fontsource/outfit/400.css'
-import '@fontsource/outfit/500.css'
-import '@fontsource/outfit/600.css'
-import '@fontsource/jetbrains-mono/400.css'
-import '@fontsource/jetbrains-mono/700.css'
-// 代码高亮主题（chat 代码块）
-import 'highlight.js/styles/github-dark.css'
+// 字体：theme-v2-chat 系统栈（-apple-system/Segoe UI + SF Mono/ui-monospace），
+// @fontsource 本地打包退役 —— 见 styles/tokens.css 字体段。
+// RemixIcon 图标字体（npm 官方包，全量 woff2 打进 bundle）。
+import 'remixicon/fonts/remixicon.css'
 
+// 代码高亮配色由 components.css 的 .hljs-* 重映射到 --syn-* 提供（与 Monaco 同源），
+// 不再导入 vendor 的 github-dark.css —— 它会在亮色主题留下深底并污染未映射类。
+
+// token 层在前（CSS 变量先于一切消费者）；app.css 是 Tailwind v4 入口
+// （含 components.css 复用类层）。
 import '@/styles/tokens.css'
-import '@/styles/shell.css'
-import '@/styles/panels.css'
-import '@/styles/memory.css'
-import '@/styles/sidebar.css'
-import '@/styles/chat.css'
+import '@/styles/material.css'
+import '@/styles/app.css'
 
 import App from '@/App'
 import { ErrorBoundary } from '@/components/common/ErrorBoundary'

@@ -1,5 +1,6 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
 import path from 'node:path'
 import { fileURLToPath, URL } from 'node:url'
 
@@ -11,7 +12,16 @@ export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin()],
     build: {
-      lib: { entry: 'electron/main/index.ts' },
+      lib: {
+        // 双入口：index = 主进程；mcp-server = MCP stdio server 独立可执行（由 claude CLI 按
+        // mcp-config spawn，providers/claude-cli.ts 装配）。mcp-server 与 index 共享 chunk——
+        // 因此 electron-builder.yml 必须把 out/main/*.js 整体 asarUnpack（spawn 出去的进程
+        // 读不到 asar 里的共享 chunk，缺一块就 MODULE_NOT_FOUND）。
+        entry: {
+          index: 'electron/main/index.ts',
+          'mcp-server': 'electron/mcp-server.ts',
+        },
+      },
     },
   },
   preload: {
@@ -21,7 +31,7 @@ export default defineConfig({
     },
   },
   renderer: {
-    plugins: [react()],
+    plugins: [react(), tailwindcss()],
     // electron-vite renderer root 默认 src/renderer/，publicDir 需指向项目根 public/
     publicDir: path.resolve(__dirname, 'public'),
     resolve: {

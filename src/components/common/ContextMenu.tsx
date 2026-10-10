@@ -23,6 +23,9 @@ export function ContextMenu({ pos, items, onClose }: {
   useEffect(() => {
     const el = ref.current
     if (el) {
+      // 打开即承接键盘（WAI-ARIA menu 模式）：↓ 落到第一项
+      const first = el.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')
+      ;(first ?? el).focus()
       const rect = el.getBoundingClientRect()
       setStyle({
         left: Math.min(pos.x, window.innerWidth - rect.width - 8),
@@ -44,7 +47,34 @@ export function ContextMenu({ pos, items, onClose }: {
   }, [pos, onClose])
 
   return createPortal(
-    <div ref={ref} className="ctxmenu" style={style} role="menu">
+    <div
+      ref={ref}
+      className="ctxmenu"
+      style={style}
+      role="menu"
+      tabIndex={-1}
+      onKeyDown={(e) => {
+        // ↑/↓ 在 menuitem 间移动、Home/End 跳首尾、Esc 关闭（Enter 走 button 默认）
+        const items = ref.current
+          ? [...ref.current.querySelectorAll<HTMLButtonElement>('[role="menuitem"]:not([disabled])')]
+          : []
+        if (e.key === 'Escape') { e.preventDefault(); onClose(); return }
+        if (items.length === 0) return
+        const idx = items.findIndex((b) => b === document.activeElement)
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault()
+          const dir = e.key === 'ArrowDown' ? 1 : -1
+          const next = idx === -1 ? (dir === 1 ? 0 : items.length - 1) : (idx + dir + items.length) % items.length
+          items[next].focus()
+        } else if (e.key === 'Home') {
+          e.preventDefault()
+          items[0].focus()
+        } else if (e.key === 'End') {
+          e.preventDefault()
+          items[items.length - 1].focus()
+        }
+      }}
+    >
       {items.map((item) => (
         item.children
           ? <SubMenuItem key={item.label} item={item} onClose={onClose} />

@@ -1,0 +1,23 @@
+/* ============================================================
+ * Tailwind v4 唯一样式入口（主窗口 + pet 面板共用）
+ *
+ * 依赖顺序（tokens/material 由 main.tsx / panel-main.tsx 在本文件
+ * 之前 import，保证变量先于工具类定义）：
+ *   tokens.css  →  material.css  →  app.css（本文件）
+ *
+ * ⚠️ 主题机制：颜色全部经 @theme inline 映射到 CSS 变量（见 theme.css），
+ *    运行时随 data-theme 切换 —— 不用 Tailwind 的 dark: 前缀双轨。
+ *
+ * 迁移期（批 0-4）：旧消费 CSS（shell/panels/chat/memory/sidebar）仍由
+ * 入口 JS 各自 import，它们是 unlayered，优先级天然压过 Tailwind 的
+ * layered 工具类 —— 旧样式在位、token 换血照常生效；每迁完一批组件
+ * 就删对应旧文件，其样式由本入口的 components 层与工具类接管。
+ * ============================================================ */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "./theme.css";
+@import "./components.css";
+
+@source "../components/**/*.{ts,tsx}";
+@source "../App.tsx";
+@source "../renderer/pet/**/*.{ts,tsx}";

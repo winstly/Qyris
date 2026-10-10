@@ -69,6 +69,7 @@ declare global {
 
     // 配置与密钥（无 getSecret）
     getConfig: () => Promise<AppConfig>
+    setTheme: (theme: string) => void
     mergeConfig: (patch: unknown) => Promise<void>
     setSecret: (key: string, value: string) => Promise<void>
     hasSecret: (key: string) => Promise<boolean>
@@ -87,6 +88,8 @@ declare global {
     // 创建项目 / Git
     createEmptyProject: (parentDir: string, name: string) => Promise<string>
     cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => Promise<string[]>
+    cloneCancel: () => Promise<void>
+    onCloneProgress: DesktopEventSub<{ index: number; total: number; name: string; stage: string; pct: number | null }>
     testRepo: (url: string) => Promise<{ valid: boolean; branches: string[]; error: string | null }>
     gitRepoInfo: (dir: string) => Promise<{ isRepo: boolean; currentBranch: string | null; branches: string[] }>
     gitCheckout: (dir: string, branch: string) => Promise<void>
@@ -104,7 +107,7 @@ declare global {
 
     // AI
     aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string }) => Promise<AiCompletion>
-    aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) => Promise<string>
+    aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) => Promise<string>
     aiCancel: (requestId: string) => Promise<void>
 
     // 记忆（分层记忆系统 P1；projectRoot=null 表示仅全局）
@@ -142,10 +145,15 @@ declare global {
 
     // 窗口
     pickDirectory: () => Promise<string | null>
+    pickKeyFile: () => Promise<string | null>
     setWindowTitle: (title: string) => Promise<void>
-    startElementPick: (url: string) => Promise<void>
+    startElementPick: () => Promise<void>
     openExternal: (url: string) => Promise<void>
     openInExplorer: (filePath: string) => Promise<void>
+    /** 窗口三键（自绘标题栏）：关闭走主进程 close 分流（ask/minimize/quit），与系统 X 同路径 */
+    minimizeWindow: () => Promise<void>
+    toggleMaximize: () => Promise<void>
+    requestWindowClose: () => Promise<void>
     /** 主窗口关闭询问的回传（ask 流程；remember=true 时主进程落盘 closeAction 偏好） */
     resolveClose: (action: 'minimize' | 'quit', remember: boolean) => void
 
@@ -159,6 +167,28 @@ declare global {
     setPetChatState: (status: string) => void
     /** 面板窗口控制（无原生标题栏，由渲染层自绘按钮触发） */
     closePanel: () => void
+  // 终端 tab（PTY）
+  ptyCreate: (termId: string, cols: number, rows: number, cwd?: string) => Promise<{ ok: boolean; shell: string; pid: number }>
+  ptyInput: (termId: string, data: string) => void
+  ptyResize: (termId: string, cols: number, rows: number) => void
+  ptyKill: (termId: string) => void
+  onPtyData: DesktopEventSub<{ termId: string; data: string }>
+  onPtyExit: DesktopEventSub<{ termId: string; code: number }>
+  // 发布 tab（SSH 部署运维）
+  deployListServers: () => Promise<import('@/types').DeployServer[]>
+  deploySaveServer: (server: import('@/types').DeployServer) => Promise<import('@/types').DeployServer[]>
+  deployDeleteServer: (serverId: string) => Promise<import('@/types').DeployServer[]>
+  deploySetCredential: (serverId: string, secret: string) => Promise<void>
+  deployHasCredential: (serverId: string) => Promise<boolean>
+  deployDeleteCredential: (serverId: string) => Promise<void>
+  deployTestConnection: (serverId: string) => Promise<{ ok: boolean; error?: string }>
+  deployExec: (serverId: string, command: string, runId: string, allowDangerous?: boolean) =>
+    Promise<{ blocked?: boolean; reason?: string; exitCode: number | null; error?: string }>
+  deployExecCancel: (runId: string) => void
+  onDeployOutput: DesktopEventSub<{ runId: string; stream: 'stdout' | 'stderr'; line: string }>
+  onDeployExit: DesktopEventSub<{ runId: string; code: number | null }>
+  /** 隐藏/恢复桌宠窗口（设置项「隐藏桌宠」） */
+  setPetHidden: (hidden: boolean) => void
     /** 跨窗口项目同步：通知其余窗口 projectPath / openProjects 变化 */
     notifyProjectChanged: (projectPath: string | null, openProjects: string[], closedProject?: string | null) => void
     /** 桌宠视频路径解析：dev 走 Vite dev server，打包后走 file:// + asarUnpack */
@@ -170,6 +200,8 @@ declare global {
     relayChatMirror: (p: { kind: 'user-message' | 'finalized' | 'cleared'; projectRoot: string; message?: unknown; msg?: unknown }) => void
     /** 主窗口关闭被拦截（closeAction=ask）：渲染层弹询问框后必须回 resolveClose */
     onCloseRequest: DesktopEventSub<void>
+    /** 最大化状态推送（自绘标题栏按钮图标跟切） */
+    onWindowState: DesktopEventSub<{ maximized: boolean }>
     /** 关闭询问被主进程超时兜底收口：渲染层收起询问框 */
     onCloseCancel: DesktopEventSub<void>
     /** 对话镜像 relay（对方窗口的稳定点推送） */
@@ -185,13 +217,13 @@ declare global {
     onCliToolEvent: DesktopEventSub<{ requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string; projectRoot?: string }>
     onCliToolResult: DesktopEventSub<{ requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number }; projectRoot?: string }>
     onCliAgentEvent: DesktopEventSub<CliAgentEventPayload>
-    onCliRetry: DesktopEventSub<{ requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }>
     onMemoryExtractState: DesktopEventSub<{ projectRoot: string; extracting: boolean }>
     /** 记忆数据变更广播（any 写路径完成后主进程发，all=true 表示 clear('all') 等全库变更） */
     onMemoryChanged: DesktopEventSub<{ all: boolean; projectKeys: string[] }>
     onFsChanged: DesktopEventSub<{ paths: string[]; projectRoot?: string }>
     /** 盘上配置变更广播（载荷 = 实际变化的顶层键，多窗口设置同步用） */
     onConfigChanged: DesktopEventSub<string[]>
+    onThemeChanged: DesktopEventSub<string>
     /** 跨窗口项目切换广播（另一窗口 open/close project 后触发） */
     onProjectChanged: DesktopEventSub<{ projectPath: string | null; openProjects: string[]; closedProject?: string | null }>
     onElementPicked: DesktopEventSub<{ selector: string; tag: string; id: string; text: string }>

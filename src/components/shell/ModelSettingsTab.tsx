@@ -9,6 +9,10 @@ interface Props {
   setCliPermission: (v: 'auto' | 'readonly') => void
   cliCommand: string
   setCliCommand: (v: string) => void
+  maxTurns: string
+  setMaxTurns: (v: string) => void
+  subagentMaxTurns: string
+  setSubagentMaxTurns: (v: string) => void
   provider: 'openai' | 'anthropic'
   setProvider: (v: 'openai' | 'anthropic') => void
   baseUrl: string
@@ -78,6 +82,20 @@ export function ModelSettingsTab(p: Props) {
             </label>
           </>
         )}
+        <label className="field">
+          <span className="field__label">主对话工具循环轮数上限</span>
+          <input className="field__input" type="number" min={4} max={500} step={1}
+            value={p.maxTurns} onChange={(e) => p.setMaxTurns(e.target.value)}
+            placeholder="默认 60" aria-label="主对话工具循环轮数上限" />
+          <span className="field__hint">AI 自主持续执行的单次轮数上限（API/CLI 通用），到顶即收口防失控；长程任务可调大，清空恢复默认 60</span>
+        </label>
+        <label className="field">
+          <span className="field__label">子 agent 工具循环轮数上限</span>
+          <input className="field__input" type="number" min={2} max={200} step={1}
+            value={p.subagentMaxTurns} onChange={(e) => p.setSubagentMaxTurns(e.target.value)}
+            placeholder="默认 20" aria-label="子 agent 工具循环轮数上限" />
+          <span className="field__hint">每个派发子任务的独立执行轮数（子任务聚焦语义，缺省保守）；清空恢复默认 20</span>
+        </label>
 
         {p.dispatchMode === 'api' && (
           <>

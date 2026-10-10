@@ -110,8 +110,8 @@ export const api = {
     messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null,
     opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string },
   ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot, opts)),
-  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
-    wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode)),
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
+    wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode, cliCommand)),
   aiCancel: (requestId: string) => wrap((d) => d.aiCancel(requestId)),
 
   // Skills 目录
@@ -128,6 +128,7 @@ export const api = {
   createEmptyProject: (parentDir: string, name: string) => wrap((d) => d.createEmptyProject(parentDir, name)),
   cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) =>
     wrap((d) => d.cloneRepos(parentDir, repos)),
+  cloneCancel: () => wrap((d) => d.cloneCancel()),
   testRepo: (url: string) => wrap((d) => d.testRepo(url)),
   gitRepoInfo: (dir: string) => wrap((d) => d.gitRepoInfo(dir)),
   gitCheckout: (dir: string, branch: string) => wrap((d) => d.gitCheckout(dir, branch)),
@@ -184,7 +185,7 @@ export const api = {
   // 窗口
   pickDirectory: () => wrap((d) => d.pickDirectory()),
   setWindowTitle: (title: string) => wrap((d) => d.setWindowTitle(title)),
-  startElementPick: (url: string) => wrap((d) => d.startElementPick(url)),
+  startElementPick: () => wrap((d) => d.startElementPick()),
   openExternal: (url: string) => wrap((d) => d.openExternal(url)),
   openInExplorer: (filePath: string) => wrap((d) => d.openInExplorer(filePath)),
   /** 关闭询问弹窗的回传（fire-and-forget；挂起校验在主进程） */
@@ -238,11 +239,6 @@ export function onCliAgentEvent(cb: (payload: CliAgentEventPayload) => void): ()
   return window.desktopAPI.onCliAgentEvent(cb)
 }
 
-export function onCliRetry(cb: (payload: { requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }) => void): () => void {
-  if (!isDesktop || !window.desktopAPI) return () => {}
-  return window.desktopAPI.onCliRetry(cb)
-}
-
 export function onMemoryExtractState(cb: (payload: { projectRoot: string; extracting: boolean }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onMemoryExtractState(cb)
@@ -268,6 +264,11 @@ export function onFsChanged(cb: (payload: { paths: string[]; projectRoot?: strin
 export function onConfigChanged(cb: (affectedKeys: string[]) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onConfigChanged(cb)
+}
+
+export function onCloneProgress(cb: (p: { index: number; total: number; name: string; stage: string; pct: number | null }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onCloneProgress(cb)
 }
 
 export function onProjectChanged(cb: (p: { projectPath: string | null; openProjects: string[]; closedProject?: string | null }) => void): () => void {

@@ -4,11 +4,15 @@
  * 右侧：选中目录下的 Skill 列表（导入 ZIP / 导入目录 / 删除）
  */
 import { useEffect, useState } from 'react'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { api } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { EmptyState } from '@/components/common/EmptyState'
 import { IconAlert, IconCheck, IconClose, IconFolder, IconPlus, IconSearch, IconTerminal, IconTrash } from '@/components/common/icons'
 import type { SkillMeta } from '@/types'
+
+/** 技能卡四色池：紫/蓝/绿/橙轮换（色值走 --tool-* token 族；无图标，标题色是唯一色调信号） */
+const SKILL_CARD_TONES = ['purple', 'blue', 'green', 'orange'] as const
 
 export function ProjectSkillsPanel() {
   const projectPath = useAppStore((s) => s.projectPath)
@@ -26,6 +30,8 @@ export function ProjectSkillsPanel() {
   const [importing, setImporting] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [search, setSearch] = useState('')
+  /** 详情弹窗（点卡查看 Skill 内容） */
+  const [detail, setDetail] = useState<SkillMeta | null>(null)
 
   // 选中目录变化 → 扫描该目录下的 Skill
   useEffect(() => {
@@ -266,28 +272,49 @@ export function ProjectSkillsPanel() {
                 : '此目录下暂无 Skill'}
             />
           ) : (
-            filtered.map((skill) => (
-              <div key={skill.id} className="skill-row" role="listitem">
-                <div className="skill-row__info">
-                  <span className="skill-row__name">{skill.name}</span>
-                  {skill.description && <span className="skill-row__desc">{skill.description}</span>}
+            filtered.map((skill, i) => {
+              /* 四色卡：按序轮换（紫/蓝/绿/橙） */
+              const tone = SKILL_CARD_TONES[i % SKILL_CARD_TONES.length]
+              return (
+                <div
+                  key={skill.id}
+                  className={`skill-card skill-card--${tone}`}
+                  role="listitem"
+                  tabIndex={0}
+                  onClick={() => setDetail(skill)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setDetail(skill) } }}
+                  aria-label={`查看 ${skill.name} 详情`}
+                >
+                  <div className="skill-card__head">
+                    <span className="skill-card__name">{skill.name}</span>
+                    {isBuiltinDir && (
+                      <div className="skill-card__actions">
+                        <button
+                          className="icon-btn"
+                          onClick={(e) => { e.stopPropagation(); void onDelete(skill.id, skill.name) }}
+                          title="删除"
+                          aria-label={`删除 ${skill.name}`}
+                        >
+                          <IconTrash size={13} />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  {skill.description && <div className="skill-card__desc">{skill.description}</div>}
                   {skill.triggers.length > 0 && (
-                    <span className="skill-row__triggers">
-                      {skill.triggers.map((t) => <span key={t} className="skill-row__tag">{t}</span>)}
-                    </span>
+                    <div className="skill-card__tags">
+                      {skill.triggers.slice(0, 4).map((t) => <span key={t} className="skill-card__tag">{t}</span>)}
+                    </div>
                   )}
                 </div>
-                {isBuiltinDir && (
-                  <div className="skill-row__actions">
-                    <button className="icon-btn" onClick={() => void onDelete(skill.id, skill.name)} title="删除" aria-label="删除">
-                      <IconTrash size={13} />
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))
+              )
+            })
           )}
         </div>
+
+        {detail && (
+          <SkillDetailDialog skill={detail} dir={selectedDir} onClose={() => setDetail(null)} />
+        )}
 
         <div className="skills-panel__status">
           {selectedDir ? (
@@ -298,6 +325,57 @@ export function ProjectSkillsPanel() {
             </>
           ) : (
             <span>未选择目录</span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Skill 详情弹窗：点卡片查看目录内容（readSkill 全文） */
+function SkillDetailDialog({ skill, dir, onClose }: {
+  skill: SkillMeta
+  dir: string | null
+  onClose: () => void
+}) {
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
+  const [content, setContent] = useState<string | null>(null)
+  const [error, setError] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    setContent(null)
+    setError(false)
+    if (!dir) { setError(true); return }
+    api.readSkill([dir], skill.id)
+      .then((text) => { if (!cancelled) setContent(text ?? '') })
+      .catch(() => { if (!cancelled) setError(true) })
+    return () => { cancelled = true }
+  }, [dir, skill.id])
+
+  return (
+    <div ref={trapRef} className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
+      <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label={`${skill.name} 详情`}>
+        <div className="modal__head">
+          <span>{skill.name}</span>
+          <button className="icon-btn" onClick={onClose} aria-label="关闭">
+            <IconClose size={14} />
+          </button>
+        </div>
+        {skill.description && <p className="modal__msg">{skill.description}</p>}
+        {skill.triggers.length > 0 && (
+          <div className="skill-detail__meta">
+            {skill.triggers.map((t) => <span key={t} className="skill-card__tag">{t}</span>)}
+          </div>
+        )}
+        <div className="modal__body">
+          <span className="skill-detail__label">SKILL 内容</span>
+          {error ? (
+            <div className="skill-detail__error">读取 Skill 内容失败（目录可能已移动或无读取权限）</div>
+          ) : content === null ? (
+            <div className="skill-detail__loading">加载中…</div>
+          ) : (
+            <pre className="skill-detail__body">{content || '（内容为空）'}</pre>
           )}
         </div>
       </div>

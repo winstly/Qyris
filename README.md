@@ -88,15 +88,16 @@
 - Markdown 渲染 + 代码块高亮 + 一键复制
 - 工具调用过程可视化（折叠卡片：图标 + 标签 + 目标路径 + 状态指示器，点击展开详情）
 - **规划优先**：非平凡任务先出编号计划，再拆分执行
-- **子任务派发**（`dispatch_subtasks` / CLI Agent/Task）：
+- **子任务派发**（`dispatch_subtasks`，API / CLI 两档同构）：
   - 子 agent **并行执行**，独立上下文互不污染
-  - 按任务难度分配**档位模型**（Thinking / Haiku 级 / Sonnet 级 / Opus 级，未配置自动回退主模型）
+  - **与主对话同构**：同一模型通道、同一套工具（CLI 档同样经 MCP 挂载完整工具面，不降级为纯补全），只是各自独立 session（自己的上下文、工具面、事件出口；禁止嵌套派发）
+  - 按任务难度分配**档位模型**（Thinking / Haiku 级 / Sonnet 级 / Opus 级，未配置自动回退主模型；CLI 档模型由 claude 自带配置决定）
   - 对话内实时面板：每个子 agent 的状态灯、转录逐条入账
   - **切换器 / 专注视图**随时查看任意子 agent 执行进度
   - 子 agent **独立 token 记账**，总额自动汇总到主对话
   - 失败自动重试（模型类错误），完成 / 取消自动清理出列表
-- 内置工具（API 模式）：`list_files` / `search_files` / `grep_files` / `read_file` / `write_file` / `edit_file` / `run_once` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `verify_start` / `dispatch_subtasks` / `askUserQuestion` / `load_skill`
-- 内置工具（CLI 模式）：Read / Write / Bash / PowerShell / Glob / Grep / Edit / Agent / Task / WebFetch / WebSearch
+- 内置工具（ToolRegistry 统一注册，API 模式由 runner 直调 / CLI 模式经 MCP 挂载）：`list_dir` / `search_files` / `glob` / `grep` / `read_file` / `write_file` / `edit_file` / `run_command` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `verify_start` / `git_status` / `git_diff` / `git_add` / `git_commit` / `load_skill` / `memory_search` / `memory_save` / `memory_archive` / `preview_open` / `preview_console` / `remote_exec` / `remote_upload` / `update_server_tags`
+- 编排/交互工具：`dispatch_subtasks`（子任务派发，CLI 模式经主进程代行通道执行，面板事件不丢） / `askUserQuestion`（仅 API 模式；CLI 通道不可用，模型改为在回复中向用户提问）
 - 真取消：「停止生成」在网络层硬中断请求，连同在途子 agent 请求一并取消
 - **端口冲突自动检测**——服务启动失败时自动查询占用进程（PID + 进程名），注入解决建议（停服务 / 换端口）
 - **消息持久化**：SQLite 存储，keyset 分页（最新 50 条 + 向上翻页），稳定点 write-through（user 发送 / assistant 收尾 / toolResult 追加）
@@ -183,7 +184,7 @@ npm run typecheck   # 类型检查（渲染层 + 主进程双 tsconfig）
 npm run dist        # 构建 + 打包安装包
 
 # 冒烟测试
-npm run smoke:cli           # CLI adapter 全链路（序列化 / 参数 / 罐装 NDJSON 事件）
+npm run smoke:protocol      # AI CLI 协议原语（序列化 / Skill 反解 / 连接测试拆分）
 npm run smoke:git           # Git 操作（分支 / 提交 / 状态解析）
 npm run smoke:env           # 子进程环境（PATH 探测 / 命令检测 / 编码）
 npm run smoke:memory        # 消息持久化 + 记忆检索（FTS / vec / RRF / 迁移）

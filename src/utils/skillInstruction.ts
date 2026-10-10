@@ -3,7 +3,7 @@
  * 共用，保证两路输出逐字节一致。
  *
  * ⚠️ 措辞是协议：electron/lib/ai-cli.ts 的 SKILL_MULTI_RE / SKILL_SINGLE_RE 正则靠这段文本
- * 反解 Skill id，scripts/smoke-ai-cli.ts 也有断言钉死——改措辞必须生成器、正则、smoke 三处同步。
+ * 反解 Skill id，scripts/smoke-ai-protocol.ts 也有断言钉死——改措辞必须生成器、正则、smoke 三处同步。
  */
 export function skillLoadInstruction(ids: string[]): string {
   const joined = ids.join(', ')

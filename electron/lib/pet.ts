@@ -7,7 +7,7 @@
  * 状态聚合：监听 build/AI 事件 → 维护 petState → 推送给桌宠窗口切换动画。
  * 面板窗口复用主窗口的 preload + IPC 事件，Zustand store 各自独立。
  */
-import { BrowserWindow, Menu, screen, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, screen, ipcMain } from 'electron'
 import path from 'node:path'
 import { emitToWindow, registerWindow } from './emitter'
 import { mainLog } from './log-file'
@@ -17,6 +17,16 @@ export type PetState = 'idle' | 'working' | 'waiting' | 'error'
 let petWin: BrowserWindow | null = null
 let panelWin: BrowserWindow | null = null
 let currentState: PetState = 'idle'
+
+/** mac 不传 skipTaskbar：它在 mac 的实现就是「让窗口退出 taskbar/dock 存在感」，
+ *  手段是切应用激活策略（accessory 化）——每次窗口 show 都会把 dock 图标打掉一次
+ *  （实测 Electron 44，dock 闪烁的根因）。mac 没有任务栏，此选项零收益；win/linux 保留本行语义。 */
+const SKIP_TASKBAR = process.platform !== 'darwin'
+const IS_MAC = process.platform === 'darwin'
+
+/** ready-to-show 前到达的隐藏意愿：config（本地文件，毫秒级）几乎总比渲染层就绪先到，
+ *  不拦的话「启动即隐藏」会被 ready-to-show 的 show 顶掉——关宠用户启动时宠物闪现 + dock 闪一下 */
+let hideWantedBeforeFirstShow = false
 
 // ---------- 状态聚合 ----------
 
@@ -42,13 +52,13 @@ function chatStatusToPetState(status: string): PetState {
   return 'idle'
 }
 
-/** 聚合所有窗口：error > waiting > working > idle */
+/** 聚合所有窗口：error > waiting > working > idle（waiting 不能提前 break，否则后序窗口的 error 被漏掉） */
 function recomputePetChatState(): void {
   let next: PetState = 'idle'
   for (const st of windowChatStates.values()) {
     if (st === 'error') { next = 'error'; break }
-    if (st === 'waiting') { next = 'waiting'; break }
-    if (st === 'working') next = 'working'
+    if (st === 'waiting') next = 'waiting'
+    else if (st === 'working' && next !== 'waiting') next = 'working'
   }
   updatePetState(next)
 }
@@ -107,11 +117,17 @@ export function createPetWindow(): void {
     transparent: true,
     alwaysOnTop: true,
     resizable: false,
-    skipTaskbar: true,
+    skipTaskbar: SKIP_TASKBAR,
     hasShadow: false,
     show: false,
     backgroundColor: '#00000000',
-    type: 'toolbar',
+    // mac：桌宠必须是不激活的被动 overlay。可激活的工具面板窗（type:'toolbar'）在 mac 上
+    // 会以窗口标题成为独立呈现实体——桌宠一显示，dock 呈现焦点从「轻驭」切给它再被
+    // ensureMacDockIcon 拉回，肉眼即图标闪烁（实测）。点击/拖拽不依赖 key 状态，
+    // 键盘输入归面板（与 petSetFocusable 的 IMK 焦点哲学同源）；win/linux 的
+    // type:'toolbar' 是任务栏工具窗语义，保留。
+    focusable: !IS_MAC,
+    type: IS_MAC ? undefined : 'toolbar',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       sandbox: true,
@@ -120,15 +136,25 @@ export function createPetWindow(): void {
     },
   })
 
-  petWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true })
+  // ⚠️ visibleOnFullScreen 的 Electron mac 实现（native_window_mac.mm SetVisibleOnAllWorkspaces）
+  // 默认会顺手调用 DockHide()——这就是 dock 图标消失/闪烁的真正根因。skipTransformProcessType:true
+  // 跳过该隐藏转换；代价：dock 可见（regular）时全屏置顶可能不生效（Apple 10.14+ 限制）
+  petWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
   petWin.setIgnoreMouseEvents(false)
+  // 窗口菜单不列桌宠（overlay 不该成为「窗口」条目；主窗口保持可列）
+  if (IS_MAC) petWin.excludedFromShownWindowsMenu = true
   // 注册进 emitter 的窗口表：pet:state 等定向事件走 emitToWindow（按 windowId 查表），
   // 不注册的话查不到此窗口，所有状态推送被静默丢弃，桌宠动画永远停在 idle
   registerWindow(petWin)
 
   petWin.once('ready-to-show', () => {
+    if (hideWantedBeforeFirstShow) {
+      mainLog.info('[pet] ready-to-show，但启动前已要求隐藏——跳过首显')
+      return
+    }
     mainLog.info('[pet] ready-to-show，显示桌宠窗口')
     petWin?.show()
+    ensureMacDockIcon('首显')
   })
   petWin.webContents.on('did-fail-load', (_e, code, desc) => {
     mainLog.error(`[pet] 加载失败: ${code} ${desc}`)
@@ -151,6 +177,41 @@ export function destroyPetWindow(): void {
 
 export function getPetWindowId(): number | null {
   return petWin && !petWin.isDestroyed() ? petWin.id : null
+}
+
+/** 隐藏/恢复桌宠窗口（不销毁——隐藏态仍挂在托盘生态里，设置里可随时恢复） */
+export function setPetHidden(hidden: boolean): void {
+  if (!petWin || petWin.isDestroyed()) return
+  if (hidden) {
+    // ready-to-show 可能还没跑（config 毫秒级到达 vs 渲染层加载秒级）：记下意愿，别让首显顶出来
+    hideWantedBeforeFirstShow = true
+    petWin.hide()
+  } else {
+    hideWantedBeforeFirstShow = false
+    // 同创建处：skipTransformProcessType 必带，否则这个调用=DockHide，dock 图标闪没
+    petWin.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true })
+    petWin.show()
+    ensureMacDockIcon('恢复显示')
+  }
+}
+
+/**
+ * mac dock 图标保险丝。真根因（Electron 44 源码实锤）：setVisibleOnAllWorkspaces 的
+ * visibleOnFullScreen 分支默认会调用 DockHide()（native_window_mac.mm），已在全部调用点
+ * 用 skipTransformProcessType:true 拆除。skipTaskbar 在 mac 是空函数；type/focusable/标题
+ * 均与翻转无关（三轮排除法证实）。本函数保留作回归保险——Electron 升级若再触发，这里
+ * 即时 + 300ms 双保险自愈并留痕，scene 标注触发路径，日志可直接归因。
+ */
+function ensureMacDockIcon(scene: string): void {
+  if (process.platform !== 'darwin') return
+  const reassert = (via: string): void => {
+    if (app.dock?.isVisible() === false) {
+      mainLog.warn(`[pet] dock 图标丢失（${scene}·${via}），重申常驻`)
+      app.dock?.show()
+    }
+  }
+  reassert('即时')
+  setTimeout(() => reassert('300ms 复查'), 300).unref()
 }
 
 /** 该 windowId 是否桌宠家族窗口（桌宠/面板）：主窗口的布局计算（偏移、最大化恢复）
@@ -212,20 +273,31 @@ export function repositionPanelIfVisible(): void {
   }
 }
 
+/** 桌宠焦点态收口（macOS IMK 兼容）：面板开 → 桌宠不抢键盘焦点。
+ *  mac 上桌宠保持永不激活：setFocusable(true) 会把激活能力还回去，dock 呈现切换
+ *  （图标闪烁）随之复发；而点击/拖拽/右键菜单不依赖 key 状态，无需恢复——
+ *  「关面板要恢复 focusable」是早期从 Linux 语义过度泛化的写法。 */
+function petSetFocusable(focusable: boolean): void {
+  if (process.platform !== 'darwin') return
+  if (!petWin || petWin.isDestroyed()) return
+  if (focusable) return
+  petWin.setFocusable(focusable)
+}
+
 export function togglePanelWindow(): void {
   if (panelWin && !panelWin.isDestroyed()) {
     if (panelWin.isVisible()) {
       // 隐藏而非销毁：保留 Zustand store 状态，重开时无需从 DB 重新加载
       panelWin.hide()
       mainLog.info('[pet] 面板隐藏（store 状态保留，未销毁）')
-      if (process.platform === 'darwin' && petWin && !petWin.isDestroyed()) petWin.setFocusable(true)
+      petSetFocusable(true)
     } else {
       // 复用窗口也要按桌宠当前位置重新定位——否则面板停在旧位置，不跟随被拖动的桌宠
       positionPanelNearPet(panelWin)
       panelWin.show()
       panelWin.focus()
       mainLog.info('[pet] 面板重新显示（复用既有窗口，状态应完整）')
-      if (process.platform === 'darwin' && petWin && !petWin.isDestroyed()) petWin.setFocusable(false)
+      petSetFocusable(false)
     }
     return
   }
@@ -235,7 +307,7 @@ export function togglePanelWindow(): void {
   // macOS IMK 兼容：禁止桌宠窗口抢焦点，防止 toolbar 窗口与面板竞争 IMK match port
   // （导致 "error messaging the match port for IMKCFRunLoopWakeUpReliable" + 文本输入阻塞）
   // 桌宠保持可见但不接受键盘焦点，面板正常接收文本输入
-  if (process.platform === 'darwin') petWin.setFocusable(false)
+  petSetFocusable(false)
 
   panelWin = new BrowserWindow({
     width: 400,
@@ -244,9 +316,9 @@ export function togglePanelWindow(): void {
     transparent: false,
     alwaysOnTop: true,
     resizable: true,
-    skipTaskbar: true,
+    skipTaskbar: SKIP_TASKBAR,
     show: false,
-    backgroundColor: '#131315',
+    backgroundColor: '#202020',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
       sandbox: true,
@@ -271,9 +343,7 @@ export function togglePanelWindow(): void {
     clearWindowChatState(panelWinId)
     panelWin = null
     // 面板关闭后恢复桌宠可交互（可点击开面板、右键菜单）
-    if (petWin && !petWin.isDestroyed()) {
-      if (process.platform === 'darwin') petWin.setFocusable(true)
-    }
+    petSetFocusable(true)
   })
 
   mainLog.info('[pet] 桌宠面板已打开')
@@ -285,6 +355,10 @@ export function togglePanelWindow(): void {
  *  避免 pet.ts ↔ index.ts 循环依赖。 */
 export function registerPetIpc(handlers: { openMain: () => void; quitApp: () => void }): void {
   ipcMain.on('pet:toggle-panel', () => togglePanelWindow())
+  ipcMain.on('pet:set-hidden', (_e, p: { hidden?: boolean }) => {
+    // IPC 载荷运行时校验：非布尔一律按 false（显示）处理
+    setPetHidden(p?.hidden === true)
+  })
   ipcMain.on('pet:request-state', (e) => {
     emitToWindow(e.sender.id, 'pet:state', currentState)
   })
@@ -297,7 +371,7 @@ export function registerPetIpc(handlers: { openMain: () => void; quitApp: () => 
     if (panelWin && !panelWin.isDestroyed()) {
       panelWin.hide()
       mainLog.info('[pet] 面板隐藏（标题栏关闭按钮，store 状态保留）')
-      if (process.platform === 'darwin' && petWin && !petWin.isDestroyed()) petWin.setFocusable(true)
+      petSetFocusable(true)
     }
   })
   // 右键菜单：原生 popup（64px 透明小窗口画 DOM 菜单会被裁剪）

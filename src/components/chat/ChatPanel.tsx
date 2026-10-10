@@ -7,7 +7,8 @@ import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
 import { AgentView } from './AgentPanel'
 import { Select } from '@/components/common/Select'
-import { IconChevron, IconGear, IconTrash, IconUndo } from '@/components/common/icons'
+import { AppIcon } from '@/components/common/AppIcon'
+import { IconTrash, IconUndo } from '@/components/common/icons'
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   idle: '待命',
@@ -23,7 +24,6 @@ const STATUS_LABEL: Record<ChatStatus, string> = {
 export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: boolean }) {
   const { status, sessionId } = useChatStore(selectCurrentChat)
   const hasMessages = useChatStore((s) => selectCurrentChat(s).messages.length > 0)
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen)
   const hasSessionChanges = useFileStore((s) => Object.values(s.snapshots).some((v) => v.sessionId === sessionId))
   const { order: agentOrder, threads: agentThreads, activeThreadId } = useAgentStore(selectCurrentAgent)
   const selectThread = useAgentStore((s) => s.selectThread)
@@ -43,6 +43,8 @@ export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: bo
     const ok = await useAppStore.getState().showConfirm(
       '回退本次会话',
       '将恢复本次对话中 AI 修改的所有文件到对话开始前，且不可撤销。确定吗？',
+      undefined,
+      { confirmLabel: '回退' },
     )
     if (!ok) return
     const n = await useFileStore.getState().restoreSession(sessionId)
@@ -64,6 +66,7 @@ export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: bo
       '清空对话',
       '将结束当前会话并开启新对话；当前对话默认保留在本地历史中，如需彻底删除请勾选下方选项。',
       checks,
+      { confirmLabel: '清空' },
     )
     const ok = typeof result === 'object' ? result.confirmed : result
     if (!ok) return
@@ -85,10 +88,17 @@ export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: bo
 
   return (
     <aside className="chat" aria-label="AI 对话栏">
+      {/* 悬浮玻璃圆角主窗（theme-v2-chat chat-window）：栏透明透出深空紫雾，
+          窗本体是玻璃卡。折叠契约（flex-basis→0 + overflow hidden）在 .chat 层不变。 */}
+      <div className="chat__window">
       <header className="chat__head">
-        <span className="chat__dot" data-status={status} />
-        <span className="chat__title">AI 助手</span>
-        <span className="chat__status" data-status={status}>{STATUS_LABEL[status]}</span>
+        <div className="chat__avatar" aria-hidden>
+          <AppIcon className="app-logo" />
+        </div>
+        <div className="chat__head-info">
+          <span className="chat__title">轻驭</span>
+          <span className="chat__status" data-status={status}>{STATUS_LABEL[status]}</span>
+        </div>
         {showHeaderActions && (
           <div className="chat__head-actions">
             <button className="icon-btn" onClick={() => void revertSession()} disabled={!hasSessionChanges} aria-label="回退会话" title="回退本次会话的 AI 文件改动">
@@ -97,21 +107,7 @@ export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: bo
             <button className="icon-btn" onClick={() => void clearChat()} disabled={!hasMessages} aria-label="清空对话" title="清空对话">
               <IconTrash size={15} />
             </button>
-            <button className="icon-btn" onClick={() => setSettingsOpen(true)} aria-label="AI 设置" title="AI 设置">
-              <IconGear size={15} />
-            </button>
           </div>
-        )}
-        {/* 折叠对话栏：主窗口专属——桌宠面板复用本组件（showHeaderActions=false），不渲染此按钮 */}
-        {showHeaderActions && (
-          <button
-            className="icon-btn chat__collapse-btn"
-            onClick={useAppStore.getState().toggleChatPanel}
-            aria-label="折叠对话栏"
-            title="折叠对话栏"
-          >
-            <IconChevron size={15} />
-          </button>
         )}
       </header>
 
@@ -140,6 +136,7 @@ export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: bo
 
       {activeThreadId && agentThreads[activeThreadId] ? <AgentView /> : <MessageList />}
       <ChatInput />
+      </div>
     </aside>
   )
 }

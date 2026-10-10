@@ -103,12 +103,12 @@ export async function migrateDataDir(targetDir: string): Promise<MigrateResult> 
     setMigrating(true)
     const copiedSnaps: string[] = [] // 本次复制到目标的新增文件（回滚时精确删除）
     try {
-      // —— 关库搬文件 ——
-      closeDb()
+      // —— 关库搬文件 ——（closeDb 是 Worker 异步消息，必须 await 收到关闭完成再 rename）
+      await closeDb()
       if (existsSync(sourceDb)) {
-        moveFile(sourceDb, targetDb)
+        await moveFile(sourceDb, targetDb)
         for (const suffix of ['-wal', '-shm']) {
-          if (existsSync(sourceDb + suffix)) moveFile(sourceDb + suffix, targetDb + suffix)
+          if (existsSync(sourceDb + suffix)) await moveFile(sourceDb + suffix, targetDb + suffix)
         }
       }
       if (hasSnaps) await copySnapshots(sourceSnaps, targetSnaps, copiedSnaps)
@@ -198,7 +198,7 @@ async function takeoverInterrupted(target: string, targetDb: string, sourceNorm:
     rebaseOverrideDir(target) // smoke override 模式下同步测试根；生产 no-op
     setMigrating(false) // 先出迁移闸门再重开（getDb 在 migrating 期一律拒绝）
     try {
-      closeDb() // 单例可能还连着源库（接管前段读写过游标/计数），必须先关再重开
+      await closeDb() // 单例可能还连着源库（接管前段读写过游标/计数），必须先关再重开
       await getDb()
     } catch (e) {
       // 重开失败：指针已切但库不可用——文件回滚到源位（源位即接管前的有效位置）+ config 恢复原值
@@ -219,14 +219,27 @@ async function takeoverInterrupted(target: string, targetDb: string, sourceNorm:
   }
 }
 
-/** 移动单文件：同卷 rename（瞬时）；跨卷 EXDEV 退 copy+unlink */
-function moveFile(from: string, to: string): void {
-  try {
-    renameSync(from, to)
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException)?.code !== 'EXDEV') throw e
-    copyFileSync(from, to)
-    unlinkSync(from)
+/** 移动单文件：同卷 rename（瞬时）；跨卷 EXDEV 退 copy+unlink。
+ *  EBUSY/EPERM 有界重试：Windows 上 sqlite Worker 刚关库时文件句柄释放有滞后，
+ *  同步 rename 会撞「resource busy or locked」——等句柄落地再移，不把滞后当接管失败 */
+async function moveFile(from: string, to: string): Promise<void> {
+  for (let i = 0; ; i++) {
+    try {
+      renameSync(from, to)
+      return
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException)?.code
+      if (code === 'EXDEV') {
+        copyFileSync(from, to)
+        unlinkSync(from)
+        return
+      }
+      if ((code === 'EBUSY' || code === 'EPERM') && i < 20) {
+        await new Promise((r) => setTimeout(r, 50))
+        continue
+      }
+      throw e
+    }
   }
 }
 
@@ -251,13 +264,13 @@ async function rollbackFiles(
   targetDb: string, targetSnaps: string, copied: string[], sourceNorm: string, hasSnaps: boolean,
 ): Promise<void> {
   try {
-    closeDb()
+    await closeDb()
   } catch { /* 未打开时忽略 */ }
   try {
     if (existsSync(targetDb)) {
-      moveFile(targetDb, path.join(sourceNorm, 'qyris.db'))
+      await moveFile(targetDb, path.join(sourceNorm, 'qyris.db'))
       for (const suffix of ['-wal', '-shm']) {
-        if (existsSync(targetDb + suffix)) moveFile(targetDb + suffix, path.join(sourceNorm, 'qyris.db' + suffix))
+        if (existsSync(targetDb + suffix)) await moveFile(targetDb + suffix, path.join(sourceNorm, 'qyris.db' + suffix))
       }
     }
   } catch (e) {

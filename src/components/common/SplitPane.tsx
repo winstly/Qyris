@@ -56,6 +56,26 @@ export function SplitPane({
     window.addEventListener('pointerup', onUp)
   }, [vertical, minFirst, minSecond, onRatioChange])
 
+  /** 键盘替代：←/→（横）或 ↑/↓（纵）以 2% 步进（WAI-ARIA separator 模式） */
+  const onKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const forward = vertical
+      ? e.key === 'ArrowRight'
+      : e.key === 'ArrowDown'
+    const back = vertical
+      ? e.key === 'ArrowLeft'
+      : e.key === 'ArrowUp'
+    if (!forward && !back) return
+    e.preventDefault()
+    const container = containerRef.current
+    if (!container) return
+    const rect = container.getBoundingClientRect()
+    const total = vertical ? rect.width : rect.height
+    let next = ratio + (forward ? 0.02 : -0.02)
+    if (minFirst > 0) next = Math.max(minFirst / total, next)
+    if (minSecond > 0) next = Math.min(1 - minSecond / total, next)
+    onRatioChange(Math.min(0.95, Math.max(0.05, next)))
+  }, [vertical, minFirst, minSecond, onRatioChange, ratio])
+
   return (
     <div ref={containerRef} className={`split ${vertical ? 'split--v' : 'split--h'} ${className ?? ''}`}>
       <div className="split__first" style={{ flexBasis: `${ratio * 100}%` }}>{first}</div>
@@ -63,7 +83,13 @@ export function SplitPane({
         className="split__handle"
         role="separator"
         aria-orientation={vertical ? 'vertical' : 'horizontal'}
+        aria-label="调整分栏比例（方向键调整）"
+        tabIndex={0}
+        aria-valuenow={Math.round(ratio * 100)}
+        aria-valuemin={0}
+        aria-valuemax={100}
         onPointerDown={onPointerDown}
+        onKeyDown={onKeyDown}
         data-dragging={dragging || undefined}
       />
       <div className="split__second">{second}</div>

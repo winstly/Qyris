@@ -270,6 +270,7 @@ export function UserMemorySection() {
         <div className="user-mem__search">
           <IconSearch size={12} />
           <input
+            aria-label="搜索用户记忆"
             className="user-mem__search-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}

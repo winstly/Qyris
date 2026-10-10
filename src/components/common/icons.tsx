@@ -1,291 +1,56 @@
-/** 内联 SVG 图标集（stroke 风格，跟随 currentColor） */
-import type { SVGProps } from 'react'
+/**
+ * RemixIcon 图标字体适配层 —— 单一字体字形族，跟随 currentColor
+ *
+ * theme-v2-chat 口径（换血决策，覆盖旧「不换 Remix」的在案理由）：
+ *   · npm 官方 remixicon 包（全量 woff2 ~130KB，31 个导出全有真字形）
+ *     —— Qyris-new 目录里的裁剪版只有 47 字形、缺 11 个，不引入。
+ *   · 字体图标天然 currentColor，换主题零改动。
+ *   · 导出名与 { size, className } 签名保持不变，调用方零改动。
+ *   · `od-icon` 类名保留作 CSS 钩子（兼容历史选择器与尺寸覆盖位）。
+ */
+import type { CSSProperties } from 'react'
 
-type P = SVGProps<SVGSVGElement> & { size?: number }
+type P = { size?: number; className?: string; style?: CSSProperties }
 
-function base({ size = 16, ...rest }: P): SVGProps<SVGSVGElement> {
-  return {
-    width: size, height: size, viewBox: '0 0 24 24', fill: 'none',
-    stroke: 'currentColor', strokeWidth: 1.8, strokeLinecap: 'round',
-    strokeLinejoin: 'round', 'aria-hidden': true, ...rest,
-  }
-}
-
-export function IconFolder(p: P) {
+/** 字体图标渲染：size 走 fontSize（RemixIcon 是 1em 网格的字体字形） */
+function ri(glyph: string, { size = 16, className, style }: P) {
   return (
-    <svg {...base(p)}>
-      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
-    </svg>
+    <i
+      className={`od-icon ${glyph}${className ? ` ${className}` : ''}`}
+      style={{ fontSize: size, ...style }}
+      aria-hidden
+    />
   )
 }
 
-export function IconFolderOpen(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v1H6.5a2 2 0 0 0-1.9 1.4L3 16V7Z" />
-      <path d="M3 16.5 4.9 11a1 1 0 0 1 1-.7H21l-2 6.4a1.5 1.5 0 0 1-1.4 1.1H4.3A1.4 1.4 0 0 1 3 16.5Z" />
-    </svg>
-  )
-}
-
-export function IconFolderPlus(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z" />
-      <path d="M12 11v5" />
-      <path d="M9.5 13.5h5" />
-    </svg>
-  )
-}
-
-export function IconFile(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Z" />
-      <path d="M14 3v5h5" />
-    </svg>
-  )
-}
-
-export function IconChevron(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="m9 6 6 6-6 6" />
-    </svg>
-  )
-}
-
-export function IconPlay(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M7 5v14l12-7L7 5Z" />
-    </svg>
-  )
-}
-
-export function IconStop(p: P) {
-  return (
-    <svg {...base(p)}>
-      <rect x="6" y="6" width="12" height="12" rx="2" />
-    </svg>
-  )
-}
-
-export function IconRefresh(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M21 12a9 9 0 1 1-2.6-6.4" />
-      <path d="M21 3v6h-6" />
-    </svg>
-  )
-}
-
-export function IconSend(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="m4 12 16-8-5 16-3.5-6L4 12Z" />
-    </svg>
-  )
-}
-
-export function IconGear(p: P) {
-  return (
-    <svg {...base(p)}>
-      <circle cx="12" cy="12" r="3.2" />
-      <path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" />
-    </svg>
-  )
-}
-
-export function IconSearch(p: P) {
-  return (
-    <svg {...base(p)}>
-      <circle cx="11" cy="11" r="7" />
-      <path d="m20 20-3.5-3.5" />
-    </svg>
-  )
-}
-
-export function IconClose(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M18 6 6 18M6 6l12 12" />
-    </svg>
-  )
-}
-
-export function IconPlus(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M12 5v14M5 12h14" />
-    </svg>
-  )
-}
-
-export function IconTrash(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
-    </svg>
-  )
-}
-
-export function IconPencil(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3Z" />
-    </svg>
-  )
-}
-
-export function IconCopy(p: P) {
-  return (
-    <svg {...base(p)}>
-      <rect x="9" y="9" width="12" height="12" rx="2" />
-      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-    </svg>
-  )
-}
-
-export function IconScissors(p: P) {
-  return (
-    <svg {...base(p)}>
-      <circle cx="6" cy="6" r="3" />
-      <circle cx="6" cy="18" r="3" />
-      <line x1="20" y1="4" x2="8.12" y2="15.88" />
-      <line x1="14.47" y1="14.48" x2="20" y2="20" />
-      <line x1="8.12" y1="8.12" x2="12" y2="12" />
-    </svg>
-  )
-}
-
-export function IconCheck(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="m4 12.5 5 5L20 6.5" />
-    </svg>
-  )
-}
-
-export function IconAlert(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M12 9v4m0 4h.01" />
-      <path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />
-    </svg>
-  )
-}
-
-export function IconTerminal(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="m5 7 5 5-5 5M12 17h7" />
-    </svg>
-  )
-}
-
-export function IconLink(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7" />
-      <path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7" />
-    </svg>
-  )
-}
-
-export function IconBranch(p: P) {
-  return (
-    <svg {...base(p)}>
-      <circle cx="6" cy="6" r="2.6" />
-      <circle cx="6" cy="18" r="2.6" />
-      <circle cx="18" cy="8" r="2.6" />
-      <path d="M6 8.6v6.8" />
-      <path d="M18 10.6c0 3-2.5 4.4-6 4.4h-2" />
-    </svg>
-  )
-}
-
-export function IconExternal(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M14 4h6v6" />
-      <path d="M20 4 11 13" />
-      <path d="M19 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5" />
-    </svg>
-  )
-}
-
-export function IconEye(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" />
-      <circle cx="12" cy="12" r="3" />
-    </svg>
-  )
-}
-
-export function IconTarget(p: P) {
-  return (
-    <svg {...base(p)}>
-      <circle cx="12" cy="12" r="8" />
-      <circle cx="12" cy="12" r="2.2" />
-      <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
-    </svg>
-  )
-}
-
-export function IconUndo(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="M9 14 4 9l5-5" />
-      <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
-    </svg>
-  )
-}
-
-export function IconClock(p: P) {
-  return (
-    <svg {...base(p)}>
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 7v5l3 3" />
-    </svg>
-  )
-}
-
-export function IconDesktop(p: P) {
-  return (
-    <svg {...base(p)}>
-      <rect x="2" y="3" width="20" height="14" rx="2" />
-      <path d="M8 21h8M12 17v4" />
-    </svg>
-  )
-}
-
-export function IconTablet(p: P) {
-  return (
-    <svg {...base(p)}>
-      <rect x="4" y="2" width="16" height="20" rx="2" />
-      <path d="M12 18h.01" />
-    </svg>
-  )
-}
-
-export function IconMobile(p: P) {
-  return (
-    <svg {...base(p)}>
-      <rect x="5" y="2" width="14" height="20" rx="2" />
-      <path d="M12 18h.01" />
-    </svg>
-  )
-}
-
-/** 分层记忆（三层堆叠，对应 short/long/summary 分层模型） */
-export function IconLayers(p: P) {
-  return (
-    <svg {...base(p)}>
-      <path d="m12 3 9 5-9 5-9-5 9-5Z" />
-      <path d="m3 12.8 9 5 9-5" />
-      <path d="m3 17.3 9 5 9-5" />
-    </svg>
-  )
-}
+export function IconFolder(p: P) { return ri('ri-folders-line', p) }
+export function IconFolderOpen(p: P) { return ri('ri-folder-open-line', p) }
+export function IconFolderPlus(p: P) { return ri('ri-folder-add-line', p) }
+export function IconFile(p: P) { return ri('ri-file-text-line', p) }
+export function IconChevron(p: P) { return ri('ri-arrow-right-s-line', p) }
+export function IconPlay(p: P) { return ri('ri-play-fill', p) }
+export function IconStop(p: P) { return ri('ri-stop-fill', p) }
+export function IconRefresh(p: P) { return ri('ri-refresh-line', p) }
+export function IconSend(p: P) { return ri('ri-send-plane-fill', p) }
+export function IconGear(p: P) { return ri('ri-settings-3-line', p) }
+export function IconSearch(p: P) { return ri('ri-search-line', p) }
+export function IconClose(p: P) { return ri('ri-close-line', p) }
+export function IconPlus(p: P) { return ri('ri-add-line', p) }
+export function IconTrash(p: P) { return ri('ri-delete-bin-line', p) }
+export function IconPencil(p: P) { return ri('ri-edit-line', p) }
+export function IconCopy(p: P) { return ri('ri-file-copy-line', p) }
+export function IconScissors(p: P) { return ri('ri-scissors-line', p) }
+export function IconCheck(p: P) { return ri('ri-check-line', p) }
+export function IconAlert(p: P) { return ri('ri-alert-line', p) }
+export function IconTerminal(p: P) { return ri('ri-terminal-box-line', p) }
+export function IconLink(p: P) { return ri('ri-links-line', p) }
+export function IconBranch(p: P) { return ri('ri-git-branch-line', p) }
+export function IconExternal(p: P) { return ri('ri-external-link-line', p) }
+export function IconEye(p: P) { return ri('ri-eye-line', p) }
+export function IconTarget(p: P) { return ri('ri-focus-3-line', p) }
+export function IconUndo(p: P) { return ri('ri-arrow-go-back-line', p) }
+export function IconClock(p: P) { return ri('ri-time-line', p) }
+export function IconDesktop(p: P) { return ri('ri-computer-line', p) }
+export function IconTablet(p: P) { return ri('ri-tablet-line', p) }
+export function IconMobile(p: P) { return ri('ri-smartphone-line', p) }
+export function IconLayers(p: P) { return ri('ri-stack-line', p) }

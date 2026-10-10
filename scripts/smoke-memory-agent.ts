@@ -29,9 +29,10 @@ import {
 } from '../electron/lib/memory/service'
 import { setReadyOverride } from '../electron/lib/memory/embed'
 import {
-  SYSTEM_PROMPT, setLlmHook, setClock, memoryMaybeExtract, sessionEnded, memoryRunNow, parseAgentJson,
+  SYSTEM_PROMPT, setLlmHook, setClock, memoryMaybeExtract, sessionEnded, memoryRunNow,
   resetExtractStateForTest,
 } from '../electron/lib/memory/agent'
+import { parseAgentJson } from '../electron/lib/memory/parse'
 import { setConfigWriter, migrateDataDir } from '../electron/lib/migrate'
 
 let failures = 0
@@ -116,7 +117,7 @@ async function main(): Promise<void> {
   installRecorder()
   try {
     console.log('① 初始化：')
-    initDbAt(dir)
+    await initDbAt(dir)
     setReadyOverride(true)
     setEmbedder((texts) => Promise.resolve(texts.map(fakeVec)))
     check('库文件已创建', () => assert.ok(existsSync(path.join(dir, 'qyris.db'))))
@@ -257,7 +258,7 @@ async function main(): Promise<void> {
       assert.equal(await sessionSummary(root, 'S2'), 'S2 新摘要（覆盖版）'))
     await checkAsync('旧摘要 archived、active 恰一条', async () => {
       const db = await getDb()
-      const rows = db
+      const rows = await db
       .prepare(
         "SELECT status, content FROM mem_items WHERE project_key = ? AND session_id = 'S2' AND category = 'summary'",
       )
@@ -272,7 +273,7 @@ async function main(): Promise<void> {
     await noteLesson(root, 'S1', { title: '端口 5173 被占用', content: '排查记录 v1' })
     await checkAsync('首次创建 short lesson（importance 0.5）', async () => {
       const db = await getDb()
-      const rows = db
+      const rows = await db
         .prepare("SELECT * FROM mem_items WHERE project_key = ? AND category = 'lesson' AND title = ?")
         .all(projectKey(root), '端口 5173 被占用') as { tier: string; session_id: string | null; importance: number }[]
       assert.equal(rows.length, 1)
@@ -285,7 +286,7 @@ async function main(): Promise<void> {
     }
     await checkAsync('同 title 重复上报：不新建、正文更新、importance 封顶 1', async () => {
       const db = await getDb()
-      const rows = db
+      const rows = await db
         .prepare("SELECT content, importance FROM mem_items WHERE project_key = ? AND category = 'lesson' AND title = ?")
         .all(projectKey(root), '端口 5173 被占用') as { content: string; importance: number }[]
       assert.equal(rows.length, 1)
@@ -307,13 +308,13 @@ async function main(): Promise<void> {
     })
     now = 4_010_000 // 距上次提取仅 10s，冷却未过——run_now 必须无视
     for (let n = 10; n <= 15; n++) await appendTurn(root, 'S2', 's2c', n)
-    let release: (() => void) | undefined
+    let release!: () => void
+    // 门外先备好 deferred：release 若在 hook 进门后才捕获，晚到的 release?.() 会空跑 → await first 永久挂起
+    const gate = new Promise<void>((resolve) => { release = resolve })
     const callsBeforeGate = hookCalls.length
     setLlmHook(async (system, user) => {
       hookCalls.push({ system, user })
-      await new Promise<void>((resolve) => {
-        release = resolve
-      })
+      await gate
       return NOOP
     })
     const first = memoryRunNow(root)
@@ -323,7 +324,7 @@ async function main(): Promise<void> {
       assert.equal(second.ok, false)
       assert.match(second.error ?? '', /进行中/)
     })
-    release?.()
+    release()
     const firstResult = await first
     check('run_now ok=true（无视冷却）', () => assert.equal(firstResult.ok, true))
     check('并发触发合并：LLM 只跑一次', () => assert.equal(hookCalls.length, callsBeforeGate + 1))
@@ -391,7 +392,8 @@ async function main(): Promise<void> {
     // 场景 A：源库缺失（上次迁移已搬走 db 但未写 config）→ 接管
     const dirTA = mkdtempSync(path.join(os.tmpdir(), 'qyris-takeover-ta-'))
     extraDirs.push(dirTA)
-    closeDb()
+    // 必须 await 关库：Worker 还握着文件时 renameSync 直接 EBUSY（Windows 句柄释放滞后）
+    await closeDb()
     renameSync(path.join(dir, 'qyris.db'), path.join(dirTA, 'qyris.db'))
     const takeA = await migrateDataDir(dirTA)
     check('源库缺失 → 接管 ok=true', () => assert.equal(takeA.ok, true, takeA.error))
@@ -406,11 +408,11 @@ async function main(): Promise<void> {
     // 场景 B：源库为空库（messages+mem_items 均 0 行）→ 接管
     const dirTB = mkdtempSync(path.join(os.tmpdir(), 'qyris-takeover-tb-'))
     extraDirs.push(dirTB)
-    closeDb()
+    await closeDb()
     copyFileSync(path.join(dirTA, 'qyris.db'), path.join(dirTB, 'qyris.db')) // 目标 = 现库副本（非空）
     rmSync(path.join(dirTA, 'qyris.db'))
-    initDbAt(dirTA) // 源替换为全 schema 空库（0 行），生产中空库必然带全 schema
-    closeDb()
+    await initDbAt(dirTA) // 源替换为全 schema 空库（0 行），生产中空库必然带全 schema
+    await closeDb()
     const takeB = await migrateDataDir(dirTB)
     check('空库源 → 接管 ok=true', () => assert.equal(takeB.ok, true, takeB.error))
     check('config 写入器收到新目标目录', () => assert.equal(configWrites[configWrites.length - 1], path.resolve(dirTB)))
@@ -424,15 +426,15 @@ async function main(): Promise<void> {
     console.log('⑭ 游标持久化 + 首见基线 0（P2 修复回归）：')
     // ⑬ 之后现库在接管目标目录（overrideDir 已重定向）；重开同库 + 清内存态 = 模拟进程重启
     const dbCur = await getDb()
-    const savedCursor = dbCur
+    const savedCursor = await dbCur
       .prepare('SELECT value FROM meta WHERE key = ?')
       .get(`mem_cursor:${projectKey(root)}|S2`) as { value: string } | undefined
     check('游标已持久化到 meta 表', () => {
       assert.ok(savedCursor?.value)
       assert.match(savedCursor!.value, /^\d+$/)
     })
-    closeDb()
-    initDbAt(await dataDir())
+    await closeDb()
+    await initDbAt(await dataDir())
     resetExtractStateForTest()
     const callsBeforeRestart = hookCalls.length
     await memoryMaybeExtract(root, 'S2')
@@ -460,7 +462,7 @@ async function main(): Promise<void> {
     await checkAsync('重扫同题 create → 折叠为 patch，行数不变', async () => {
       assert.equal(dup.ok, true, dup.error)
       const db = await getDb()
-      const rows = db
+      const rows = await db
         .prepare("SELECT id, content, importance FROM mem_items WHERE project_key = 'global' AND title = '包管理器用 pnpm'")
         .all() as { id: string; content: string; importance: number }[]
       assert.equal(rows.length, 1)
@@ -482,6 +484,24 @@ async function main(): Promise<void> {
       const user = hookCalls[hookCalls.length - 1].user
       assert.ok(user.includes('#12 助手：s4 助手回复 6'))
       assert.ok(user.includes('（更早已省略）'))
+    })
+
+    console.log('⑯.5 scope 铁律 + 【当前工程】锚点（串工程污染防线）：')
+    // 当前工程 agent-alpha，转录内容讲的是 BetaProject 的事——铁律 3 要求 no-op（不串工程），
+    // 并且 prompt 必须带【当前工程】锚点，否则模型无从判定「这是别的工程」
+    for (let n = 1; n <= 2; n++) await appendTurn(root, 'S5', 's5', n)
+    await messageAppend(root, 'S5', { id: 's5-x', role: 'user', content: 'BetaProject 卡死，排查一下它启动时挂住的问题' })
+    hookReply = NOOP
+    now = 5_300_000
+    await memoryRunNow(root)
+    check('prompt 带【当前工程】锚点（basename）', () => {
+      const user = hookCalls[hookCalls.length - 1].user
+      assert.ok(user.includes('【当前工程】agent-alpha'), user.slice(0, 300))
+    })
+    check('铁律 3 声明串工程 no-op（别的具名工程/两可都不产出）', () => {
+      const system = hookCalls[hookCalls.length - 1].system
+      assert.ok(system.includes('串工程'), '铁律缺串工程声明')
+      assert.ok(/no-op/.test(system) && system.includes('两可'), '铁律缺两可 no-op')
     })
 
     console.log('⑰ 非 JSON 容错（尾随逗号/平衡括号 + 带反馈重试 + 游标推进）：')
@@ -546,7 +566,8 @@ async function main(): Promise<void> {
     setLlmHook(null)
     setClock(null)
   } finally {
-    closeDb()
+    // 先 await 关库再删临时目录：Windows 上 Worker 还握着 db 文件时 rm 会 EPERM
+    await closeDb()
     rmSync(dir, { recursive: true, force: true })
     for (const d of extraDirs) rmSync(d, { recursive: true, force: true })
   }
@@ -556,6 +577,9 @@ async function main(): Promise<void> {
     process.exit(1)
   }
   console.log('\n全部断言通过')
+  // sqlite worker 的 MessagePort 在 closeDb 后仍挂事件循环（与 smoke:workspace-tools 同形态），
+  // 不显式退出则 npm run 永不收口
+  process.exit(0)
 }
 
 void main().catch((e) => {

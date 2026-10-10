@@ -7,12 +7,13 @@ import { useIsWide } from '@/hooks/useMediaQuery'
 import { useDesktopEvents, useThemeSync, usePetChatStatus } from '@/hooks/useDesktopEvents'
 import { Workspace } from '@/components/workspace/Workspace'
 import { MemorySidebar } from '@/components/shell/MemorySidebar'
+import { AppTopbar } from '@/components/shell/AppTopbar'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { StatusBar } from '@/components/shell/StatusBar'
 import { SettingsDialog } from '@/components/shell/SettingsDialog'
 import { ClosePromptDialog } from '@/components/shell/ClosePromptDialog'
 import { Dialogs } from '@/components/common/Dialogs'
-import { IconAlert, IconChevron } from '@/components/common/icons'
+import { IconAlert } from '@/components/common/icons'
 export default function App() {
   const booted = useAppStore((s) => s.booted)
   const splitRatio = useAppStore((s) => s.splitRatio)
@@ -86,6 +87,25 @@ export default function App() {
     return () => window.removeEventListener('resize', check)
   }, [])
 
+  /** 分割线键盘替代：←/→ 以 2% 步进调整（WAI-ARIA separator 模式），
+   *  与 onDividerDown 同一套钳制逻辑（工作区 ≥500px、对话栏 ≥300px） */
+  const onDividerKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+    const step = e.key === 'ArrowRight' ? 0.02 : -0.02
+    const body = bodyRef.current
+    const ws = workspaceRef.current
+    if (!body || !ws) return
+    const bodyRect = body.getBoundingClientRect()
+    const wsLeft = ws.getBoundingClientRect().left
+    const sidebarW = wsLeft - bodyRect.left
+    const total = bodyRect.width
+    let r = splitRatio + step
+    r = Math.max(500 / total, r)
+    r = Math.min(1 - (sidebarW + 5 + 300) / total, r)
+    setSplitRatio(r)
+    e.preventDefault()
+  }
+
   return (
     <div className="app">
       {isTooSmall && (
@@ -107,6 +127,9 @@ export default function App() {
         </div>
       )}
 
+      {/* 全局顶栏：品牌门面 + 主题切换 + 对话栏折叠（theme-v2-chat app__topbar） */}
+      <AppTopbar />
+
       <div
         className={`app__body ${chatPanelCollapsed ? 'app__body--chat-collapsed' : ''}`}
         ref={bodyRef}
@@ -126,24 +149,17 @@ export default function App() {
             className="app__divider"
             role="separator"
             aria-orientation="vertical"
-            aria-label="调整工作区与对话栏比例"
+            aria-label="调整工作区与对话栏比例（左右方向键调整）"
+            tabIndex={0}
+            aria-valuenow={Math.round(splitRatio * 100)}
+            aria-valuemin={0}
+            aria-valuemax={100}
             onPointerDown={onDividerDown}
+            onKeyDown={onDividerKeyDown}
           />
         )}
 
         <ChatPanel />
-
-        {/* 对话栏折叠后的展开把手：贴右缘全高竖条，点击恢复（就地交互，不依赖快捷键/状态栏） */}
-        {chatPanelCollapsed && (
-          <button
-            className="edge-grip edge-grip--chat"
-            onClick={useAppStore.getState().toggleChatPanel}
-            aria-label="展开对话栏"
-            title="展开对话栏"
-          >
-            <IconChevron size={14} />
-          </button>
-        )}
       </div>
 
       <StatusBar />

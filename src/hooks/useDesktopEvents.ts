@@ -7,7 +7,7 @@
  *  - usePetChatStatus：本窗口对话状态上报主进程，聚合驱动桌宠动画。
  */
 import { useEffect } from 'react'
-import { useAppStore, checkpointFileStore, type Theme } from '@/store/useAppStore'
+import { useAppStore, checkpointFileStore } from '@/store/useAppStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useChatStore } from '@/store/useChatStore'
 import { useFileStore } from '@/store/useFileStore'
@@ -64,6 +64,9 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
       else chat.resyncMirror(p.projectRoot)
     }
     const offs = [
+      // 主题联动：其它窗口切主题 → 同步本窗 store（设置里的主题单选钮才不会显示旧值）。
+      // 直接 setState 绕过 setTheme action，避免回声广播
+      (window.desktopAPI?.onThemeChanged?.((t) => useAppStore.setState({ theme: t as import('@/store/useAppStore').Theme })) ?? (() => {})),
       onBuildOutput((p) => useBuildStore.getState().onOutput(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.stream, p.line)),
       onBuildExit((p) => useBuildStore.getState().onExit(p.projectRoot ?? useAppStore.getState().projectPath ?? '', p.name, p.code)),
       onAiDelta((p) => bufferChunk(deltaBuf, p.requestId, p.delta, p.projectRoot)),
@@ -101,7 +104,7 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
           }
         }
         // 同步 openProjects 列表：双窗口取并集（再剔除被关闭项）——任一窗口广播的都只是
-        // 全局打开集的子集，直接覆盖会把对方打开的项目从 ProjectSwitcher/ProjectsTab 挤掉
+        // 全局打开集的子集，直接覆盖会把对方打开的项目从 ProjectsTab 挤掉
         app.setOpenProjects(
           [...new Set([...p.openProjects, ...useAppStore.getState().openProjects])].filter((x) => x !== p.closedProject),
         )
@@ -132,19 +135,9 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
   }, [])
 }
 
-/** 主题应用：解析 system/light/dark 并写到 documentElement（主窗口与面板共用） */
-export function useThemeSync(theme: Theme): void {
-  useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)')
-    const apply = () => {
-      const resolved = theme === 'system' ? (mq.matches ? 'dark' : 'light') : theme
-      document.documentElement.dataset.theme = resolved
-    }
-    apply()
-    mq.addEventListener('change', apply)
-    return () => mq.removeEventListener('change', apply)
-  }, [theme])
-}
+/** 主题应用：解析 system/light/dark 并写到 documentElement（主窗口与面板共用）。
+ *  实现已抽到 useThemeSync.ts（桌宠入口要单独引用，不能拖进本模块的 store 依赖）；这里转出口兼容旧导入。 */
+export { useThemeSync } from './useThemeSync'
 
 /** 桌宠动画跟随本窗口对话状态：生成中→working、等你回答→waiting（主进程跨窗口聚合，任一窗口忙即忙） */
 export function usePetChatStatus(): void {

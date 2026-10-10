@@ -102,6 +102,22 @@ export async function readSkillFromDirs(dirs: string[], skillId: string): Promis
   return null
 }
 
+/** Skill 目录三源合并：项目默认（<project>/.qyris/skills）+ 项目自定义 + 全局。
+ *  唯一入口（ai.ts 的系统提示组装与 load_skill 工具共用，避免两份合并规则漂移） */
+export function collectSkillDirs(
+  projectRoot: string | null,
+  cfg: { projectSkillsDirsMap?: Record<string, string[]>; skillsDirs: string[] },
+): string[] {
+  const defaultProjectDir = projectRoot ? `${projectRoot}/.qyris/skills` : null
+  const extraProjectDirs = projectRoot ? (cfg.projectSkillsDirsMap?.[projectRoot] ?? []) : []
+  const globalDirs = cfg.skillsDirs ?? []
+  return [
+    ...(defaultProjectDir ? [defaultProjectDir] : []),
+    ...extraProjectDirs,
+    ...globalDirs.filter((d) => d !== defaultProjectDir && !extraProjectDirs.includes(d)),
+  ]
+}
+
 /** 读取单个 skill 的完整 SKILL.md 内容 */
 export async function readSkill(dir: string, skillId: string): Promise<string | null> {
   // 安全校验：skillId 只允许目录名（不能含路径分隔符）
@@ -123,10 +139,12 @@ export async function importSkillFromZip(destDir: string, zipPath: string): Prom
     const tmpDir = path.join(destDir, '__import_tmp__')
     await fsp.mkdir(tmpDir, { recursive: true })
     try {
-      // 解压：Windows 用 PowerShell，macOS/Linux 用 unzip
+      // 解压：Windows 用 PowerShell，macOS/Linux 用 unzip。
+      // PowerShell 单引号字符串内 ' 要写成 ''；路径走 -LiteralPath（防通配符语义）
       const isWin = os.platform() === 'win32'
       if (isWin) {
-        await execFileAsync('powershell', ['-NoProfile', '-Command', `Expand-Archive -Path '${zipPath}' -DestinationPath '${tmpDir}' -Force`])
+        const psQuote = (s: string): string => `'${s.replace(/'/g, "''")}'`
+        await execFileAsync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(tmpDir)} -Force`])
       } else {
         await execFileAsync('unzip', ['-o', zipPath, '-d', tmpDir])
       }
@@ -138,6 +156,10 @@ export async function importSkillFromZip(destDir: string, zipPath: string): Prom
       const skillName = skillSrc === tmpDir
         ? path.basename(zipPath, path.extname(zipPath))
         : entries[0].name
+      // 名字不得含路径分隔符/..：拼进 destDir 会越出目标目录
+      if (!skillName || /[\\/]/.test(skillName) || skillName === '..' || skillName === '.') {
+        return { ok: false, error: 'ZIP 顶层目录名不合法，不是合法的 Skill 包' }
+      }
       // 验证 SKILL.md 存在
       const hasSkill = await fsp.access(path.join(skillSrc, SKILL_FILE)).then(() => true, () => false)
       if (!hasSkill) return { ok: false, error: 'ZIP 中未找到 SKILL.md，不是合法的 Skill 包' }

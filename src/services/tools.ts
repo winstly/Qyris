@@ -2,8 +2,8 @@
  * 工具执行器：把模型的 function call 落到桌面后端命令上，
  * 并联动左侧文件树 / 编辑器刷新。
  *
- * 成败协议：ToolOutcome.ok 结构化字段（此前是「错误：」前缀 + startsWith 判定，
- * 成功结果恰好以「错误」开头会被误判——已随结构化改造移除）。
+ * 成败协议：ToolOutcome.ok 结构化字段——不能用「错误」字符串前缀判定，
+ * 成功结果恰好以「错误」开头会被误判。
  * 可用工具清单以 TOOL_DEFS（services/ai.ts）为唯一来源，禁止手抄。
  */
 import { api } from './desktop'
@@ -30,7 +30,7 @@ const PHASE_LABEL: Record<string, string> = {
 }
 
 export interface ToolOutcome {
-  /** 结构化成败（渲染层消费；替代旧的「错误：」前缀 startsWith 协议） */
+  /** 结构化成败（渲染层消费） */
   ok: boolean
   /** 回传给模型的内容（字符串，OpenAI tool role） */
   result: string
@@ -383,9 +383,19 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
         // 多目录按序查找首个命中（去重/查找序规则统一在主进程 skills.ts，单次 IPC）
         const content = await api.readSkill(allDirs, skillId)
         if (content === null) {
+          // 工具名误当 Skill id：直接指回工具调用，模型一轮自纠（与主进程 load_skill 同口径）
+          if (TOOL_DEFS.some((t) => t.function.name === skillId)) {
+            return { ok: false, result: `错误：「${skillId}」是工具名，不是 Skill id——请直接调用工具 ${skillId}，无需 load_skill。`, summary: `工具名误当 Skill：${skillId}` }
+          }
           const projectMetas = useAppStore.getState().projectSkillMetas
-          const known = [...projectMetas, ...skillMetas].map((m) => m.id).join('、') || '（无）'
-          return { ok: false, result: `错误：Skill「${skillId}」不存在或无法读取。可用 Skills：${known}`, summary: `Skill 不存在：${skillId}` }
+          const known = [...projectMetas, ...skillMetas].map((m) => m.id).join('、')
+          return {
+            ok: false,
+            result: known
+              ? `错误：Skill「${skillId}」不存在或无法读取。可用 Skills：${known}`
+              : `错误：Skill「${skillId}」不存在。当前没有可用 Skill（Skills 目录未配置或为空，可在设置 → 系统设置中配置）。`,
+            summary: `Skill 不存在：${skillId}`,
+          }
         }
         return { ok: true, result: content, summary: `已加载 Skill：${skillId}` }
       }
