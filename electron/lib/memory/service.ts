@@ -24,53 +24,21 @@ import { emitToAllWindows } from '../emitter'
 
 // ---------- 类型（渲染层契约，camelCase，service 层做行⇄对象映射） ----------
 
-export type MemoryTier = 'short' | 'long'
-export type MemoryStatus = 'active' | 'merged' | 'archived'
-
-export interface MemoryItem {
-  id: string
-  projectKey: string
-  sessionId: string | null
-  tier: MemoryTier
-  category: string
-  title: string
-  content: string
-  sourceJson: string | null
-  importance: number
-  accessCount: number
-  lastAccessedAt: number | null
-  status: MemoryStatus
-  supersededBy: string | null
-  createdAt: number
-  updatedAt: number
-}
-
-export interface MemoryHit extends MemoryItem {
-  score: number
-}
-
+// 记忆载荷类型（唯一定义在 shared/ipc-types.ts，此处再导出供主进程/preload 消费）
+import type {
+  MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, MemoryTier,
+} from '../../../shared/ipc-types'
+export type { MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, MemoryTier }
 export interface MemorySearchResult {
   hits: MemoryHit[]
   /** true = 向量路不可用（sqlite-vec 缺席 / 模型未就绪或降级 / 本次推理失败），本次仅关键词路 */
   degraded: boolean
 }
 
-export interface MemoryPatch {
-  title?: string
-  content?: string
-  category?: string
-  importance?: number
-}
-
-export interface MemoryStats {
-  total: number
-  byTier: Record<string, number>
-  byCategory: Record<string, number>
-  embedReady: boolean
-  vecAvailable: boolean
-  dbBytes: number
-  /** mem agent 蒸馏累计 token（近似值，清空记忆时归零） */
-  distillTokens: { input: number; output: number }
+/** 分类归一（入库/出库边界）：库内历史值或模型输出的未知分类统一落 'fact'，标签表只认白名单 */
+const CATEGORIES: ReadonlySet<string> = new Set<MemoryCategory>(['preference', 'fact', 'event', 'lesson', 'skill', 'summary'])
+function toCategory(raw: string): MemoryCategory {
+  return CATEGORIES.has(raw) ? (raw as MemoryCategory) : 'fact'
 }
 
 /** mem agent 蒸馏 token 累计（面板展示，清空时归零，持久化到 meta 表） */
@@ -99,7 +67,7 @@ export function addDistillTokens(input: number, output: number): void {
   }).catch(() => {})
 }
 
-export function resetDistillTokens(): void {
+function resetDistillTokens(): void {
   distillTokens.input = 0
   distillTokens.output = 0
   void getDb().then(async (db) => {
@@ -108,7 +76,7 @@ export function resetDistillTokens(): void {
 }
 
 /** P2 mem agent 写入口（渲染层六通道不含 create，暂不注册 IPC） */
-export interface MemoryCreateInput {
+interface MemoryCreateInput {
   /** 工程条目按 projectRoot 归键；global=true 则落 'global' 跨工程 */
   projectRoot?: string
   global?: boolean
@@ -369,8 +337,9 @@ export async function memoryClear(scope: 'project' | 'global' | 'all', projectRo
   const db = await getDb()
   const { where, params } = scopeWhere(scope, projectRoot)
   const rows = await db.prepare(`SELECT id FROM mem_items WHERE ${where}`).all(...params) as { id: string }[]
-  // 蒸馏 token 归零：仅全库清空（scope='all'）时归零——局部清空不应重置全局累计
-  if (scope === 'all') resetDistillTokens()
+  // 蒸馏 token 归零：清空即归零（字段文档与面板口径「清空记忆时归零」，含空清空）。
+  // 计数是全局近似值，局部清空也从零重新累计——否则「清了记忆、面板还挂着旧账」
+  resetDistillTokens()
   if (rows.length === 0) return
   const stmts: { sql: string; params?: unknown[] }[] = []
   for (const { id } of rows) {
@@ -423,7 +392,7 @@ export async function memoryStats(): Promise<MemoryStats> {
 
 /** 记忆数据变更广播：主进程是全部窗口共享的单例库，任何写完成后广播，让各窗口列表自刷新
  *  （渲染层防抖消费）。主进程不节流；衰减作业（importance 漂移）刻意不发——不影响条目集合。 */
-export function emitMemoryChanged(keys: string[] | 'all'): void {
+function emitMemoryChanged(keys: string[] | 'all'): void {
   const payload = keys === 'all'
     ? { all: true, projectKeys: [] as string[] }
     : { all: false, projectKeys: [...new Set(keys)] }
@@ -482,6 +451,9 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
     await db.prepare(
       'UPDATE mem_items SET content = ?, importance = MAX(importance, ?), updated_at = ? WHERE id = ?',
     ).run(input.content, importance, now, dup.id)
+    // content 覆写 → 向量必须重嵌（否则语义检索永久陈旧）；回写带存在性检查（embed 期间被删不留孤儿）
+    await writeVecGuarded(db, dup.id, await embedOne(db, input.title, input.content))
+    emitMemoryChanged([key])
     return { folded: true, id: dup.id }
   }
   const item: MemoryItem = {
@@ -489,7 +461,7 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
     projectKey: key,
     sessionId: input.sessionId ?? null,
     tier: input.tier,
-    category: input.category,
+    category: toCategory(input.category),
     title: input.title,
     content: input.content,
     sourceJson: input.sourceJson ?? null,
@@ -521,7 +493,7 @@ export async function memoryCreate(input: MemoryCreateInput): Promise<MemoryItem
     projectKey: key,
     sessionId: input.sessionId ?? null,
     tier: input.tier,
-    category: input.category,
+    category: toCategory(input.category),
     title: input.title,
     content: input.content,
     sourceJson: input.sourceJson ?? null,
@@ -672,7 +644,7 @@ export async function listContextTitles(
 
 // ---------- P3：衰减/归档作业（纯 SQL/JS，零 LLM） ----------
 
-export interface DecayStats {
+interface DecayStats {
   /** importance 被衰减的 long 条目数 */
   decayed: number
   /** 被归档的 short 条目数 */
@@ -680,7 +652,7 @@ export interface DecayStats {
 }
 
 /** 衰减作业周期 */
-export const DECAY_INTERVAL_MS = 6 * 60 * 60_000
+const DECAY_INTERVAL_MS = 6 * 60 * 60_000
 /** boot 后首跑延迟 */
 const DECAY_BOOT_DELAY_MS = 30_000
 /** long 层衰减基线：距上次访问超 14d 视为陈旧 */
@@ -699,7 +671,7 @@ const ARCHIVE_SHORT_MAX_ACCESS = 1
  *  - mem_vec 不动：归档后默认检索查不到即可，向量保留给 includeArchived 场景
  *  - 只动 importance/status 列：FTS 触发器 WHEN 子句判定文本未变，不触发无谓的倒排重建；
  *    updated_at 刻意不动（衰减不该刷新检索新近度权重） */
-export async function runDecayJob(): Promise<DecayStats> {
+async function runDecayJob(): Promise<DecayStats> {
   const db = await getDb()
   const now = Date.now()
   const decayed = await db
@@ -811,20 +783,20 @@ async function runReembedJob(expected: string): Promise<void> {
 
 // ---------- P3：导出/导入（全量备份语义：含 archived/merged） ----------
 
-export interface MemoryExportPayload {
+interface MemoryExportPayload {
   version: 1
   exportedAt: number
   items: MemoryItem[]
 }
 
-export interface MemoryExportResult {
+interface MemoryExportResult {
   ok: boolean
   path?: string
   count?: number
   error?: string
 }
 
-export interface MemoryImportResult {
+interface MemoryImportResult {
   ok: boolean
   imported?: number
   skipped?: number
@@ -832,7 +804,7 @@ export interface MemoryImportResult {
 }
 
 /** 对话框接缝：smoke 注入假实现离线测往返；缺省包一层 electron dialog（绑定调用方窗口） */
-export interface MemoryDialogAdapter {
+interface MemoryDialogAdapter {
   showSaveDialog(
     win: BrowserWindow | null, opts: { title: string; defaultPath: string },
   ): Promise<{ canceled: boolean; filePath?: string }>
@@ -850,17 +822,12 @@ const electronDialog: MemoryDialogAdapter = {
 
 let dialogAdapter: MemoryDialogAdapter | null = null
 
-/** 注入假对话框（smoke 用）；置 null 恢复 electron dialog */
-export function setDialogAdapter(a: MemoryDialogAdapter | null): void {
-  dialogAdapter = a
-}
-
 function activeDialog(): MemoryDialogAdapter {
   return dialogAdapter ?? electronDialog
 }
 
 /** 导出数据组装（内存纯函数，smoke 直测；scope 语义与 memoryClear 一致） */
-export async function memoryExportData(scope: 'project' | 'global' | 'all', projectRoot?: string): Promise<MemoryExportPayload> {
+async function memoryExportData(scope: 'project' | 'global' | 'all', projectRoot?: string): Promise<MemoryExportPayload> {
   const db = await getDb()
   const { where, params } = scopeWhere(scope, projectRoot)
   const rows = await db
@@ -1021,7 +988,7 @@ function rowToItem(row: MemRow): MemoryItem {
     projectKey: row.project_key,
     sessionId: row.session_id,
     tier: row.tier === 'short' ? 'short' : 'long',
-    category: row.category,
+    category: toCategory(row.category),
     title: row.title,
     content: row.content,
     sourceJson: row.source_json,

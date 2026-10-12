@@ -8,11 +8,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, onMemoryChanged, onMemoryExtractState } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { useMemoryStore, type MemoryCategoryFilter, type MemoryTierFilter } from '@/store/useMemoryStore'
-import { MemoryItemRow, MEMORY_CATEGORY_LABELS } from './MemoryItemRow'
+import { MemoryItemRow, MEMORY_CATEGORY_LABELS, memoryDetailRows } from './MemoryItemRow'
+import { DetailDialog } from '@/components/common/DetailDialog'
 import { MemoryEditModal } from './MemoryEditModal'
 import { EmptyState } from '@/components/common/EmptyState'
+import { Notice, useNotice } from '@/components/common/Notice'
 import { Select } from '@/components/common/Select'
-import { IconAlert, IconCheck, IconClose, IconLayers, IconSearch } from '@/components/common/icons'
+import { IconAlert, IconClose, IconLayers, IconSearch } from '@/components/common/icons'
 import type { MemoryItem } from '@/types'
 import type { MemoryUpdatePatch } from '@/store/useMemoryStore'
 
@@ -47,9 +49,10 @@ export function MemoryPanel() {
   const [input, setInput] = useState('')
   /** 编辑弹窗目标（打开时以该条目快照初始化草稿，弹窗自持） */
   const [editingItem, setEditingItem] = useState<MemoryItem | null>(null)
-  /** 「立即整理」运行态与结果提示（ok/err，保留到下次操作） */
+  const [viewingItem, setViewingItem] = useState<MemoryItem | null>(null)
+  /** 「立即整理」运行态与结果提示（ok/err，6s 自清） */
   const [tidying, setTidying] = useState(false)
-  const [runNotice, setRunNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [runNotice, setRunNotice] = useNotice()
   /** 导出/导入运行态（导入含嵌入可能秒级；二者互斥防并发弹框） */
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -111,13 +114,6 @@ export function MemoryPanel() {
     else void load(p)
     if (p) void api.memoryExtracting(p).then((on) => setExtracting(p, on)).catch(() => {})
   }, [activeTab, load, search, setExtracting])
-
-  // 提示语自动消失（成功/失败统一 6s）
-  useEffect(() => {
-    if (!runNotice) return
-    const timer = window.setTimeout(() => setRunNotice(null), 6000)
-    return () => window.clearTimeout(timer)
-  }, [runNotice])
 
   // 搜索态（hits 非 null）以命中为准，筛选仍在渲染层叠加
   // 项目记忆 Tab：过滤掉 global 条目（用户记忆在左侧面板）
@@ -311,12 +307,7 @@ export function MemoryPanel() {
         </button>
       </div>
 
-      {runNotice && (
-        <div className={`notice ${runNotice.kind === 'ok' ? 'notice--ok' : 'notice--err'}`}>
-          {runNotice.kind === 'ok' ? <IconCheck size={14} /> : <IconAlert size={14} />}
-          <span>{runNotice.text}</span>
-        </div>
-      )}
+      <Notice notice={runNotice} />
 
       {searching && degraded && (
         <div className="memory__degraded">
@@ -329,10 +320,7 @@ export function MemoryPanel() {
         {loading ? (
           <div className="memory__loading"><span className="memory__spinner" />加载中…</div>
         ) : error ? (
-          <div className="notice notice--err">
-            <IconAlert size={14} />
-            <span>记忆加载失败：{error}</span>
-          </div>
+          <Notice notice={{ kind: 'err', text: `记忆加载失败：${error}` }} />
         ) : visible.length === 0 ? (
           searching || input.trim() ? (
             <div className="memory__empty-inline">没有匹配的记忆</div>
@@ -348,6 +336,7 @@ export function MemoryPanel() {
             <MemoryItemRow
               key={it.id}
               item={it}
+              onDetail={() => setViewingItem(it)}
               onEdit={() => setEditingItem(it)}
               onDelete={() => void onDelete(it.id, it.title)}
               onMoveScope={it.category === 'summary' ? undefined : () => void onMoveScope(it.id, it.title)}
@@ -358,6 +347,18 @@ export function MemoryPanel() {
         )}
       </div>
 
+      {viewingItem && (
+        <DetailDialog
+          title={viewingItem.title}
+          rows={memoryDetailRows(viewingItem)}
+          onClose={() => setViewingItem(null)}
+          footer={
+            <button className="btn btn--primary" onClick={() => { const s = viewingItem; setViewingItem(null); setEditingItem(s) }}>
+              编辑
+            </button>
+          }
+        />
+      )}
       {editingItem && (
         <MemoryEditModal
           item={editingItem}

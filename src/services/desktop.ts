@@ -2,8 +2,10 @@
  * Electron preload 暴露面（window.desktopAPI）的类型化封装层。
  * 前端所有文件操作都经由这里走主进程，绝不在渲染层直接碰文件系统。
  */
-import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, MemoryHit, MemoryItem, MemoryStats, PreviewConsoleEntry } from '@/types'
+import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, McpServerEntry, MemoryHit, MemoryItem, MemoryStats, PreviewConsoleEntry } from '@/types'
 import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
+import type { DesktopAPI } from '../../shared/desktop-api'
+import type { McpTestResult } from '../../shared/ipc-types'
 
 /** 是否运行在 Electron 桌面壳内（浏览器直接跑 vite 时为 false，界面会给出提示） */
 export const isDesktop = typeof window !== 'undefined' && !!window.desktopAPI
@@ -100,6 +102,12 @@ export const api = {
   // 配置与密钥（无 getSecret：明文 Key 不出主进程）
   getConfig: () => wrap((d) => d.getConfig()),
   mergeConfig: (patch: Partial<AppConfig>) => wrap((d) => d.mergeConfig(patch)),
+  mcpTest: (name: string, entry: McpServerEntry, scope?: string) => wrap((d) => d.mcpTest(name, entry, scope)),
+  mcpTestState: () => wrap((d) => d.mcpTestState()),
+  mcpSaveProjectServers: (projectRoot: string, servers: Record<string, McpServerEntry>) =>
+    wrap((d) => d.mcpSaveProjectServers(projectRoot, servers)),
+  mcpSaveGlobalServers: (servers: Record<string, McpServerEntry>) =>
+    wrap((d) => d.mcpSaveGlobalServers(servers)),
   setSecret: (key: string, value: string) => wrap((d) => d.setSecret(key, value)),
   hasSecret: (key: string) => wrap((d) => d.hasSecret(key)),
   deleteSecret: (key: string) => wrap((d) => d.deleteSecret(key)),
@@ -110,8 +118,8 @@ export const api = {
     messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null,
     opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string },
   ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot, opts)),
-  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
-    wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode)),
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
+    wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode, cliCommand)),
   aiCancel: (requestId: string) => wrap((d) => d.aiCancel(requestId)),
 
   // Skills 目录
@@ -128,6 +136,7 @@ export const api = {
   createEmptyProject: (parentDir: string, name: string) => wrap((d) => d.createEmptyProject(parentDir, name)),
   cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) =>
     wrap((d) => d.cloneRepos(parentDir, repos)),
+  cloneCancel: () => wrap((d) => d.cloneCancel()),
   testRepo: (url: string) => wrap((d) => d.testRepo(url)),
   gitRepoInfo: (dir: string) => wrap((d) => d.gitRepoInfo(dir)),
   gitCheckout: (dir: string, branch: string) => wrap((d) => d.gitCheckout(dir, branch)),
@@ -184,7 +193,7 @@ export const api = {
   // 窗口
   pickDirectory: () => wrap((d) => d.pickDirectory()),
   setWindowTitle: (title: string) => wrap((d) => d.setWindowTitle(title)),
-  startElementPick: (url: string) => wrap((d) => d.startElementPick(url)),
+  startElementPick: () => wrap((d) => d.startElementPick()),
   openExternal: (url: string) => wrap((d) => d.openExternal(url)),
   openInExplorer: (filePath: string) => wrap((d) => d.openInExplorer(filePath)),
   /** 关闭询问弹窗的回传（fire-and-forget；挂起校验在主进程） */
@@ -238,11 +247,6 @@ export function onCliAgentEvent(cb: (payload: CliAgentEventPayload) => void): ()
   return window.desktopAPI.onCliAgentEvent(cb)
 }
 
-export function onCliRetry(cb: (payload: { requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }) => void): () => void {
-  if (!isDesktop || !window.desktopAPI) return () => {}
-  return window.desktopAPI.onCliRetry(cb)
-}
-
 export function onMemoryExtractState(cb: (payload: { projectRoot: string; extracting: boolean }) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onMemoryExtractState(cb)
@@ -265,9 +269,19 @@ export function onFsChanged(cb: (payload: { paths: string[]; projectRoot?: strin
   return window.desktopAPI.onFsChanged(cb)
 }
 
+/** MCP 测试状态广播（进程级：启动/切工程/手动测试都会推） */
+export function onMcpTestState(cb: (payload: Record<string, McpTestResult>) => void): () => void {
+  return window.desktopAPI?.onMcpTestState?.(cb) ?? (() => {})
+}
+
 export function onConfigChanged(cb: (affectedKeys: string[]) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onConfigChanged(cb)
+}
+
+export function onCloneProgress(cb: (p: { index: number; total: number; name: string; stage: string; pct: number | null }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onCloneProgress(cb)
 }
 
 export function onProjectChanged(cb: (p: { projectPath: string | null; openProjects: string[]; closedProject?: string | null }) => void): () => void {

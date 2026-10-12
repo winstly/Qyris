@@ -8,9 +8,9 @@
  */
 import { create } from 'zustand'
 
-export type AgentStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
+type AgentStatus = 'pending' | 'running' | 'done' | 'error' | 'cancelled'
 
-export interface AgentEntryText {
+interface AgentEntryText {
   kind: 'text'
   content: string
 }
@@ -27,7 +27,7 @@ export interface AgentEntryTool {
   result?: string
 }
 
-export type AgentEntry = AgentEntryText | AgentEntryTool
+type AgentEntry = AgentEntryText | AgentEntryTool
 
 export interface AgentThread {
   id: string

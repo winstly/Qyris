@@ -250,6 +250,9 @@ export async function restoreSession(projectRoot: string, sessionId: string): Pr
     for (const f of files) {
       const parsed = parseSnapName(f)
       if (!parsed) continue
+      // 只回退基线（versionKey=null，restoreOne 同口径）：版本快照是会话内中间稿，
+      // 写它们会把基线覆盖回中间稿；版本文件保留，仍可按版本单独回退
+      if (parsed.versionKey !== null) continue
       const meta = await readSnap(path.join(dir, f))
       if (!meta) continue // 损坏快照跳过，不炸整个恢复
       try {

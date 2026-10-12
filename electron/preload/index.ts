@@ -9,8 +9,15 @@ import type { IpcRendererEvent } from 'electron'
 // 仅类型引入（构建时擦除，不违反沙箱不引第三方约束）
 import type { MessagesPage, MessagesRecentPage } from '../lib/messages'
 import type { MemoryItem, MemoryPatch, MemorySearchResult, MemoryStats } from '../lib/memory/service'
+import type { McpServerEntry } from '../../shared/mcp'
+import type { McpTestResult } from '../../shared/ipc-types'
+import type { PreviewConsoleEntry } from '../../shared/ipc-types'
 import type { FileContent } from '../lib/fsops'
 import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
+import type {
+  AiDeltaPayload, AiReasoningPayload, CliAgentEventPayload, CliToolEventPayload, CliToolResultPayload,
+} from '../../shared/ipc-types'
+import type { DesktopAPI } from '../../shared/desktop-api'
 
 type Unsubscribe = () => void
 
@@ -22,7 +29,7 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
   }
 }
 
-const desktopAPI = {
+const desktopAPI: DesktopAPI = {
   // 文件系统
   listDir: (projectRoot: string, dir: string) => ipcRenderer.invoke('list_dir', { projectRoot, dir }),
   listDirBatch: (projectRoot: string, dirs: string[]) =>
@@ -78,10 +85,10 @@ const desktopAPI = {
     ipcRenderer.invoke('save_session_tokens', { projectRoot, sessionId, tokens }) as Promise<void>,
   loadSessionTokens: (projectRoot: string, sessionId: string) =>
     ipcRenderer.invoke('load_session_tokens', { projectRoot, sessionId }) as Promise<{ input: number; output: number }>,
-  // 记忆（检索底座；载荷类型与 electron/lib/memory/service 对齐）
-  memoryList: (projectRoot: string, includeArchived?: boolean) =>
+  // 记忆（检索底座；载荷类型出自 shared/ipc-types）
+  memoryList: (projectRoot: string | null, includeArchived?: boolean) =>
     ipcRenderer.invoke('memory_list', { projectRoot, includeArchived: includeArchived === true }) as Promise<{ items: MemoryItem[] }>,
-  memorySearch: (query: string, projectRoot: string, topK?: number, includeArchived?: boolean) =>
+  memorySearch: (query: string, projectRoot: string | null, topK?: number, includeArchived?: boolean) =>
     ipcRenderer.invoke('memory_search', { query, projectRoot, topK: topK ?? null, includeArchived: includeArchived === true }) as Promise<MemorySearchResult>,
   memoryUpdate: (id: string, patch: MemoryPatch) =>
     ipcRenderer.invoke('memory_update', { id, patch }) as Promise<MemoryItem>,
@@ -145,7 +152,7 @@ const desktopAPI = {
   previewExecuteJs: (code: string) => ipcRenderer.invoke('preview_execute_js', { code }) as Promise<unknown>,
   previewSetVisible: (visible: boolean) => ipcRenderer.invoke('preview_visible', { visible }) as Promise<void>,
   previewConsoleHistory: () =>
-    ipcRenderer.invoke('preview_console_history') as Promise<{ level: string; message: string; sourceId: string; ts: number }[]>,
+    ipcRenderer.invoke('preview_console_history') as Promise<PreviewConsoleEntry[]>,
   stopProject: (projectRoot?: string | null, name?: string | null) => ipcRenderer.invoke('stop_project', { projectRoot: projectRoot ?? null, name: name ?? null }),
   startWatching: (projectRoot: string) => ipcRenderer.invoke('start_watching', { projectRoot }),
   stopWatching: () => ipcRenderer.invoke('stop_watching'),
@@ -153,7 +160,20 @@ const desktopAPI = {
 
   // 配置与密钥
   getConfig: () => ipcRenderer.invoke('get_config'),
+  /** 主题是 UI 偏好（存渲染层 zustand），跨窗口联动靠这条广播（桌宠面板/桌宠跟随） */
+  setTheme: (theme: string) => ipcRenderer.send('theme:set', { theme }),
   mergeConfig: (patch: unknown) => ipcRenderer.invoke('merge_config', { patch }),
+  /** 外部 MCP server 测试连接（stdio/streamableHttp 均可） */
+  mcpTest: (name: string, entry: McpServerEntry, scope?: string) =>
+    ipcRenderer.invoke('mcp_test', { name, entry, scope }) as Promise<McpTestResult>,
+  mcpTestState: () => ipcRenderer.invoke('mcp_test_state') as Promise<Record<string, McpTestResult>>,
+  onMcpTestState: (cb: (payload: Record<string, McpTestResult>) => void): Unsubscribe => subscribe('mcp-test-state', cb),
+  /** 项目域 MCP server 表整表写入（主进程 RMW 读最新盘上状态，避免渲染层快照覆写他项目） */
+  mcpSaveProjectServers: (projectRoot: string, servers: Record<string, McpServerEntry>) =>
+    ipcRenderer.invoke('mcp_save_project_servers', { projectRoot, servers }) as Promise<boolean>,
+  /** 全局域 MCP server 表整表写入 */
+  mcpSaveGlobalServers: (servers: Record<string, McpServerEntry>) =>
+    ipcRenderer.invoke('mcp_save_global_servers', { servers }) as Promise<boolean>,
   setSecret: (key: string, value: string) => ipcRenderer.invoke('set_secret', { key, value }),
   hasSecret: (key: string) => ipcRenderer.invoke('has_secret', { key }),
   deleteSecret: (key: string) => ipcRenderer.invoke('delete_secret', { key }),
@@ -171,6 +191,9 @@ const desktopAPI = {
   // 创建项目 / Git
   createEmptyProject: (parentDir: string, name: string) => ipcRenderer.invoke('create_empty_project', { parentDir, name }) as Promise<string>,
   cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => ipcRenderer.invoke('clone_repos', { parentDir, repos }) as Promise<string[]>,
+  cloneCancel: () => ipcRenderer.invoke('clone_cancel') as Promise<void>,
+  onCloneProgress: (cb: (p: { index: number; total: number; name: string; stage: string; pct: number | null }) => void): Unsubscribe =>
+    subscribe('clone:progress', cb),
   testRepo: (url: string) =>
     ipcRenderer.invoke('test_repo', { url }) as Promise<{ valid: boolean; branches: string[]; error: string | null }>,
   gitRepoInfo: (dir: string) =>
@@ -192,16 +215,21 @@ const desktopAPI = {
   // AI
   aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string }) =>
     ipcRenderer.invoke('ai_chat_stream', { requestId, provider, baseUrl, model, messages, tools, dispatchMode: dispatchMode ?? 'api', projectRoot: projectRoot ?? null, opts: opts ?? null }),
-  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string) =>
-    ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api' }),
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
+    ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api', cliCommand }),
   aiCancel: (requestId: string) => ipcRenderer.invoke('ai_cancel', { requestId }),
 
   // 窗口
   pickDirectory: () => ipcRenderer.invoke('pick_directory'),
+  pickKeyFile: () => ipcRenderer.invoke('pick_key_file'),
   setWindowTitle: (title: string) => ipcRenderer.invoke('set_window_title', { title }),
-  startElementPick: (url: string) => ipcRenderer.invoke('start_element_pick', { url }),
+  startElementPick: () => ipcRenderer.invoke('start_element_pick'),
   openExternal: (url: string) => ipcRenderer.invoke('open_external', { url }),
   openInExplorer: (filePath: string) => ipcRenderer.invoke('open_in_explorer', { filePath }),
+  /** 窗口三键（自绘标题栏）：关闭走主进程 close 分流（ask/minimize/quit），与系统 X 同路径 */
+  minimizeWindow: () => ipcRenderer.invoke('win_minimize'),
+  toggleMaximize: () => ipcRenderer.invoke('win_toggle_maximize'),
+  requestWindowClose: () => ipcRenderer.invoke('win_request_close'),
   /** 主窗口关闭询问的回调：渲染层弹窗后回传选择；remember=true 时主进程落盘偏好 */
   resolveClose: (action: 'minimize' | 'quit', remember: boolean) =>
     ipcRenderer.send('app:close-resolve', { action, remember: remember === true }),
@@ -216,6 +244,33 @@ const desktopAPI = {
   setPetChatState: (status: string) => ipcRenderer.send('pet:chat-state', { status }),
   /** 面板窗口控制（无原生标题栏，由渲染层自绘按钮触发） */
   closePanel: () => ipcRenderer.send('pet:panel-close'),
+  // 终端 tab（PTY）
+  ptyCreate: (termId: string, cols: number, rows: number, cwd?: string) =>
+    ipcRenderer.invoke('pty_create', { termId, cols, rows, cwd }),
+  ptyInput: (termId: string, data: string) => ipcRenderer.invoke('pty_input', { termId, data }),
+  ptyResize: (termId: string, cols: number, rows: number) => ipcRenderer.invoke('pty_resize', { termId, cols, rows }),
+  ptyKill: (termId: string) => ipcRenderer.invoke('pty_kill', { termId }),
+  onPtyData: (cb: (payload: { termId: string; data: string }) => void): Unsubscribe => subscribe('pty:data', cb),
+  onPtyExit: (cb: (payload: { termId: string; code: number }) => void): Unsubscribe => subscribe('pty:exit', cb),
+
+  // 发布 tab（SSH 部署运维）——发布数据是项目级：读写都带 projectRoot
+  deployListServers: (projectRoot: string) => ipcRenderer.invoke('deploy:list_servers', { projectRoot }),
+  deploySaveServer: (server: unknown, projectRoot: string) => ipcRenderer.invoke('deploy:save_server', { server, projectRoot }),
+  deployDeleteServer: (serverId: string, projectRoot: string) => ipcRenderer.invoke('deploy:delete_server', { serverId, projectRoot }),
+  deploySetCredential: (serverId: string, secret: string) => ipcRenderer.invoke('deploy:set_credential', { serverId, secret }),
+  deployHasCredential: (serverId: string) => ipcRenderer.invoke('deploy:has_credential', { serverId }),
+  deployDeleteCredential: (serverId: string) => ipcRenderer.invoke('deploy:delete_credential', { serverId }),
+  deployTestConnection: (serverId: string, projectRoot: string) => ipcRenderer.invoke('deploy:test_connection', { serverId, projectRoot }),
+  deployExec: (serverId: string, command: string, runId: string, projectRoot: string, allowDangerous?: boolean) =>
+    ipcRenderer.invoke('deploy:exec', { serverId, command, runId, allowDangerous, projectRoot }),
+  deployExecCancel: (runId: string) => ipcRenderer.invoke('deploy:exec_cancel', { runId }),
+  onDeployOutput: (cb: (payload: { runId: string; stream: 'stdout' | 'stderr'; line: string }) => void): Unsubscribe =>
+    subscribe('deploy:output', cb),
+  onDeployExit: (cb: (payload: { runId: string; code: number | null }) => void): Unsubscribe =>
+    subscribe('deploy:exit', cb),
+
+  /** 隐藏/恢复桌宠窗口（设置项「隐藏桌宠」） */
+  setPetHidden: (hidden: boolean) => ipcRenderer.send('pet:set-hidden', { hidden: hidden === true }),
   /** 跨窗口项目同步：通知其余窗口 projectPath / openProjects 变化 */
   notifyProjectChanged: (projectPath: string | null, openProjects: string[], closedProject?: string | null) =>
     ipcRenderer.send('project:changed', { projectPath, openProjects, closedProject }),
@@ -230,38 +285,38 @@ const desktopAPI = {
   onBuildOutput: (cb: (payload: { name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }) => void): Unsubscribe =>
     subscribe('build-output', cb),
   onBuildExit: (cb: (payload: { name: string; code: number; projectRoot?: string }) => void): Unsubscribe => subscribe('build-exit', cb),
-  onAiDelta: (cb: (payload: { requestId: string; delta: string; projectRoot?: string }) => void): Unsubscribe =>
+  onAiDelta: (cb: (payload: AiDeltaPayload) => void): Unsubscribe =>
     subscribe('ai-delta', cb),
-  onAiReasoning: (cb: (payload: { requestId: string; delta: string; projectRoot?: string }) => void): Unsubscribe =>
+  onAiReasoning: (cb: (payload: AiReasoningPayload) => void): Unsubscribe =>
     subscribe('ai-reasoning', cb),
-  onCliToolEvent: (cb: (payload: { requestId: string; id: string; name: string; phase: 'start' | 'stop'; arguments: string; projectRoot?: string }) => void): Unsubscribe =>
+  onCliToolEvent: (cb: (payload: CliToolEventPayload) => void): Unsubscribe =>
     subscribe('cli-tool-event', cb),
-  onCliToolResult: (cb: (payload: { requestId: string; id: string; content: string; isError: boolean; tokens?: { input: number; output: number }; projectRoot?: string }) => void): Unsubscribe =>
+  onCliToolResult: (cb: (payload: CliToolResultPayload) => void): Unsubscribe =>
     subscribe('cli-tool-result', cb),
-  // 载荷结构与 src/types 的 CliAgentEventPayload 保持一致（electron tsconfig 不含 src，故此处内联）
-  onCliAgentEvent: (cb: (payload: { requestId: string; parentId: string; kind: 'text' | 'tool' | 'tool-result'; id?: string; name?: string; arguments?: string; text?: string; content?: string; isError?: boolean }) => void): Unsubscribe =>
+  onCliAgentEvent: (cb: (payload: CliAgentEventPayload) => void): Unsubscribe =>
     subscribe('cli-agent-event', cb),
-  onCliRetry: (cb: (payload: { requestId: string; attempt: number; maxRetries: number; retryDelayMs: number; error: string; errorStatus: number | null }) => void): Unsubscribe =>
-    subscribe('cli-retry', cb),
   onMemoryExtractState: (cb: (payload: { projectRoot: string; extracting: boolean }) => void): Unsubscribe =>
     subscribe('memory-extract-state', cb),
   onMemoryChanged: (cb: (payload: { all: boolean; projectKeys: string[] }) => void): Unsubscribe =>
     subscribe('memory-changed', cb),
   onFsChanged: (cb: (payload: { paths: string[]; projectRoot?: string }) => void): Unsubscribe => subscribe('fs-changed', cb),
   onConfigChanged: (cb: (payload: string[]) => void): Unsubscribe => subscribe('config:changed', cb),
+  onThemeChanged: (cb: (theme: string) => void): Unsubscribe => subscribe('theme:changed', cb),
   onProjectChanged: (cb: (payload: { projectPath: string | null; openProjects: string[]; closedProject?: string | null }) => void): Unsubscribe => subscribe('project:changed', cb),
-  onPetState: (cb: (state: string) => void): Unsubscribe => subscribe('pet:state', cb),
+  onPetState: (cb: (state: 'error' | 'idle' | 'working' | 'waiting') => void): Unsubscribe => subscribe('pet:state', cb),
   onCloseRequest: (cb: () => void): Unsubscribe => subscribe('app:close-request', cb),
+  /** 最大化状态推送（自绘标题栏按钮图标跟切） */
+  onWindowState: (cb: (payload: { maximized: boolean }) => void): Unsubscribe => subscribe('app:window-state', cb),
   /** 关闭询问被主进程兜底收口（渲染层 10s 未响应按最小化处理）时推送，渲染层收起询问框 */
   onCloseCancel: (cb: () => void): Unsubscribe => subscribe('app:close-cancel', cb),
   onChatMirror: (cb: (p: ChatMirrorPayload) => void): Unsubscribe => subscribe('chat:mirror', cb),
   onChatRequestDone: (cb: (p: { requestId: string; projectRoot: string | null; hasError: boolean }) => void): Unsubscribe =>
     subscribe('chat:request-done', cb),
   onElementPicked: (cb: (payload: { selector: string; tag: string; id: string; text: string }) => void): Unsubscribe => subscribe('element-picked', cb),
-  onPreviewConsole: (cb: (payload: { level: string; message: string; sourceId: string; ts: number }) => void): Unsubscribe =>
+  onPreviewConsole: (cb: (payload: PreviewConsoleEntry) => void): Unsubscribe =>
     subscribe('preview-console', cb),
 }
 
 contextBridge.exposeInMainWorld('desktopAPI', desktopAPI)
 
-export type DesktopAPI = typeof desktopAPI
+export type { DesktopAPI }

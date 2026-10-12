@@ -7,7 +7,7 @@
 import type { WebContents } from 'electron'
 import { emitToRenderer, emitToWindow } from './emitter'
 
-export interface PickedElement {
+interface PickedElement {
   selector: string
   tag: string
   id: string

@@ -1,7 +1,7 @@
 /**
  * OAI 历史重建（纯函数，零运行时依赖——供 useChatStore 与冒烟断言共用）。
  *
- * 工作记忆窗口化（P2，见 docs/memory-system-design.md §3）：buildHistory 不再全量
+ * 工作记忆窗口化：buildHistory 不再全量
  * 重建，只取最近 HISTORY_WINDOW 条消息；被窗口截掉的更早进展由会话滚动摘要
  * （category='summary'）注入 system 区补齐。
  */

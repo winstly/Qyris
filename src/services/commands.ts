@@ -9,7 +9,7 @@ import { useFileStore } from '@/store/useFileStore'
 import { getEditorInstance } from '@/components/workspace/EditorPane'
 import { focusFileSearch } from '@/components/workspace/FileTree'
 
-export interface CommandDef {
+interface CommandDef {
   id: string
   /** 展示名（菜单/命令面板用） */
   label: string
@@ -21,15 +21,11 @@ export interface CommandDef {
 const registry = new Map<string, CommandDef>()
 
 /** 注册命令；返回注销函数 */
-export function registerCommand(def: CommandDef): () => void {
+function registerCommand(def: CommandDef): () => void {
   registry.set(def.id, def)
   return () => {
     registry.delete(def.id)
   }
-}
-
-export function getCommand(id: string): CommandDef | undefined {
-  return registry.get(id)
 }
 
 /** 可执行判定（when 谓词）——UI disabled 态与执行入口共用 */

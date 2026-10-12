@@ -1,7 +1,8 @@
 import type { OAIToolDef, SkillMeta } from '@/types'
+import { SECRET_ACCOUNT } from '../../shared/prompt-contract'
 
-/** API Key 在凭据存储中的账户名（与 electron/lib/secrets.ts 保持一致） */
-export const SECRET_KEY = 'api_key'
+/** API Key 在凭据存储中的账户名（唯一定义在 shared/prompt-contract，此为渲染层别名） */
+export const SECRET_KEY = SECRET_ACCOUNT
 
 export function buildSystemPrompt(projectPath: string | null, skillMetas: SkillMeta[] = []): string {
   const lines = [

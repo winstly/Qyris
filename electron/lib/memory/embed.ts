@@ -23,7 +23,7 @@ import { dataDir } from '../db'
 /** 缺省模型（config.embedModel 可覆盖） */
 export const DEFAULT_EMBED_MODEL = 'Xenova/bge-small-zh-v1.5'
 /** 缺省下载镜像（config.embedRemoteHost 可覆盖） */
-export const DEFAULT_EMBED_REMOTE_HOST = 'https://hf-mirror.com'
+const DEFAULT_EMBED_REMOTE_HOST = 'https://hf-mirror.com'
 /** bge-small 输出维度（与 db.ts SCHEMA_VEC 的 FLOAT[512] 对齐，改模型需全量重嵌） */
 export const EMBED_DIM = 512
 
@@ -46,11 +46,6 @@ export function setReadyOverride(v: boolean | null): void { readyOverride = v }
 /** 是否就绪（pipeline 已成功加载）；检索层只在 ready 时走向量路 */
 export function embedReady(): boolean {
   return readyOverride ?? (state === 'ready')
-}
-
-/** 是否已进入降级态（加载/推理失败后快速失败，不反复重试下载） */
-export function isDegraded(): boolean {
-  return state === 'degraded'
 }
 
 /** 预热（fire-and-forget）：主进程启动后可调用，让首次检索免模型加载延迟；失败静默降级 */

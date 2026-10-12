@@ -24,7 +24,7 @@ type SideCell = { num: number | null; type: 'ctx' | 'add' | 'del' | 'hunk'; text
 type SplitRow = { left: SideCell | null; right: SideCell | null }
 
 /** 把 unified diff 解析为左右行矩阵：上下文左右同行，删/加按块内序号配对，落单侧补空 */
-export function parseSplitRows(text: string): SplitRow[] {
+function parseSplitRows(text: string): SplitRow[] {
   const lines = text.split('\n')
   const rows: SplitRow[] = []
   let oldNo = 0
@@ -114,6 +114,8 @@ export function DiffView() {
         <span className="files-diff__path mono" title={diff.path}>{diff.path}</span>
         <div className="files-diff__mode" role="radiogroup" aria-label="diff 视图">
           <button
+            role="radio"
+            aria-checked={!diff.staged}
             className={`files-diff__mode-btn ${!diff.staged ? 'files-diff__mode-btn--active' : ''}`}
             onClick={() => void switchMode(rootPath, false)}
             title="工作区 vs 暂存区"
@@ -121,6 +123,8 @@ export function DiffView() {
             工作区
           </button>
           <button
+            role="radio"
+            aria-checked={diff.staged}
             className={`files-diff__mode-btn ${diff.staged ? 'files-diff__mode-btn--active' : ''}`}
             onClick={() => void switchMode(rootPath, true)}
             title="暂存区 vs HEAD"
@@ -130,6 +134,8 @@ export function DiffView() {
         </div>
         <div className="files-diff__mode" role="radiogroup" aria-label="diff 布局">
           <button
+            role="radio"
+            aria-checked={splitView}
             className={`files-diff__mode-btn ${splitView ? 'files-diff__mode-btn--active' : ''}`}
             onClick={() => setSplitView(true)}
             title="左右分栏对比"
@@ -137,6 +143,8 @@ export function DiffView() {
             分栏
           </button>
           <button
+            role="radio"
+            aria-checked={!splitView}
             className={`files-diff__mode-btn ${!splitView ? 'files-diff__mode-btn--active' : ''}`}
             onClick={() => setSplitView(false)}
             title="统一视图"

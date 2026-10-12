@@ -102,6 +102,22 @@ export async function readSkillFromDirs(dirs: string[], skillId: string): Promis
   return null
 }
 
+/** Skill 目录三源合并：项目默认（<project>/.qyris/skills）+ 项目自定义 + 全局。
+ *  唯一入口（ai.ts 的系统提示组装与 load_skill 工具共用，避免两份合并规则漂移） */
+export function collectSkillDirs(
+  projectRoot: string | null,
+  cfg: { projectSkillsDirsMap?: Record<string, string[]>; skillsDirs: string[] },
+): string[] {
+  const defaultProjectDir = projectRoot ? `${projectRoot}/.qyris/skills` : null
+  const extraProjectDirs = projectRoot ? (cfg.projectSkillsDirsMap?.[projectRoot] ?? []) : []
+  const globalDirs = cfg.skillsDirs ?? []
+  return [
+    ...(defaultProjectDir ? [defaultProjectDir] : []),
+    ...extraProjectDirs,
+    ...globalDirs.filter((d) => d !== defaultProjectDir && !extraProjectDirs.includes(d)),
+  ]
+}
+
 /** 读取单个 skill 的完整 SKILL.md 内容 */
 export async function readSkill(dir: string, skillId: string): Promise<string | null> {
   // 安全校验：skillId 只允许目录名（不能含路径分隔符）
@@ -123,10 +139,12 @@ export async function importSkillFromZip(destDir: string, zipPath: string): Prom
     const tmpDir = path.join(destDir, '__import_tmp__')
     await fsp.mkdir(tmpDir, { recursive: true })
     try {
-      // 解压：Windows 用 PowerShell，macOS/Linux 用 unzip
+      // 解压：Windows 用 PowerShell，macOS/Linux 用 unzip。
+      // PowerShell 单引号字符串内 ' 要写成 ''；路径走 -LiteralPath（防通配符语义）
       const isWin = os.platform() === 'win32'
       if (isWin) {
-        await execFileAsync('powershell', ['-NoProfile', '-Command', `Expand-Archive -Path '${zipPath}' -DestinationPath '${tmpDir}' -Force`])
+        const psQuote = (s: string): string => `'${s.replace(/'/g, "''")}'`
+        await execFileAsync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(tmpDir)} -Force`])
       } else {
         await execFileAsync('unzip', ['-o', zipPath, '-d', tmpDir])
       }
@@ -138,6 +156,10 @@ export async function importSkillFromZip(destDir: string, zipPath: string): Prom
       const skillName = skillSrc === tmpDir
         ? path.basename(zipPath, path.extname(zipPath))
         : entries[0].name
+      // 名字不得含路径分隔符/..：拼进 destDir 会越出目标目录
+      if (!skillName || /[\\/]/.test(skillName) || skillName === '..' || skillName === '.') {
+        return { ok: false, error: 'ZIP 顶层目录名不合法，不是合法的 Skill 包' }
+      }
       // 验证 SKILL.md 存在
       const hasSkill = await fsp.access(path.join(skillSrc, SKILL_FILE)).then(() => true, () => false)
       if (!hasSkill) return { ok: false, error: 'ZIP 中未找到 SKILL.md，不是合法的 Skill 包' }
@@ -221,7 +243,8 @@ export async function deleteProjectSkill(dir: string, skillId: string): Promise<
 function parseFrontmatter(raw: string): Frontmatter {
   const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---/)
   if (!match) return {}
-  const lines = match[1].split('\n')
+  // 按 \r?\n 切行：兼容 CRLF 文件（中间行不带尾 \r，行正则才匹配得到）
+  const lines = match[1].split(/\r?\n/)
   const result: Frontmatter = {}
   let i = 0
   while (i < lines.length) {
@@ -231,8 +254,42 @@ function parseFrontmatter(raw: string): Frontmatter {
     if (m) {
       const key = m[1].trim()
       let val: string = m[2].trim()
-      // 多行标量：> (folded) 或 | (literal)
-      if (val === '>' || val === '|' || val === '>-' || val === '|-') {
+      // 空值 key：值写在下一行——块序列（triggers，可无缩进）或 plain 多行标量（description）。
+      // 注释行（# 开头）跳过：不进值、不终止序列/标量扫描
+      let listVal: string[] | null = null
+      if (val === '') {
+        let j = i + 1
+        const items: string[] = []
+        while (j < lines.length) {
+          const lj = lines[j]
+          if (/^\s*#/.test(lj)) { j++; continue }
+          const li = lj.match(/^\s*-\s+(.*)$/)
+          if (!li) break
+          const v = li[1].trim().replace(/^['"]|['"]$/g, '')
+          if (v) items.push(v)
+          j++
+        }
+        if (items.length > 0) {
+          listVal = items
+          i = j
+        } else {
+          const buf: string[] = []
+          j = i + 1
+          while (j < lines.length) {
+            const lj = lines[j]
+            if (/^\s*#/.test(lj)) { j++; continue }
+            if (!/^\s+\S/.test(lj) || /^\s*-\s+/.test(lj)) break
+            buf.push(lj.trim())
+            j++
+          }
+          if (buf.length > 0) {
+            val = buf.join(' ')
+            i = j
+          } else {
+            i++
+          }
+        }
+      } else if (val === '>' || val === '|' || val === '>-' || val === '|-') {
         const folded = val.startsWith('>')
         const buf: string[] = []
         i++
@@ -251,7 +308,9 @@ function parseFrontmatter(raw: string): Frontmatter {
       if (key === 'name') result.name = val || undefined
       else if (key === 'description') result.description = val || undefined
       else if (key === 'triggers') {
-        if (val.startsWith('[') && val.endsWith(']')) {
+        if (listVal) {
+          result.triggers = listVal
+        } else if (val.startsWith('[') && val.endsWith(']')) {
           result.triggers = val.slice(1, -1).split(',').map((s) => s.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean)
         } else if (val) {
           result.triggers = [val]

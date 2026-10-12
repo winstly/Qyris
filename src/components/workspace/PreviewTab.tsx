@@ -9,6 +9,7 @@ import { Select } from '@/components/common/Select'
 import type { PreviewConsoleEntry } from '@/types'
 import { IconPlay, IconStop, IconRefresh, IconTerminal, IconLink, IconFolder, IconTarget, IconDesktop, IconTablet, IconMobile, IconExternal, IconClose, IconTrash } from '@/components/common/icons'
 import { EmptyState } from '@/components/common/EmptyState'
+import { DeployTab } from './DeployTab'
 import { ServiceList } from './ServiceList'
 import { ErrorDetail } from './ErrorDetail'
 
@@ -96,7 +97,7 @@ export function PreviewTab() {
     recentErrorsRef.current.clear()
     errorCountRef.current = 0
     return off
-  }, [previewUrl])
+  }, [previewUrl, slot?.processAlive])
 
   useEffect(() => { if (consoleOpen) void api.previewConsoleHistory().then(setConsoleLines).catch(() => {}) }, [consoleOpen])
   useEffect(() => { const el = consoleBodyRef.current; if (el) el.scrollTop = el.scrollHeight }, [consoleLines, consoleOpen])
@@ -186,7 +187,7 @@ export function PreviewTab() {
     if (!projectPath) return
     const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
     if (!hasApiKey && !cliMode) {
-      void showAlert('尚未配置 API Key', '点击右上角对话栏的齿轮图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
+      void showAlert('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
       return
     }
     if (hasCommands) {
@@ -213,6 +214,9 @@ export function PreviewTab() {
     )
   }
 
+  /** 二级视图切换：本地预览 / 远程发布（同一「项目怎么跑」流水线的两段） */
+  const [subView, setSubView] = useState<'local' | 'deploy'>('local')
+
   /** 指令运行：直接执行存档的启动命令（零模型调用） */
   const runAll = async () => {
     if (!projectPath || !hasCommands) return
@@ -226,6 +230,29 @@ export function PreviewTab() {
 
   return (
     <div className="preview">
+      {/* 二级切换：本地预览 / 远程发布 */}
+      <div className="preview__segmented" role="tablist" aria-label="预览与发布">
+        <button
+          className={`preview__seg ${subView === 'local' ? 'preview__seg--active' : ''}`}
+          onClick={() => setSubView('local')}
+          role="tab"
+          aria-selected={subView === 'local'}
+        >
+          本地预览
+        </button>
+        <button
+          className={`preview__seg ${subView === 'deploy' ? 'preview__seg--active' : ''}`}
+          onClick={() => setSubView('deploy')}
+          role="tab"
+          aria-selected={subView === 'deploy'}
+        >
+          远程发布
+        </button>
+      </div>
+      {subView === 'deploy' ? (
+        <DeployTab />
+      ) : (
+      <>
       {/* 启动工具栏 */}
       <div className="preview__bar">
         <button className="btn btn--ghost btn--sm" disabled={!projectPath || chatBusy} onClick={() => void aiCompile()}
@@ -300,7 +327,7 @@ export function PreviewTab() {
         </div>
         <span className="statusbar__sep" />
         <button className="icon-btn" onClick={() => void api.openExternal(url)} disabled={!url} aria-label="系统浏览器打开" title="在系统默认浏览器中打开"><IconExternal size={13} /></button>
-        <button className="icon-btn" onClick={() => { if (url) void api.startElementPick(url) }} disabled={!showIframe} aria-label="选取元素" title="选取预览页元素"><IconTarget size={13} /></button>
+        <button className="icon-btn" onClick={() => void api.startElementPick()} disabled={!showIframe} aria-label="选取元素" title="选取预览页元素"><IconTarget size={13} /></button>
         <button className="icon-btn" disabled={!showIframe} onClick={() => void previewReload()} aria-label="刷新预览" title="清缓存并刷新预览"><IconRefresh size={13} /></button>
         <button className="icon-btn" disabled={!showIframe} onClick={() => void previewDevtools()} aria-label="DevTools" title="打开预览页 DevTools"><IconTerminal size={13} /></button>
         <button className={`icon-btn ${consoleOpen ? 'icon-btn--active' : ''}`} onClick={() => setConsoleOpen((v) => !v)} disabled={!showIframe} aria-label="页面控制台" title="页面控制台"><IconTerminal size={13} /></button>
@@ -365,6 +392,8 @@ export function PreviewTab() {
           />
         )}
       </div>
+      </>
+      )}
     </div>
   )
 }

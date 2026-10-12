@@ -7,6 +7,7 @@ import { persist } from 'zustand/middleware'
 import { api, isDesktop } from '@/services/desktop'
 import { SECRET_KEY } from '@/services/ai'
 import { basename } from '@/utils/path'
+import { projectConfigKey } from '../../shared/project-key'
 import { useFileStore } from './useFileStore'
 import { useBuildStore } from './useBuildStore'
 import { useChatStore } from './useChatStore'
@@ -51,19 +52,19 @@ export function checkpointFileStore(projectPath: string): void {
   })
 }
 
-export interface DialogCheck {
+interface DialogCheck {
   id: string
   label: string
   checked?: boolean
 }
 
-export interface DialogChoice {
+interface DialogChoice {
   id: string
   label: string
   variant?: 'primary' | 'ghost' | 'danger'
 }
 
-export interface DialogRequest {
+interface DialogRequest {
   kind: 'prompt' | 'confirm' | 'alert' | 'choice'
   title: string
   message?: string
@@ -75,6 +76,9 @@ export interface DialogRequest {
   holdOpen?: boolean
   /** holdOpen 期间确定按钮的文案（如「删除中…」） */
   confirmingText?: string
+  /** 确定按钮的动词化文案（如「删除」「回退」）——缺省「确定」。
+   *  按钮文案 = 动作本身，不用泛化的「确定」（WCAG 2.5.3 Label in Name） */
+  confirmLabel?: string
   resolve: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
 }
 
@@ -85,7 +89,7 @@ export type Theme = 'system' | 'light' | 'dark'
 
 interface AppState {
   booted: boolean
-  activeTab: 'preview' | 'files' | 'memory' | 'skills'
+  activeTab: 'preview' | 'files' | 'memory' | 'extensions' | 'terminal'
   /** 工作区占宽比例（拖拽分割线调节，工作区 ≥ 500px / 对话栏 ≥ 300px 由组件层钳制） */
   splitRatio: number
   /** 文件 Tab 内文件树占比 */
@@ -98,6 +102,8 @@ interface AppState {
   projectPath: string | null
   projectName: string
   settingsOpen: boolean
+  /** 模型/记忆配置弹窗（对话头部 chip 或设置里的入口打开；放 store 以便多入口共用） */
+  modelCfgOpen: boolean
   createProjectOpen: boolean
   openSelectCount: number
   settings: AiSettings
@@ -124,7 +130,7 @@ interface AppState {
   /** 全部项目的启动命令存档（内存缓存，落盘走 config.json） */
   startupCommandsMap: Record<string, StartCommand[]>
 
-  setTab: (t: 'preview' | 'files' | 'memory' | 'skills') => void
+  setTab: (t: 'preview' | 'files' | 'memory' | 'extensions' | 'terminal') => void
   /** 左侧记忆侧边栏展开/收起（独立于工作区 Tab） */
   memorySidebarOpen: boolean
   toggleMemorySidebar: () => void
@@ -142,6 +148,7 @@ interface AppState {
   setGitPanelRatio: (r: number) => void
   setSearchPanelRatio: (r: number) => void
   setSettingsOpen: (open: boolean) => void
+  setModelCfgOpen: (open: boolean) => void
   setCreateProjectOpen: (open: boolean) => void
   incOpenSelect: () => void
   decOpenSelect: () => void
@@ -175,7 +182,7 @@ interface AppState {
   /** 项目文件删除后清空该路径的启动命令存档（防止同路径重建项目时旧命令复活） */
   clearStartupCommands: (projectPath: string) => Promise<void>
   showPrompt: (title: string, value?: string) => Promise<string | null>
-  showConfirm: (title: string, message?: string, checks?: DialogCheck[], opts?: { holdOpen?: boolean; confirmingText?: string }) => Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>
+  showConfirm: (title: string, message?: string, checks?: DialogCheck[], opts?: { holdOpen?: boolean; confirmingText?: string; confirmLabel?: string }) => Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>
   showAlert: (title: string, message?: string) => Promise<void>
   /** 多选项对话框：返回被选中的 choice id，取消返回 null */
   showChoices: (title: string, message: string, choices: DialogChoice[]) => Promise<string | null>
@@ -185,6 +192,9 @@ interface AppState {
   /** 更新当前对话框的消息/进度文案（不关闭、不触发 resolve），holdOpen 场景用于展示异步进度 */
   patchDialog: (patch: { message?: string; confirmingText?: string }) => void
 }
+
+// openProject 串行锁（并发调用忽略后来者）
+let openingProject = false
 
 export const useAppStore = create<AppState>()(
   persist(
@@ -202,6 +212,7 @@ export const useAppStore = create<AppState>()(
       projectPath: null,
       projectName: '',
       settingsOpen: false,
+      modelCfgOpen: false,
       createProjectOpen: false,
       openSelectCount: 0,
       settings: DEFAULT_SETTINGS,
@@ -228,10 +239,15 @@ export const useAppStore = create<AppState>()(
       setGitPanelRatio: (r) => set({ gitPanelRatio: Math.min(0.75, Math.max(0.2, r)) }),
       setSearchPanelRatio: (r) => set({ searchPanelRatio: Math.min(0.75, Math.max(0.15, r)) }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
+      setModelCfgOpen: (open) => set({ modelCfgOpen: open }),
       setCreateProjectOpen: (open) => set({ createProjectOpen: open }),
       incOpenSelect: () => set((s) => ({ openSelectCount: s.openSelectCount + 1 })),
       decOpenSelect: () => set((s) => ({ openSelectCount: Math.max(0, s.openSelectCount - 1) })),
-      setTheme: (theme) => set({ theme }),
+      setTheme: (theme) => {
+        set({ theme })
+        // 跨窗口联动：桌宠面板/桌宠是独立窗口、各持一份 zustand，不广播就只有本窗跟手
+        window.desktopAPI?.setTheme?.(theme)
+      },
 
       saveSettings: async (s) => {
         set({ settings: s })
@@ -241,6 +257,7 @@ export const useAppStore = create<AppState>()(
           await api.mergeConfig({
             aiBaseUrl: s.baseUrl, aiModel: s.model, aiProvider: s.provider, aiTiers: s.tiers,
             aiDispatchMode: s.dispatchMode, aiCliPermission: s.cliPermission, aiCliCommand: s.cliCommand ?? null,
+            aiMaxTurns: s.maxTurns ?? null, aiSubagentMaxTurns: s.subagentMaxTurns ?? null,
           })
         } catch { /* 配置盘写失败不阻塞界面 */ }
       },
@@ -264,6 +281,8 @@ export const useAppStore = create<AppState>()(
             dispatchMode: cfg.aiDispatchMode ?? DEFAULT_SETTINGS.dispatchMode,
             cliPermission: cfg.aiCliPermission ?? DEFAULT_SETTINGS.cliPermission,
             cliCommand: cfg.aiCliCommand ?? null,
+            maxTurns: cfg.aiMaxTurns ?? null,
+            subagentMaxTurns: cfg.aiSubagentMaxTurns ?? null,
             tiers: cfg.aiTiers,
           }
           const scm = cfg.startupCommands ?? {}
@@ -289,9 +308,24 @@ export const useAppStore = create<AppState>()(
           if ((cfg.skillsDirs ?? []).length > 0) {
             void get().loadSkills()
           }
-          // 旧单目录字段一次性迁移
+          // 旧单目录字段一次性迁移（写 undefined 落盘即删键，不驻留 null）
           if (cfg.skillsDir) {
-            void api.mergeConfig({ skillsDirs: cfg.skillsDirs ?? [], skillsDir: null }).catch(() => {})
+            void api.mergeConfig({ skillsDirs: cfg.skillsDirs ?? [], skillsDir: undefined }).catch(() => {})
+          }
+          // 旧全局 deployServers 一次性迁移：挂到 lastProjectPath 的项目域表后清空旧字段
+          // （新读取面只认 deployServersMap[projectKey]，不迁移则存量服务器永不显示）；
+          // 表非空时只清不搬（避免覆盖已迁移数据），deployScripts 无读取方一并清
+          if ((cfg.deployServers ?? []).length > 0) {
+            const migrateMap = Object.keys(cfg.deployServersMap ?? {}).length === 0 && cfg.lastProjectPath
+              ? { [projectConfigKey(cfg.lastProjectPath)]: cfg.deployServers ?? [] }
+              : cfg.deployServersMap
+            void api.mergeConfig({
+              deployServersMap: migrateMap,
+              deployServers: undefined,
+              deployScripts: undefined,
+            }).catch(() => {})
+          } else if (cfg.deployScripts) {
+            void api.mergeConfig({ deployScripts: undefined }).catch(() => {})
           }
           // 记住上次打开的项目目录：启动时自动恢复
           if (cfg.lastProjectPath) {
@@ -335,6 +369,10 @@ export const useAppStore = create<AppState>()(
       },
 
       openProject: async (projectPath) => {
+        // 串行锁：boot 兜底循环与用户操作并发时忽略后来者，防止半加载态被互相 checkpoint
+        if (openingProject) return
+        openingProject = true
+        try {
         // 校验目录可读（失败抛错给调用方）
         await api.listDir(projectPath, projectPath)
 
@@ -369,8 +407,9 @@ export const useAppStore = create<AppState>()(
           checkpointFileStore(projectPath)
         }
 
-        // 构建态：进程由主进程按工程隔离，切走不停；订阅该工程文件变更
-        await api.startWatching(projectPath)
+        // 构建态：进程由主进程按工程隔离，切走不停；订阅该工程文件变更。
+        // fire-and-forget：watcher 建立是背景事，1.8 万目录建 watcher 可能秒级——不能卡住文件树可用
+        void api.startWatching(projectPath).catch((e) => console.warn(`[boot] startWatching 失败：${String(e)}`))
 
         // 项目级 Skill 加载（异步，不阻塞）
         void get().loadProjectSkills()
@@ -417,6 +456,9 @@ export const useAppStore = create<AppState>()(
         api.setWindowTitle(`${basename(projectPath)} — 轻驭`).catch(() => {})
         // 跨窗口广播（接收端用轻量 setter，不调 openProject，不重入）
         window.desktopAPI?.notifyProjectChanged?.(projectPath, get().openProjects)
+        } finally {
+          openingProject = false
+        }
       },
 
       removeRecentProject: (projectPath) => {
@@ -595,7 +637,7 @@ export const useAppStore = create<AppState>()(
             set({
               dialog: {
                 kind: 'confirm', title, message, checks,
-                holdOpen: opts?.holdOpen, confirmingText: opts?.confirmingText,
+                holdOpen: opts?.holdOpen, confirmingText: opts?.confirmingText, confirmLabel: opts?.confirmLabel,
                 resolve: (v) => resolve(v as { confirmed: boolean; checks: Record<string, boolean> }),
               },
             })
@@ -620,7 +662,13 @@ export const useAppStore = create<AppState>()(
         d?.resolve(v)
       },
 
-      closeDialog: () => set({ dialog: null }),
+      closeDialog: () => {
+        // 先取再清再 resolve(null)：await showXxx 的调用方拿 null 唤醒。
+        // 不 resolve 的话，holdOpen 异常路径 / HMR 清 dialog 会把 Promise 永久挂死（假死）
+        const d = get().dialog
+        set({ dialog: null })
+        d?.resolve(null)
+      },
 
       patchDialog: (patch) => {
         const d = get().dialog
@@ -630,6 +678,13 @@ export const useAppStore = create<AppState>()(
     }),
     {
       name: 'fw-ui',
+      version: 1,
+      // v0 → v1：tab 键 'skills' 改名 'extensions'（扩展 tab 承载技能 + MCP）
+      migrate: (persisted) => {
+        const s = persisted as { activeTab?: string } | undefined
+        if (s && s.activeTab === 'skills') s.activeTab = 'extensions'
+        return s as never
+      },
       partialize: (s) => ({
         activeTab: s.activeTab,
         splitRatio: s.splitRatio,

@@ -1,0 +1,159 @@
+/* ============================================================
+ * 材质系统 —— 磨砂材质 / vibrancy 前景 / 模态遮罩
+ *
+ * 来源：open-design-open-design-v0.23.0/apps/web/src/styles/material.css
+ * 只取：token 层 + 两级无障碍降级。
+ * 不取：.od-glass-refract / SDF 折射 / useLiquidGlass() / --flt 位移图
+ *      （偏离 D9：成本是 JS 能力探测 + SVG 滤镜管线 + 第二套视觉模式，
+ *        收益仅浮层边缘的折射环；Qyris 的菜单是密集文本面，
+ *        open-design 自己在那儿也会退到实心磨砂。取磨砂，不取透镜。）
+ *
+ * 用法（任意样式表）：
+ *   background: var(--glass-regular);
+ *   backdrop-filter: var(--glass-backdrop);
+ * ============================================================ */
+
+:root {
+  /* 厚度档位的模糊半径。--glass-regular / --glass-regular-blur 在 tokens.css
+     （它先定义，供浮层面板用）—— 本文件在其上构建，不重复定义。 */
+  --material-ultrathin-blur: 8px;
+  --material-thin-blur: 16px;
+  --material-regular-blur: 24px;
+  --material-thick-blur: 40px;
+
+  /* 合成 backdrop 滤镜 —— 一档一个变量，消费方保持 3 行 */
+  --material-ultrathin-backdrop: blur(var(--material-ultrathin-blur)) saturate(1.6);
+  --material-thin-backdrop: blur(var(--material-thin-blur)) saturate(1.6);
+  --material-regular-backdrop: blur(var(--material-regular-blur)) saturate(1.6);
+  --material-thick-backdrop: blur(var(--material-thick-blur)) saturate(1.6);
+  --glass-backdrop: blur(var(--glass-regular-blur, 28px)) saturate(1.8);
+
+  /* 模态 / 对话框 / 抽屉 / 预览背后的遮罩 —— 两半都在这里。
+     模糊早就统一了，色罩却一直留给各组件自己调，结果就是全应用三十种遮罩色。
+     现在整套材质活在这两行上，一个遮罩，一处调校。
+
+     刻意例外不读这两个 token，且各自在自己的规则上写明理由：
+     图片灯箱与演示模式保留近不透明深色底（浅色遮罩会把媒体洗掉），
+     只用来关菜单的透明点击捕获层什么都不画。 */
+  --scrim-tint: rgba(6, 7, 10, 0.6);
+  --scrim-backdrop: blur(50px);
+
+  /* 标准材质表面（内容层分离用）—— 深空底 #0e0f13 系 */
+  --material-ultrathin: rgba(14, 15, 19, 0.45);
+  --material-thin: rgba(14, 15, 19, 0.6);
+  --material-regular: rgba(14, 15, 19, 0.72);
+  --material-thick: rgba(14, 15, 19, 0.85);
+
+  /* 液态玻璃表面（--glass-regular 本体在 tokens.css） */
+  --glass-clear: rgba(6, 7, 10, 0.18);
+  /* 浮在【媒体】上而非应用地面上的控件用的深色玻璃 —— 缩略图可以是任何颜色，
+     所以不能用跟随主题的中性材质（会在一半图片上消失）。两主题同值，
+     因为它背后是图片不是页面。0.55 是让标签在白底缩略图上仍可读的下限。 */
+  --glass-clear-dim: rgba(0, 0, 0, 0.35);
+  --material-dim: rgba(0, 0, 0, 0.55);
+  --vibrancy-label-on-dim: #fff;
+
+  /* 玻璃内描环 —— 收编散落 5 处的 `color-mix(in srgb, #fff 5%, transparent)`
+     字面量（select/ctxmenu/user-mem/projswitcher/slash 菜单浮层同款配方）。 */
+  --glass-inner-ring: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+
+  /* Vibrancy —— 压在任何材质上的前景；永远不要在材质表面硬编码中性文字色 */
+  --vibrancy-label: rgba(232, 232, 236, 0.92);
+  --vibrancy-label-secondary: rgba(232, 232, 236, 0.62);
+  --vibrancy-label-tertiary: rgba(232, 232, 236, 0.4);
+  --vibrancy-label-quaternary: rgba(232, 232, 236, 0.24);
+  --vibrancy-fill: rgba(255, 255, 255, 0.2);
+  --vibrancy-fill-secondary: rgba(255, 255, 255, 0.13);
+  --vibrancy-fill-tertiary: rgba(255, 255, 255, 0.07);
+  --material-separator: rgba(255, 255, 255, 0.16);
+}
+
+/* 亮色主题。表面坐在抬升中性色（#fafafa）上，让半透明层仍读作从 #fff 上抬起。 */
+[data-theme='light'] {
+  --scrim-tint: rgba(248, 249, 252, 0.6);
+  /* 显式同值声明（style-audit 镜像完整性）：这些档位两主题设计上相同，
+     但依赖暗色继承会在 token 覆盖审计里永远显示为「缺口」 */
+  --scrim-backdrop: blur(50px);
+
+  --material-ultrathin: rgba(248, 249, 252, 0.45);
+  --material-thin: rgba(248, 249, 252, 0.6);
+  --material-regular: rgba(248, 249, 252, 0.72);
+  --material-thick: rgba(248, 249, 252, 0.85);
+
+  --glass-clear: rgba(248, 249, 252, 0.18);
+  --glass-clear-dim: rgba(0, 0, 0, 0.35);
+
+  --glass-inner-ring: inset 0 0 0 1px rgba(0, 0, 0, 0.05);
+
+  --vibrancy-label: rgba(26, 26, 46, 0.92);
+  --vibrancy-label-secondary: rgba(26, 26, 46, 0.62);
+  --vibrancy-label-tertiary: rgba(26, 26, 46, 0.4);
+  --vibrancy-label-quaternary: rgba(26, 26, 46, 0.24);
+  --vibrancy-fill: rgba(26, 26, 46, 0.2);
+  --vibrancy-fill-secondary: rgba(26, 26, 46, 0.14);
+  --vibrancy-fill-tertiary: rgba(26, 26, 46, 0.08);
+  --material-separator: rgba(26, 26, 46, 0.18);
+}
+
+/* ============================================================
+ * 无障碍降级 —— 在【token 层】重定义，让每个消费方一起降级
+ * html:root 选择器 (0,1,1) 与主题块同特异性，靠源顺序取胜。
+ * ============================================================ */
+@media (prefers-reduced-transparency: reduce) {
+  html:root {
+    --material-ultrathin: var(--bg-elevated);
+    --material-thin: var(--bg-elevated);
+    --material-regular: var(--bg-elevated);
+    --material-thick: var(--bg-elevated);
+    --glass-regular: var(--bg-elevated);
+    --glass-clear: var(--bg-elevated);
+    /* 保持深色 —— 它是压在照片上而非页面上 —— 但变不透明，
+       让模糊消失后标签仍有对比度。 */
+    --material-dim: rgba(0, 0, 0, 0.88);
+    --material-ultrathin-backdrop: none;
+    --material-thin-backdrop: none;
+    --material-regular-backdrop: none;
+    --material-thick-backdrop: none;
+    --glass-backdrop: none;
+    /* 模糊一关，半透明遮罩会让模态几乎与页面糊在一起 ——
+       所以色罩降级为不透明地面，与上面每个材质表面同一块 --bg-elevated。 */
+    --scrim-tint: var(--bg-elevated);
+    --scrim-backdrop: none;
+    --vibrancy-label: var(--text-strong);
+    --vibrancy-label-secondary: var(--text-muted);
+    --vibrancy-label-tertiary: var(--text-soft);
+    --vibrancy-label-quaternary: var(--text-faint);
+    --vibrancy-fill: var(--bg-fill);
+    --vibrancy-fill-secondary: var(--bg-fill-secondary);
+    --vibrancy-fill-tertiary: var(--bg-fill-tertiary);
+    --material-separator: var(--border);
+  }
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  html:root {
+    /* 没有 backdrop-filter 时模糊是惰性的；色罩按上面 reduced-transparency
+       同样方式降级。 */
+    --scrim-tint: var(--bg-elevated);
+    --scrim-backdrop: none;
+    --material-ultrathin: var(--bg-elevated);
+    --material-thin: var(--bg-elevated);
+    --material-regular: var(--bg-elevated);
+    --material-thick: var(--bg-elevated);
+    --glass-regular: var(--bg-elevated);
+    --glass-clear: var(--bg-elevated);
+    --material-ultrathin-backdrop: none;
+    --material-thin-backdrop: none;
+    --material-regular-backdrop: none;
+    --material-thick-backdrop: none;
+    --glass-backdrop: none;
+    --vibrancy-label: var(--text-strong);
+    --vibrancy-label-secondary: var(--text-muted);
+    --vibrancy-label-tertiary: var(--text-soft);
+    --vibrancy-label-quaternary: var(--text-faint);
+    --vibrancy-fill: var(--bg-fill);
+    --vibrancy-fill-secondary: var(--bg-fill-secondary);
+    --vibrancy-fill-tertiary: var(--bg-fill-tertiary);
+    --material-separator: var(--border);
+  }
+}

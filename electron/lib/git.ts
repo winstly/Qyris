@@ -7,32 +7,9 @@ import { spawn } from 'node:child_process'
 import { errorMessage } from './util'
 import { buildChildEnv } from './proc-env'
 
-/** 单个改动文件条目（git status --porcelain v1 解析） */
-export interface GitFileEntry {
-  /** 相对仓库路径（rename 显示新路径） */
-  path: string
-  /** 原路径（仅 rename 有） */
-  renamedFrom?: string
-  /** X（暂存区状态）：空格=未暂存，M/A/D/R/C 等 */
-  x: string
-  /** Y（工作区状态） */
-  y: string
-  /** 已有暂存改动 */
-  staged: boolean
-  /** 工作区有未暂存改动（含 untracked） */
-  unstaged: boolean
-  /** 展示用状态标签 */
-  status: 'staged' | 'modified' | 'added' | 'deleted' | 'renamed' | 'untracked' | 'conflicted'
-}
-
-export interface GitStatus {
-  isRepo: boolean
-  branch: string | null
-  /** 相对上游：领先 / 落后（无跟踪分支时为 0） */
-  ahead: number
-  behind: number
-  files: GitFileEntry[]
-}
+/** Git 状态载荷（唯一定义在 shared/ipc-types.ts，此处再导出供主进程消费） */
+export type { GitFileEntry, GitStatus } from '../../shared/ipc-types'
+import type { GitFileEntry, GitStatus } from '../../shared/ipc-types'
 
 const MAX_DIFF_CHARS = 200_000
 const MAX_STATUS_ENTRIES = 2000

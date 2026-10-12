@@ -175,7 +175,7 @@ export function SearchPanel() {
       {searchOpen && (
         <div
           className="search-panel__grip"
-          onMouseDown={onGripDown}
+          onPointerDown={onGripDown}
           role="separator"
           aria-orientation="horizontal"
           aria-label="调整搜索面板高度"
@@ -219,11 +219,13 @@ export function SearchPanel() {
             <button
               className={`search-panel__opt-btn ${caseSensitive ? 'search-panel__opt-btn--active' : ''}`}
               onClick={() => setCaseSensitive((v) => !v)}
+              aria-pressed={caseSensitive}
               title="区分大小写"
             >Aa</button>
             <button
               className={`search-panel__opt-btn ${useRegex ? 'search-panel__opt-btn--active' : ''}`}
               onClick={() => setUseRegex((v) => !v)}
+              aria-pressed={useRegex}
               title="正则表达式"
             >.*</button>
           </div>

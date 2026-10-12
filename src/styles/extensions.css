@@ -1,0 +1,176 @@
+/* ── 扩展 tab（技能 / MCP 两切片）与 MCP 面板 ──
+ * token 族与 components.css 同源（--space/--text/--divider/--accent…）。
+ * 与 components.css 同层（@layer components）：unlayered 会压过一切 @layer 规则，
+ * 后续任何 layered 共享类（含 Tailwind 工具类）都压不住本文件。 */
+
+@layer components {
+
+.extensions-tab {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+/* 切片切换走共享 TabStrip（.tab-strip 族）；只补本容器的贴边留白 */
+.extensions-tab > .tab-strip {
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: 0;
+}
+.extensions-tab__body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+/* ── MCP 面板（本地 server 管理 + 测试 + 工具面预览） ── */
+.mcp-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  /* 横向 flex 子项必须关掉自动最小尺寸：否则长错误串（pre-wrap 无空格长 token）
+     会按 min-content 撑破面板、溢出到对话区底下 */
+  min-width: 0;
+  overflow: hidden;
+}
+.mcp-panel__bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--divider);
+}
+.mcp-panel__hint {
+  font-size: var(--text-xs);
+  color: var(--text-soft);
+}
+
+/* 项目域无宿主（未打开项目）：行禁用灰显 */
+.mcp-panel__scope--off {
+  opacity: 0.5;
+  cursor: default;
+}
+.mcp-panel__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-2) var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.mcp-panel__row {
+  /* chrome 走 .card 基座（JSX 组合），这里只留内容布局 */
+  cursor: pointer;
+  padding: var(--space-3) var(--space-4);
+  /* 列表是纵向 flex 滚动容器：关收缩，面板矮时宁可滚动不压行 */
+  flex-shrink: 0;
+}
+.mcp-panel__row--off { opacity: 0.55; }
+.mcp-panel__row-main {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+.mcp-panel__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex-shrink: 0;
+}
+.mcp-panel__dot--ok { background: var(--green); }
+.mcp-panel__dot--err { background: var(--red); }
+.mcp-panel__name {
+  /* 与技能卡名同字阶（11px/段重/字距），MCP 语义色 = 紫（--tool-mcp，同工具卡 kernel） */
+  font-size: 11px;
+  font-weight: var(--font-weight-section);
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--tool-mcp);
+  flex-shrink: 0;
+}
+.mcp-panel__row:hover .mcp-panel__name { text-decoration: underline; text-underline-offset: 3px; }
+
+/* 传输徽章：与技能卡 tag 同形 */
+.mcp-panel__kind {
+  font-size: 10px;
+  padding: 2px 8px;
+  border-radius: var(--radius-chip);
+  border: 1px solid var(--divider);
+  color: var(--text-soft);
+  flex-shrink: 0;
+}
+.mcp-panel__cmd {
+  flex: 1;
+  min-width: 120px;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-soft);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-panel__perm {
+  font-size: 9px;
+  padding: 0 6px;
+  border-radius: var(--radius-chip);
+  background: var(--bg-fill-tertiary);
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.mcp-panel__status {
+  font-size: var(--text-xs);
+  color: var(--muted);
+  flex-shrink: 0;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mcp-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.mcp-panel__tools {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--divider);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mcp-panel__tool {
+  display: flex;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--muted);
+}
+.mcp-panel__tool code {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+.mcp-panel__tool span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 测试失败详情：状态徽章只留「测试失败」，错误正文另起一行展开（与 __tools 同族行下块）。
+   正文是内容不是装饰：保留内部换行、长串可断行，不再截 60 字塞 nowrap 窄槽 */
+.mcp-panel__error {
+  margin-top: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px dashed var(--divider);
+  font-size: var(--text-xs);
+  color: var(--red);
+  white-space: pre-wrap;
+  /* anywhere 才压 min-content（break-word 不压）：无空格长 token 不许撑破行宽 */
+  overflow-wrap: anywhere;
+}
+
+} /* @layer components */

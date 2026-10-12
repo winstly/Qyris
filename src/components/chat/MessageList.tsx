@@ -42,7 +42,7 @@ export function MessageList() {
       if (delta > 0) el.scrollTop += delta
     }
     anchorRef.current = { sessionId, firstId, scrollHeight: el.scrollHeight }
-  })
+  }, [messages, sessionId])
 
   useEffect(() => {
     const el = ref.current

@@ -7,7 +7,6 @@ import { EditorPane } from './EditorPane'
 import { GitPanel } from './GitPanel'
 import { DiffView } from './DiffView'
 import { GitOpDialog } from './GitOpDialog'
-import { IconChevron } from '@/components/common/icons'
 
 /** 文件 Tab：左文件树 + 搜索面板（可折叠） + Git 工作区 + 右代码编辑器。 */
 export function FilesTab() {
@@ -42,15 +41,15 @@ export function FilesTab() {
           </div>
         }
       />
-      {/* 文件树折叠后的展开把手：贴左缘竖条，点击恢复 */}
+      {/* 文件树折叠后的展开把手：与 MemorySidebar 同款图标语义（收起=fold / 展开=unfold） */}
       {fileTreeCollapsed && (
         <button
           className="edge-grip edge-grip--tree"
           onClick={() => useAppStore.getState().toggleFileTree()}
           aria-label="展开文件树"
-          title="展开文件树"
+          title="展开文件树 (Ctrl+B)"
         >
-          <IconChevron size={14} />
+          <i className="od-icon ri-menu-unfold-line" />
         </button>
       )}
     </div>

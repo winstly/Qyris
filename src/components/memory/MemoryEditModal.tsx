@@ -5,6 +5,7 @@
  * 不得打断进行中的编辑。保存失败时 onSave 返回 false，弹窗保持开启可重试。
  */
 import { useState } from 'react'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import type { MemoryCategory, MemoryItem } from '@/types'
 import { IconClose } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
@@ -57,9 +58,12 @@ export function MemoryEditModal({ item, onSave, onClose, readOnly }: {
     }
   }
 
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
+
   return (
     // Esc 取消（keydown 落在输入框上也会冒泡到 mask）；saving 中不响应关闭，防丢草稿
     <div
+      ref={trapRef}
       className="modal-mask"
       onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}
       onKeyDown={(e) => { if (e.key === 'Escape') close() }}

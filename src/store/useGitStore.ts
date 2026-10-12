@@ -5,7 +5,7 @@
 import { create } from 'zustand'
 import { api } from '@/services/desktop'
 
-export interface GitDiffView {
+interface GitDiffView {
   path: string
   /** true=暂存区 vs HEAD；false=工作区 vs 暂存区 */
   staged: boolean
@@ -13,7 +13,7 @@ export interface GitDiffView {
   text: string | null
 }
 
-export interface GitOpState {
+interface GitOpState {
   label: string
   state: 'running' | 'ok' | 'fail'
   detail?: string

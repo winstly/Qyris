@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Agentic Development Environment</strong><br>
-  预览 · 文件 · AI 对话 · 记忆 · 多 Agent 编排 · 一站式开发体验
+  预览 · 文件 · AI 对话 · 记忆 · 多 Agent 编排 · 外部 MCP · 一站式开发体验
 </p>
 
 <p align="center">
@@ -43,6 +43,15 @@
 - CLI 模式支持 **Skill 协议**（`[[NEXT_SKILL]]` 请求附带指令集）和**启动命令协议**（`[[START_COMMANDS]]` 自动存档）
 - CLI 工具调用实时回填：每个工具（Read / Write / Bash / Glob 等）渲染为折叠卡片，点击展开完整输入与输出
 - CLI 子 agent（Agent/Task 派发）实时面板：工具调用逐条入账，结果自动回填，token 账目独立记账
+
+### 外部 MCP 集成
+
+- **接入外部 MCP server**（stdio / Streamable HTTP 两型，形状对齐 `.mcp.json`，可直接复制配置）
+- **全局域 / 项目域两域**：全局表所有项目可见，项目表仅当前项目、同名项目域覆盖全局域
+- **配置面板**（扩展 → MCP）：增删改 / JSON 导入 / 启停 / 测试连接 / **卡片点击只读详情**
+- 连接池住主进程**按工程分域**：多工程并行互不拆台；配置改动**下一条消息生效**（指纹惰性重建）
+- 工具面 `mcp__<server>__<tool>` 命名与内置工具零撞名；子进程暴露元数据、执行代行回主进程
+- fail-safe 权限：外部 server 工具缺省 exec 档才暴露，可按 server 声明 `readonly` / `write`
 
 ### 项目创建
 
@@ -88,15 +97,16 @@
 - Markdown 渲染 + 代码块高亮 + 一键复制
 - 工具调用过程可视化（折叠卡片：图标 + 标签 + 目标路径 + 状态指示器，点击展开详情）
 - **规划优先**：非平凡任务先出编号计划，再拆分执行
-- **子任务派发**（`dispatch_subtasks` / CLI Agent/Task）：
+- **子任务派发**（`dispatch_subtasks`，API / CLI 两档同构）：
   - 子 agent **并行执行**，独立上下文互不污染
-  - 按任务难度分配**档位模型**（Thinking / Haiku 级 / Sonnet 级 / Opus 级，未配置自动回退主模型）
+  - **与主对话同构**：同一模型通道、同一套工具（CLI 档同样经 MCP 挂载完整工具面，不降级为纯补全），只是各自独立 session（自己的上下文、工具面、事件出口；禁止嵌套派发）
+  - 按任务难度分配**档位模型**（Thinking / Haiku 级 / Sonnet 级 / Opus 级，未配置自动回退主模型；CLI 档模型由 claude 自带配置决定）
   - 对话内实时面板：每个子 agent 的状态灯、转录逐条入账
   - **切换器 / 专注视图**随时查看任意子 agent 执行进度
   - 子 agent **独立 token 记账**，总额自动汇总到主对话
   - 失败自动重试（模型类错误），完成 / 取消自动清理出列表
-- 内置工具（API 模式）：`list_files` / `search_files` / `grep_files` / `read_file` / `write_file` / `edit_file` / `run_once` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `verify_start` / `dispatch_subtasks` / `askUserQuestion` / `load_skill`
-- 内置工具（CLI 模式）：Read / Write / Bash / PowerShell / Glob / Grep / Edit / Agent / Task / WebFetch / WebSearch
+- 内置工具（ToolRegistry 统一注册，API 模式由 runner 直调 / CLI 模式经 MCP 挂载）：`list_dir` / `search_files` / `glob` / `grep` / `read_file` / `write_file` / `edit_file` / `run_command` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `verify_start` / `git_status` / `git_diff` / `git_add` / `git_commit` / `load_skill` / `memory_search` / `memory_save` / `memory_archive` / `preview_open` / `preview_console` / `remote_exec` / `remote_upload` / `update_server_tags` / `web_search` / `web_fetch`
+- 编排/交互工具：`dispatch_subtasks`（子任务派发，CLI 模式经主进程代行通道执行，面板事件不丢） / `askUserQuestion`（仅 API 模式；CLI 通道不可用，模型改为在回复中向用户提问）
 - 真取消：「停止生成」在网络层硬中断请求，连同在途子 agent 请求一并取消
 - **端口冲突自动检测**——服务启动失败时自动查询占用进程（PID + 进程名），注入解决建议（停服务 / 换端口）
 - **消息持久化**：SQLite 存储，keyset 分页（最新 50 条 + 向上翻页），稳定点 write-through（user 发送 / assistant 收尾 / toolResult 追加）
@@ -179,15 +189,19 @@ Windows 子进程（如 `taskkill`、`netstat`）输出使用系统 OEM 代码�
 ```bash
 npm run dev         # 启动开发模式
 npm run build       # 构建
-npm run typecheck   # 类型检查（渲染层 + 主进程双 tsconfig）
+npm run typecheck   # 类型检查（渲染层 + 主进程 + scripts 三配置）
 npm run dist        # 构建 + 打包安装包
 
-# 冒烟测试
-npm run smoke:cli           # CLI adapter 全链路（序列化 / 参数 / 罐装 NDJSON 事件）
-npm run smoke:git           # Git 操作（分支 / 提交 / 状态解析）
-npm run smoke:env           # 子进程环境（PATH 探测 / 命令检测 / 编码）
+# 冒烟测试（全量：任一改动后至少跑相关域）
+npm run smoke:ui            # UI 组件运行时（jsdom：Notice/TabStrip/ScopeRow/详情弹窗/面板集成）
+npm run smoke:protocol      # AI CLI 协议原语（序列化 / Skill 反解 / 连接测试拆分）
 npm run smoke:memory        # 消息持久化 + 记忆检索（FTS / vec / RRF / 迁移）
-npm run smoke:memory-agent  # 蒸馏管线（LLM mock + 游标 + 去重 + 晋升）
+npm run smoke:memory-agent  # 蒸馏管线（LLM mock + 游标 / 去重 / 转录护栏 / 空窗快路径）
+npm run smoke:mcp-client    # 外部 MCP 客户端（握手 / tools / 权限 / 取消 / 分域池 / 热重载）
+npm run smoke:build-hints   # 构建输出启发式（vite/next/webpack/CRA + 降级零误判）
+npm run smoke:skill-desc    # Skill frontmatter 解析 + 渲染/统型 CSS 契约
+npm run smoke:workspace-tools / smoke:host-proxy / smoke:web / smoke:runner-mcp
+npm run smoke:git / smoke:env / smoke:pty / smoke:pty-registry / smoke:pet
 ```
 
 ## 目录结构
@@ -197,15 +211,29 @@ npm run smoke:memory-agent  # 蒸馏管线（LLM mock + 游标 + 去重 + 晋升
 ├── build/                          # 应用图标（ico / png）
 ├── public/
 │   └── pet/                        # 桌宠 MP4 动画素材（idle/working/error）
-├── docs/
-│   └── memory-system-design.md     # 记忆系统设计文档
+├── shared/                         # 跨进程纯类型/契约（不 import node/electron）
+│   ├── app-config.ts               # AppConfig / DeployServer 等配置类型（唯一定义）
+│   ├── ipc-types.ts                # IPC 载荷类型簇（消息/记忆/Git/事件）
+│   ├── mcp.ts                      # McpServerEntry + 启停/传输判别
+│   ├── desktop-api.ts              # DesktopAPI 暴露面契约（preload 受检实现）
+│   ├── prompt-contract.ts          # 提示词节标题 / 凭据键常量
+│   ├── skill-protocol.ts           # load_skill 指令生成器 + 反解正则
+│   └── project-key.ts              # 工程键归一
 ├── electron/
 │   ├── main/index.ts               # 主进程（IPC 注册 · 窗口 · 外链治理）
 │   ├── preload/index.ts            # contextBridge 白名单（~85 IPC 通道）
 │   └── lib/
-│       ├── ai.ts                   # AI dispatch 层（API / CLI 双 adapter 分发）
-│       ├── ai-api.ts               # API adapter（OpenAI / Anthropic SSE）
-│       ├── ai-cli.ts               # CLI adapter（Claude Code stream-json NDJSON）
+│       ├── ai.ts                   # AI 调度层（ModelProvider 编排 · 记忆反哺 · 工具面）
+│       ├── ai-api.ts               # 连接测试（OpenAI / Anthropic 可达性）
+│       ├── ai-cli.ts               # CLI 辅助（skill 提取 · 一次性子进程）
+│       ├── cmd-quote.ts            # Windows cmd 引号纪律（全仓唯一 spawn 口径）
+│       ├── model/
+│       │   ├── providers/          # 模型服务（anthropic / openai / claude-cli / codex / opencode）
+│       │   ├── provider-resolve.ts # 配置 → ModelProvider（工具面 / MCP / 代行通道注入）
+│       │   ├── runner.ts           # 工具循环（native / 自持 MCP / 围栏救援）
+│       │   └── store.ts            # 会话存储（压缩 · 窗口）
+│       ├── mcp/                    # 外部 MCP（client 协议 · external 分域池 · host 代行）
+│       ├── tools/                  # ToolRegistry（内置面 + 外部面合并 · 执行收口）
 │       ├── db.ts                   # SQLite 数据库层（WAL · schema · 扩展加载）
 │       ├── messages.ts             # 消息持久化（CRUD · keyset 分页 · token 追踪）
 │       ├── memory/
@@ -277,15 +305,16 @@ useBuildStore     → useProjectStore
 useAgentStore     → 无 store 依赖
 ```
 
-### AI 双 Adapter
+### ModelProvider 统一层
 
 ```
-渲染层 send() → useChatStore.runAgentLoop()
-                  ├─ API 模式 → ai-api.ts（OpenAI/Anthropic SSE，tool_calls 回渲染层执行）
-                  └─ CLI 模式 → ai-cli.ts（Claude Code stream-json，工具由 CLI 自主执行）
-                       ├─ stream_event → ai-delta / ai-reasoning / cli-tool-event
-                       ├─ user (tool_result) → cli-tool-result / cli-agent-event
-                       └─ result → 权威收口
+渲染层 send() → useChatStore.runAgentLoop() → ai.ts（aiChatStream）
+                  └─ resolveChatProvider → ModelProvider（无状态补全）
+                       ├─ anthropic / openai：HTTP 直连 SSE
+                       ├─ claude-cli：本机 Claude Code CLI（MCP 工具面 · 自持循环）
+                       └─ codex / opencode：同构 CLI 通道
+                  runner 按能力分路：native 工具循环 / 自持 MCP 透传 / 围栏降级
+                  事件桥 → ai-delta / ai-reasoning / cli-tool-event / cli-tool-result / cli-agent-event
 ```
 
 ### 记忆系统数据流

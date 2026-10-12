@@ -1,21 +1,24 @@
 /* ============ 桌宠面板：类手机底部导航 ============ */
 
-/* 全局 reset + 根元素撑满窗口 */
-*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+/* 根元素撑满窗口。
+   ⚠️ 通配 reset 已退役（2026-10）：unlayered 的 `* { margin:0; padding:0 }`
+   会压过 app.css 里 @layer components 的全部组件样式（CSS 层叠规则：
+   unlayered > layered，与特异性无关），导致气泡/按钮/头部的内边距全部归零。
+   reset 职责交给 app.css 引入的 Tailwind preflight（@layer base，正确分层）。 */
 html, body, #root {
   height: 100%;
   overflow: hidden;
-  background: var(--s1, #131315);
-  color: var(--fg, #e0e0e0);
+  background: var(--s1);
+  color: var(--fg);
 }
 
 .pet-panel {
   position: relative;
   height: 100%;
-  background: var(--s1, #131315);
-  color: var(--fg, #e0e0e0);
+  background: var(--s1);
+  color: var(--fg);
   font-family: var(--font-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif);
-  font-size: 13px;
+  font-size: var(--text-sm);
   overflow: hidden;
 }
 
@@ -32,7 +35,9 @@ html, body, #root {
   gap: 2px;
   padding: 0 6px;
   z-index: 10;
-  background: var(--s1, #131315);
+  background: var(--s1);
+  /* BEHAVIOR CONTRACT — do not change geometry, pointer-events, overflow, min-width
+     标题栏整条是窗口拖拽区，按钮必须 no-drag，否则点按钮会拖窗口。 */
   -webkit-app-region: drag;
 }
 .pet-panel__titlebar-drag {
@@ -47,18 +52,18 @@ html, body, #root {
   width: 24px;
   height: 24px;
   border: none;
-  border-radius: 4px;
+  border-radius: var(--radius-medium);
   background: transparent;
-  color: var(--muted, #666);
+  color: var(--muted);
   cursor: pointer;
-  transition: background 0.12s, color 0.12s;
+  transition: background var(--duration-faster), color var(--duration-faster);
 }
 .pet-panel__titlebar-btn:hover {
   background: rgba(255, 255, 255, 0.08);
-  color: var(--fg, #e0e0e0);
+  color: var(--fg);
 }
 .pet-panel__titlebar-btn--close:hover {
-  background: #e81123;
+  background: var(--red);
   color: #fff;
 }
 
@@ -105,8 +110,8 @@ html, body, #root {
   height: 48px;
   display: flex;
   align-items: stretch;
-  border-top: 1px solid var(--edge-hair, #1f1f28);
-  background: var(--s1, #131315);
+  border-top: 1px solid var(--edge-hair);
+  background: var(--s1);
 }
 
 .pet-panel__nav-item {
@@ -119,9 +124,9 @@ html, body, #root {
   padding: 8px 0 10px;
   border: none;
   background: transparent;
-  color: var(--muted, #666);
+  color: var(--muted);
   cursor: pointer;
-  transition: color 0.15s ease;
+  transition: color var(--duration-fast) var(--curve-easy-ease);
   -webkit-tap-highlight-color: transparent;
   position: relative;
 }
@@ -134,12 +139,12 @@ html, body, #root {
 
 /* hover 态 */
 .pet-panel__nav-item:hover {
-  color: var(--fg-2, #aaa);
+  color: var(--fg-2);
 }
 
 /* 选中态：图标 + 文字变主题色，顶部 2px accent 指示条 */
 .pet-panel__nav-item--active {
-  color: var(--accent, #6C63FF);
+  color: var(--accent);
 }
 .pet-panel__nav-item--active::before {
   content: '';
@@ -150,7 +155,7 @@ html, body, #root {
   width: 24px;
   height: 2px;
   border-radius: 1px;
-  background: var(--accent, #6C63FF);
+  background: var(--accent);
 }
 
 /* SVG 图标尺寸统一 */

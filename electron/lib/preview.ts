@@ -24,10 +24,6 @@ export function setPreviewHost(win: BrowserWindow): void {
   })
 }
 
-export function getPreviewUrl(): string | null {
-  return currentUrl
-}
-
 export async function setPreviewBounds(rect: { x: number; y: number; width: number; height: number }): Promise<void> {
   if (!view || !hostWin) return
   lastBounds = rect

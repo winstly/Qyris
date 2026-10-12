@@ -9,7 +9,7 @@
 import { getDb, projectKey } from './db'
 
 /** 以下三型与 src/types 对齐（electron tsconfig 不含 src，故内联维护，改动需两侧同步） */
-export interface ToolCallRecord {
+interface ToolCallRecord {
   id: string
   name: string
   args: Record<string, unknown>
@@ -18,12 +18,12 @@ export interface ToolCallRecord {
   result?: string
 }
 
-export interface ToolResultRecord {
+interface ToolResultRecord {
   toolCallId: string
   content: string
 }
 
-export interface MessageMetaRecord {
+interface MessageMetaRecord {
   skills?: { id: string; name: string }[]
   projectStart?: boolean
   element?: { selector: string; tag: string; id: string; text: string }
@@ -40,7 +40,7 @@ export interface StoredMessage {
   seq: number
 }
 
-export interface AppendMessage {
+interface AppendMessage {
   id: string
   role: 'user' | 'assistant'
   content?: string
@@ -50,7 +50,7 @@ export interface AppendMessage {
   toolResults?: ToolResultRecord[]
 }
 
-export interface MessagePatch {
+interface MessagePatch {
   content?: string
   reasoning?: string | null
   meta?: MessageMetaRecord | null
@@ -170,8 +170,9 @@ async function pageSession(db: Awaited<ReturnType<typeof getDb>>, key: string, s
     : await db.all(`SELECT ${SELECT_COLS} FROM messages WHERE project_key = ? AND session_id = ? AND seq < ? ORDER BY seq DESC LIMIT ?`, key, sessionId, beforeSeq, limit)
   const messages = (rows as unknown as MessageRow[]).map(rowToMessage).reverse()
   const oldestSeq = messages.length > 0 ? messages[0].seq : null
+  // get() 无结果返回 null（不是 undefined）——用 != null 判「还有更早行」
   const hasMore = oldestSeq !== null
-    && (await db.get('SELECT 1 FROM messages WHERE project_key = ? AND session_id = ? AND seq < ? LIMIT 1', key, sessionId, oldestSeq)) !== undefined
+    && (await db.get('SELECT 1 FROM messages WHERE project_key = ? AND session_id = ? AND seq < ? LIMIT 1', key, sessionId, oldestSeq)) != null
   return { messages, hasMore, oldestSeq }
 }
 

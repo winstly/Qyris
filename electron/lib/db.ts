@@ -20,7 +20,7 @@ import { getConfig } from './config'
 import { storageDir } from './storage'
 
 /** 预编译语句的 async 代理（内部通过 Worker 执行） */
-export interface PreparedStatement {
+interface PreparedStatement {
   get(...params: unknown[]): Promise<Record<string, unknown> | null | undefined>
   all(...params: unknown[]): Promise<Record<string, unknown>[]>
   run(...params: unknown[]): Promise<{ changes: number; lastInsertRowid: number }>

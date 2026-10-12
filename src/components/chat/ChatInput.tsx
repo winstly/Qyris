@@ -95,12 +95,23 @@ export function ChatInput() {
     } else {
       aiMsg = userText
     }
+    // 失败回填：send early return（无项目/状态异常/空文本）时恢复输入现场，
+    // 用户输入不凭空消失（func-chat P1-2）
+    const sendOut = async () => {
+      const ok = await send(aiMsg, meta)
+      if (!ok) {
+        setText(userText)
+        prevTextRef.current = userText
+        setSelectedSkills(selectedSkills)
+        setPendingElement(meta.element ?? null)
+      }
+    }
     setText('')
     prevTextRef.current = ''
     setSelectedSkills([])
     setPendingElement(null)
     requestAnimationFrame(resize)
-    void send(aiMsg, meta)
+    void sendOut()
   }
 
   const onChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {

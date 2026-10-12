@@ -49,6 +49,7 @@ export function AskUserCard({ call }: { call: ToolCall }) {
       {isActive && (
         <div className="askcard__free">
           <input
+            aria-label={options.length ? '自定义回答' : '回答'}
             value={freeText}
             onChange={(e) => setFreeText(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') submit(freeText) }}

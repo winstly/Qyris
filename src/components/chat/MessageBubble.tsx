@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef, useMemo, memo } from 'react'
 import type { ChatMessage, SkillMeta } from '@/types'
 import { IconClose } from '@/components/common/icons'
+import { AppIcon } from '@/components/common/AppIcon'
 import { Markdown } from './Markdown'
-import { ToolCallCard } from './ToolCallCard'
+import { ToolCallCard, stripMcpPrefix } from './ToolCallCard'
 import { AskUserCard } from './AskUserCard'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { useAppStore } from '@/store/useAppStore'
@@ -14,24 +15,32 @@ export const MessageBubble = memo(function MessageBubble({ msg }: { msg: ChatMes
     return <UserMessage msg={msg} />
   }
 
-  const askCalls = msg.toolCalls?.filter((tc) => tc.name === 'askUserQuestion') ?? []
-  const otherCalls = msg.toolCalls?.filter((tc) => tc.name !== 'askUserQuestion') ?? []
+  // 与 ToolCallCard 同口径剥 MCP 前缀再分流——历史数据的 ask 事件可能带 mcp__ 全名落库
+  const isAsk = (name: string): boolean => stripMcpPrefix(name) === 'askUserQuestion'
+  const askCalls = msg.toolCalls?.filter((tc) => isAsk(tc.name)) ?? []
+  const otherCalls = msg.toolCalls?.filter((tc) => !isAsk(tc.name)) ?? []
   const hasText = msg.content.trim() !== ''
   const hasReasoning = (msg.reasoning ?? '').trim() !== ''
   const showCursor = msg.pending && hasText && (msg.toolCalls?.length ?? 0) === 0
 
   return (
     <div className={`msg msg--ai ${msg.error ? 'msg--error' : ''}`}>
-      {(hasText || hasReasoning || msg.pending) && (
-        <div className="msg__bubble">
-          {hasReasoning && <ReasoningBlock content={msg.reasoning!} />}
-          {hasText && <Markdown source={msg.content} />}
-          {showCursor && <span className="type-cursor" aria-label="正在输出" />}
-        </div>
-      )}
+      <div className="msg__avatar" aria-hidden>
+        <AppIcon className="app-logo" />
+      </div>
+      <div className="msg__content">
+        <div className="msg__name">轻驭</div>
+        {(hasText || hasReasoning || msg.pending) && (
+          <div className="msg__bubble">
+            {hasReasoning && <ReasoningBlock content={msg.reasoning!} />}
+            {hasText && <Markdown source={msg.content} />}
+            {showCursor && <span className="type-cursor" aria-label="正在输出" />}
+          </div>
+        )}
 
-      {otherCalls.map((tc) => <ToolCallCard key={tc.id} call={tc} />)}
-      {askCalls.map((tc) => <AskUserCard key={tc.id} call={tc} />)}
+        {otherCalls.map((tc) => <ToolCallCard key={tc.id} call={tc} />)}
+        {askCalls.map((tc) => <AskUserCard key={tc.id} call={tc} />)}
+      </div>
     </div>
   )
 })
@@ -86,8 +95,8 @@ function extractUserText(content: string): string {
 /** 用户消息：hover 出「编辑」，编辑态可改后重发；编辑非末条时有回退提醒 */
 function UserMessage({ msg }: { msg: ChatMessage }) {
   const citations = msg.meta?.citations ?? []
-  const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart || msg.meta?.element || citations.length > 0)
-  const userText = hasMeta ? (msg.meta?.projectStart ? null : extractUserText(msg.content) || null) : null
+  const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart || msg.meta?.deployStart || msg.meta?.element || citations.length > 0)
+  const userText = hasMeta ? (msg.meta?.projectStart || msg.meta?.deployStart ? null : extractUserText(msg.content) || null) : null
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(msg.content)
   const [editSkills, setEditSkills] = useState(msg.meta?.skills ?? [])
@@ -105,7 +114,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
     return st !== 'idle' && st !== 'error'
   })
 
-  const editableText = msg.meta?.projectStart ? '' : extractUserText(msg.content)
+  const editableText = msg.meta?.projectStart || msg.meta?.deployStart ? '' : extractUserText(msg.content)
   const originalSkills = msg.meta?.skills ?? []
 
   /** 编辑态选/取消 skill（toggle）：已选的再选=移除；只剥掉 / 前缀保留原文 */
@@ -143,6 +152,10 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
   if (editing) {
     return (
       <div className="msg msg--user">
+        <div className="msg__avatar msg__avatar--user" aria-hidden>
+          <i className="od-icon ri-user-3-fill" />
+        </div>
+        <div className="msg__content msg__content--user">
         {/* 编辑态 skill 卡片（可删除） */}
         {editSkills.length > 0 && (
           <div className="msg__meta-cards">
@@ -167,6 +180,14 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
             <div className="msg__meta-card">
               <span className="msg__meta-card-label">启动</span>
               <span className="msg__meta-card-name">AI 编译（识别启动命令）</span>
+            </div>
+          </div>
+        )}
+        {msg.meta?.deployStart && (
+          <div className="msg__meta-cards">
+            <div className="msg__meta-card">
+              <span className="msg__meta-card-label">部署</span>
+              <span className="msg__meta-card-name">AI 部署（自动识别部署方式）</span>
             </div>
           </div>
         )}
@@ -221,12 +242,17 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
             <button className="btn btn--primary btn--sm" onClick={() => void submit()} disabled={!draft.trim() && editSkills.length === 0}>重新发送</button>
           </div>
         </div>
+        </div>
       </div>
     )
   }
 
   return (
     <div className="msg msg--user">
+      <div className="msg__avatar msg__avatar--user" aria-hidden>
+        <i className="od-icon ri-user-3-fill" />
+      </div>
+      <div className="msg__content msg__content--user">
       {/* 系统级元数据卡片 */}
       {hasMeta && (
         <div className="msg__meta-cards">
@@ -234,6 +260,12 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
             <div className="msg__meta-card">
               <span className="msg__meta-card-label">启动</span>
               <span className="msg__meta-card-name">AI 编译（识别启动命令）</span>
+            </div>
+          )}
+          {msg.meta!.deployStart && (
+            <div className="msg__meta-card">
+              <span className="msg__meta-card-label">部署</span>
+              <span className="msg__meta-card-name">AI 部署（自动识别部署方式）</span>
             </div>
           )}
           {msg.meta!.skills?.map((s) => {
@@ -279,6 +311,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
           编辑
         </button>
       )}
+      </div>
     </div>
   )
 }

@@ -6,17 +6,13 @@
  */
 import { create } from 'zustand'
 import { api } from '@/services/desktop'
-import type { MemoryCategory, MemoryHit, MemoryItem, MemoryStats, MemoryTier } from '@/types'
+import type { MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, MemoryTier } from '@/types'
 
 export type MemoryTierFilter = 'all' | MemoryTier
 export type MemoryCategoryFilter = 'all' | MemoryCategory
 
-export interface MemoryUpdatePatch {
-  title?: string
-  content?: string
-  category?: string
-  importance?: number
-}
+/** 字段更新载荷（唯一定义在 shared/ipc-types 的 MemoryPatch，此为历史名别名） */
+export type MemoryUpdatePatch = MemoryPatch
 
 interface MemoryState {
   /** 全量列表（memoryList 结果；非搜索态的数据源） */

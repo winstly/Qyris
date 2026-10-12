@@ -1,0 +1,246 @@
+/**
+ * DesktopAPI 唯一定义（window.desktopAPI 的暴露面契约）：preload 按它实现（受检），
+ * 渲染层经 desktop-api.d.ts 的全局声明消费。载荷类型全部出自 shared/ 纯类型模块。
+ */
+import type {
+  AiCompletion, AiDeltaPayload, AiReasoningPayload, ChatMessage, CliAgentEventPayload, McpTestResult,
+  CliToolEventPayload, CliToolResultPayload, FileContent, GitStatus, MemoryHit, MemoryItem,
+  MemoryStats, MessageMeta, PreviewConsoleEntry, SkillMeta, ToolCall, ToolResultEntry, TreeNode,
+} from './ipc-types'
+import type { AppConfig, DeployServer } from './app-config'
+import type { McpServerEntry } from './mcp'
+import type { SnapshotVersion } from './types'
+
+export type DesktopEventSub<T> = (cb: (payload: T) => void) => () => void
+
+export interface DesktopAPI {
+  // 文件系统
+  listDir: (projectRoot: string, dir: string) => Promise<TreeNode[]>
+  /** 批量目录列表：一次 IPC 取多个目录内容（主进程并发 fs.readdir） */
+  listDirBatch: (projectRoot: string, dirs: string[]) => Promise<Record<string, TreeNode[]>>
+  searchFiles: (projectRoot: string, query: string) => Promise<{ files: string[]; truncated: boolean }>
+  /** 内容搜索（JS 正则；跳过 node_modules 与二进制；有界遍历） */
+  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean }) =>
+    Promise<{ matches: { path: string; line: number; text: string }[]; fileCount: number; truncated: boolean }>
+  readTextFile: (projectRoot: string, filePath: string) => Promise<FileContent>
+  /** expectedMtimeMs：调用方持有的磁盘基线；磁盘更新且未 force 时抛 FILE_CONFLICT:: 前缀错误 */
+  writeTextFile: (projectRoot: string, filePath: string, content: string, opts?: { expectedMtimeMs?: number | null; force?: boolean }) => Promise<{ mtimeMs: number }>
+  editTextFile: (projectRoot: string, filePath: string, oldString: string, newString: string) => Promise<{ replaced: number; lineCount: number }>
+  snapshotFile: (projectRoot: string, sessionId: string, path: string, version?: boolean) => Promise<void>
+  snapshotVersions: (projectRoot: string, path: string) => Promise<SnapshotVersion[]>
+  snapshotRead: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) => Promise<string | null>
+  snapshotDiff: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) => Promise<string>
+  snapshotRestoreAt: (projectRoot: string, sessionId: string, path: string, versionKey?: string | null) => Promise<void>
+  listSnapshots: (projectRoot: string) => Promise<Record<string, { ts: number; sessionId: string }>>
+  restoreFile: (projectRoot: string, path: string) => Promise<void>
+  restoreSession: (projectRoot: string, sessionId: string) => Promise<number>
+  clearProjectSnapshots: (projectRoot: string) => Promise<void>
+  // 消息持久化（SQLite write-through + keyset 分页，见 useChatStore 头注释）
+  messagesRecent: (projectRoot: string, limit?: number) => Promise<{ sessionId: string | null; messages: ChatMessage[]; hasMore: boolean; oldestSeq: number | null; total: number }>
+  saveCurrentSession: (projectRoot: string, sessionId: string) => Promise<void>
+  messagesBefore: (projectRoot: string, sessionId: string, beforeSeq: number, limit?: number) => Promise<{ messages: ChatMessage[]; hasMore: boolean; oldestSeq: number | null }>
+  messageAppend: (projectRoot: string, sessionId: string, message: ChatMessage) => Promise<{ seq: number }>
+  messagePatch: (projectRoot: string, sessionId: string, id: string, patch: { content?: string; reasoning?: string | null; tool?: { toolCalls?: ToolCall[]; toolResults?: ToolResultEntry[] }; meta?: MessageMeta | null }) => Promise<void>
+  messagesTruncate: (projectRoot: string, sessionId: string, afterSeq: number) => Promise<void>
+  projectDataDelete: (projectRoot: string) => Promise<void>
+  saveSessionTokens: (projectRoot: string, sessionId: string, tokens: { input: number; output: number }) => Promise<void>
+  loadSessionTokens: (projectRoot: string, sessionId: string) => Promise<{ input: number; output: number }>
+  createEntry: (projectRoot: string, parentDir: string, name: string, isDir: boolean) => Promise<TreeNode>
+  renameEntry: (projectRoot: string, filePath: string, newName: string) => Promise<string>
+  deleteEntry: (projectRoot: string, filePath: string) => Promise<void>
+  copyEntry: (projectRoot: string, srcPath: string, destDir: string) => Promise<TreeNode>
+  moveEntry: (projectRoot: string, srcPath: string, destDir: string) => Promise<TreeNode>
+  deleteProjectFiles: (projectRoot: string) => Promise<void>
+
+  // 子进程 / watcher
+  runProject: (projectRoot: string, name: string, command: string) => Promise<number>
+  runOnce: (projectRoot: string, command: string, token?: string) => Promise<{ code: number | null; output: string }>
+  runOnceCancel: (token?: string) => Promise<number>
+  checkUrl: (url: string) => Promise<boolean>
+  portOwner: (port: number) => Promise<{ pid: number; name: string } | null>
+  previewConsoleAttach: (url: string | null) => Promise<void>
+  previewSetUrl: (url: string) => Promise<void>
+  previewBounds: (rect: { x: number; y: number; width: number; height: number }) => Promise<void>
+  previewReload: () => Promise<void>
+  previewClearCache: () => Promise<void>
+  previewDevtools: () => Promise<void>
+  previewExecuteJs: (code: string) => Promise<unknown>
+  previewSetVisible: (visible: boolean) => Promise<void>
+  previewConsoleHistory: () => Promise<PreviewConsoleEntry[]>
+  stopProject: (projectRoot?: string | null, name?: string | null) => Promise<void>
+  startWatching: (projectRoot: string) => Promise<void>
+  stopWatching: () => Promise<void>
+  stopWatchingProject: (projectRoot: string) => Promise<void>
+
+  // 配置与密钥（无 getSecret）
+  getConfig: () => Promise<AppConfig>
+  setTheme: (theme: string) => void
+  mergeConfig: (patch: unknown) => Promise<void>
+  /** 外部 MCP server 测试连接（stdio/streamableHttp 均可；独立建连→tools/list→收割）。
+   *  entry 形状 = McpServerEntry（唯一定义 shared/mcp.ts），主进程 sanitize 兜底 */
+  mcpTest: (name: string, entry: McpServerEntry, scope?: string) => Promise<McpTestResult>
+  /** 进程级测试状态（组件卸载不丢；启动/切工程自动测） */
+  mcpTestState: () => Promise<Record<string, McpTestResult>>
+  onMcpTestState: DesktopEventSub<Record<string, McpTestResult>>
+  /** 项目域 MCP server 表整表写入（主进程 RMW 读最新盘上状态） */
+  mcpSaveProjectServers: (projectRoot: string, servers: Record<string, McpServerEntry>) => Promise<boolean>
+  /** 全局域 MCP server 表整表写入 */
+  mcpSaveGlobalServers: (servers: Record<string, McpServerEntry>) => Promise<boolean>
+  setSecret: (key: string, value: string) => Promise<void>
+  hasSecret: (key: string) => Promise<boolean>
+  deleteSecret: (key: string) => Promise<void>
+
+  // Skills 目录
+  scanSkills: (dirs: string[]) => Promise<SkillMeta[]>
+  readSkill: (dirs: string[], skillId: string) => Promise<string | null>
+  pickSkillsDir: () => Promise<string | null>
+  projectSkillImportZip: (dir: string, zipPath: string) => Promise<{ ok: boolean; name?: string; error?: string }>
+  projectSkillImportDir: (dir: string, srcDir: string) => Promise<{ ok: boolean; name?: string; count?: number; error?: string }>
+  projectSkillDelete: (dir: string, skillId: string) => Promise<{ ok: boolean; error?: string }>
+  projectSkillPickZip: () => Promise<string | null>
+  projectSkillPickDir: () => Promise<string | null>
+
+  // 创建项目 / Git
+  createEmptyProject: (parentDir: string, name: string) => Promise<string>
+  cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => Promise<string[]>
+  cloneCancel: () => Promise<void>
+  onCloneProgress: DesktopEventSub<{ index: number; total: number; name: string; stage: string; pct: number | null }>
+  testRepo: (url: string) => Promise<{ valid: boolean; branches: string[]; error: string | null }>
+  gitRepoInfo: (dir: string) => Promise<{ isRepo: boolean; currentBranch: string | null; branches: string[] }>
+  gitCheckout: (dir: string, branch: string) => Promise<void>
+  gitStatus: (dir: string) => Promise<GitStatus>
+  gitIsRepoRoot: (dir: string) => Promise<boolean>
+  gitDiff: (dir: string, path?: string, staged?: boolean) => Promise<string>
+  gitAdd: (dir: string, paths?: string[]) => Promise<void>
+  gitUnstage: (dir: string, paths: string[]) => Promise<void>
+  gitCommit: (dir: string, message: string) => Promise<string>
+  gitPull: (dir: string) => Promise<string>
+  gitFetch: (dir: string) => Promise<string>
+  gitPush: (dir: string) => Promise<string>
+  gitDiscard: (dir: string, paths: string[]) => Promise<void>
+  pickParentDir: () => Promise<string | null>
+
+  // AI
+  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string }) => Promise<AiCompletion>
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) => Promise<string>
+  aiCancel: (requestId: string) => Promise<void>
+
+  // 记忆（分层记忆系统 P1；projectRoot=null 表示仅全局）
+  memoryList: (projectRoot: string | null, includeArchived?: boolean) => Promise<{ items: MemoryItem[] }>
+  memorySearch: (query: string, projectRoot: string | null, topK?: number, includeArchived?: boolean) => Promise<{ hits: MemoryHit[]; degraded: boolean }>
+  memoryUpdate: (id: string, patch: { title?: string; content?: string; category?: string; importance?: number }) => Promise<MemoryItem>
+  memoryDelete: (id: string) => Promise<void>
+  memoryMoveScope: (id: string, target: 'project' | 'user', projectRoot?: string) => Promise<MemoryItem>
+  memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) => Promise<void>
+  memoryStats: () => Promise<MemoryStats>
+  // 记忆管线 P2（渲染层消费面；electron 侧由 memory 管线提供）
+  /** 工作记忆会话滚动摘要（category='summary' 的 active 条目；无则 null） */
+  memorySessionContext: (projectRoot: string, sessionId: string) => Promise<{ summary: string | null }>
+  /** 滚动提取触发（fire-and-forget：主进程按轮数/频控决定是否真的跑） */
+  memoryMaybeExtract: (projectRoot: string, sessionId: string) => Promise<void>
+  /** 会话收尾提取 + 短期记忆晋升判断（clear/关工程前调用，旧 sessionId 还在手时） */
+  sessionEnded: (projectRoot: string, sessionId: string) => Promise<void>
+  /** 手动触发一次 mem agent 整理（记忆面板「立即整理」） */
+  memoryRunNow: (projectRoot: string) => Promise<{ ok: boolean; error?: string; ops?: number }>
+  /** 该工程是否正在整理记忆（主进程排队/执行中） */
+  memoryExtracting: (projectRoot: string) => Promise<boolean>
+  /** 教训采集：命令失败 / 服务启动失败（fire-and-forget，同会话重复由主进程去重） */
+  noteLesson: (projectRoot: string, sessionId: string, lesson: { title: string; content: string }) => Promise<void>
+  /** 导出记忆为 JSON 备份（主进程弹保存框；用户取消回 ok=false + 取消文案） */
+  memoryExport: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
+    Promise<{ ok: boolean; path?: string; count?: number; error?: string }>
+  /** 从 JSON 备份导入记忆（主进程弹打开框；同 id 跳过，嵌入可能耗时秒级） */
+  memoryImport: () =>
+    Promise<{ ok: boolean; imported?: number; skipped?: number; error?: string }>
+
+  // 数据存储位置（对话历史 / 记忆 / 快照所在目录）
+  getDataDir: () => Promise<string>
+  selectDataDir: () => Promise<string | null>
+  migrateDataDir: (targetDir: string) => Promise<{ ok: boolean; error?: string }>
+
+  // 窗口
+  pickDirectory: () => Promise<string | null>
+  pickKeyFile: () => Promise<string | null>
+  setWindowTitle: (title: string) => Promise<void>
+  startElementPick: () => Promise<void>
+  openExternal: (url: string) => Promise<void>
+  openInExplorer: (filePath: string) => Promise<void>
+  /** 窗口三键（自绘标题栏）：关闭走主进程 close 分流（ask/minimize/quit），与系统 X 同路径 */
+  minimizeWindow: () => Promise<void>
+  toggleMaximize: () => Promise<void>
+  requestWindowClose: () => Promise<void>
+  /** 主窗口关闭询问的回传（ask 流程；remember=true 时主进程落盘 closeAction 偏好） */
+  resolveClose: (action: 'minimize' | 'quit', remember: boolean) => void
+
+  // 桌宠
+  togglePetPanel: () => void
+  requestPetState: () => void
+  petMoveBy: (dx: number, dy: number) => void
+  /** 请求弹出桌宠右键菜单（打开工作台 / 退出应用） */
+  petContextMenu: () => void
+  /** 本窗口当前对话状态上报（桌宠动画聚合） */
+  setPetChatState: (status: string) => void
+  /** 面板窗口控制（无原生标题栏，由渲染层自绘按钮触发） */
+  closePanel: () => void
+// 终端 tab（PTY）
+ptyCreate: (termId: string, cols: number, rows: number, cwd?: string) => Promise<{ ok: boolean; shell: string; pid: number }>
+ptyInput: (termId: string, data: string) => void
+ptyResize: (termId: string, cols: number, rows: number) => void
+ptyKill: (termId: string) => void
+onPtyData: DesktopEventSub<{ termId: string; data: string }>
+onPtyExit: DesktopEventSub<{ termId: string; code: number }>
+// 发布 tab（SSH 部署运维）
+  deployListServers: (projectRoot: string) => Promise<DeployServer[]>
+  deploySaveServer: (server: DeployServer, projectRoot: string) => Promise<DeployServer[]>
+  deployDeleteServer: (serverId: string, projectRoot: string) => Promise<DeployServer[]>
+deploySetCredential: (serverId: string, secret: string) => Promise<void>
+deployHasCredential: (serverId: string) => Promise<boolean>
+deployDeleteCredential: (serverId: string) => Promise<void>
+deployTestConnection: (serverId: string, projectRoot: string) => Promise<{ ok: boolean; error?: string }>
+deployExec: (serverId: string, command: string, runId: string, projectRoot: string, allowDangerous?: boolean) =>
+  Promise<{ blocked?: boolean; reason?: string; exitCode: number | null; error?: string }>
+deployExecCancel: (runId: string) => void
+onDeployOutput: DesktopEventSub<{ runId: string; stream: 'stdout' | 'stderr'; line: string }>
+onDeployExit: DesktopEventSub<{ runId: string; code: number | null }>
+/** 隐藏/恢复桌宠窗口（设置项「隐藏桌宠」） */
+setPetHidden: (hidden: boolean) => void
+  /** 跨窗口项目同步：通知其余窗口 projectPath / openProjects 变化 */
+  notifyProjectChanged: (projectPath: string | null, openProjects: string[], closedProject?: string | null) => void
+  /** 桌宠视频路径解析：dev 走 Vite dev server，打包后走 file:// + asarUnpack */
+  resolveVideoUrl: (filename: string) => Promise<string>
+  onPetState: DesktopEventSub<'idle' | 'working' | 'waiting' | 'error'>
+
+  // 对话镜像（桌宠面板 ↔ 主窗口同一场对话）
+  /** 发起窗口推送稳定点（user-message/finalized/cleared），主进程转发给其余窗口 */
+  relayChatMirror: (p: { kind: 'user-message' | 'finalized' | 'cleared'; projectRoot: string; message?: unknown; msg?: unknown }) => void
+  /** 主窗口关闭被拦截（closeAction=ask）：渲染层弹询问框后必须回 resolveClose */
+  onCloseRequest: DesktopEventSub<void>
+  /** 最大化状态推送（自绘标题栏按钮图标跟切） */
+  onWindowState: DesktopEventSub<{ maximized: boolean }>
+  /** 关闭询问被主进程超时兜底收口：渲染层收起询问框 */
+  onCloseCancel: DesktopEventSub<void>
+  /** 对话镜像 relay（对方窗口的稳定点推送） */
+  onChatMirror: DesktopEventSub<{ kind: 'user-message' | 'finalized' | 'cleared'; projectRoot: string; message?: unknown; msg?: unknown }>
+  /** 一次 AI 请求收场广播（发起窗口除外）：镜像侧据此收口状态并从库校正 */
+  onChatRequestDone: DesktopEventSub<{ requestId: string; projectRoot: string | null; hasError: boolean }>
+
+  // 事件订阅（返回取消函数）
+  onBuildOutput: DesktopEventSub<{ name: string; stream: 'stdout' | 'stderr'; line: string; projectRoot?: string }>
+  onBuildExit: DesktopEventSub<{ name: string; code: number; projectRoot?: string }>
+  onAiDelta: DesktopEventSub<AiDeltaPayload>
+  onAiReasoning: DesktopEventSub<AiReasoningPayload>
+  onCliToolEvent: DesktopEventSub<CliToolEventPayload>
+  onCliToolResult: DesktopEventSub<CliToolResultPayload>
+  onCliAgentEvent: DesktopEventSub<CliAgentEventPayload>
+  onMemoryExtractState: DesktopEventSub<{ projectRoot: string; extracting: boolean }>
+  /** 记忆数据变更广播（any 写路径完成后主进程发，all=true 表示 clear('all') 等全库变更） */
+  onMemoryChanged: DesktopEventSub<{ all: boolean; projectKeys: string[] }>
+  onFsChanged: DesktopEventSub<{ paths: string[]; projectRoot?: string }>
+  /** 盘上配置变更广播（载荷 = 实际变化的顶层键，多窗口设置同步用） */
+  onConfigChanged: DesktopEventSub<string[]>
+  onThemeChanged: DesktopEventSub<string>
+  /** 跨窗口项目切换广播（另一窗口 open/close project 后触发） */
+  onProjectChanged: DesktopEventSub<{ projectPath: string | null; openProjects: string[]; closedProject?: string | null }>
+  onElementPicked: DesktopEventSub<{ selector: string; tag: string; id: string; text: string }>
+  onPreviewConsole: DesktopEventSub<PreviewConsoleEntry>
+}

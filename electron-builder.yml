@@ -18,13 +18,26 @@ files:
   - node_modules/better-sqlite3/prebuilds/**
   - node_modules/better-sqlite3/build/**
   - node_modules/sqlite-vec/**
+  - node_modules/node-pty/package.json
+  - node_modules/node-pty/lib/**
+  - node_modules/node-pty/prebuilds/**
+  - node_modules/node-pty/scripts/**
 asar: true
 # native 运行时解包到真实文件系统：SQLite loadable extension（sqlite-vec）无法从 asar 虚拟路径
 # dlopen；better-sqlite3 的入口路径经 require.resolve 重定向到 app.asar.unpacked 后由 db worker 加载
 asarUnpack:
   - node_modules/better-sqlite3/**
   - node_modules/sqlite-vec/**
+  # node-pty：pty.node/conpty.dll/spawn-helper 从真实路径 spawn（asar 内会挂），
+  # 含 package.json（VSCode 陷阱：缺它 ESM 误判 → ConnectNamedPipe 挂死）
+  - node_modules/node-pty/**
   - out/renderer/pet/*.mp4
+  # MCP server：由 claude CLI 作为外部进程 spawn（providers/claude-cli.ts 的 mcp-config），
+  # 外部进程解析不了 asar 虚拟路径，必须落真实文件系统。
+  # ⚠️ 必须连共享 chunk 一起解包：mcp-server 与 index 共享 runner-*.js，
+  # 只解包 mcp-server 单文件会让它 require 不到 chunk、加载即崩（打包态实测）。
+  - out/main/mcp-server.js
+  - out/main/*.js
 # 窗口图标随包分发（BrowserWindow icon 运行时读取）
 extraResources:
   - { from: build/icon.png, to: icon.png }

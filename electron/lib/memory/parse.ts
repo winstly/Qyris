@@ -34,6 +34,8 @@ export type AgentOp = AgentCreateOp | AgentPatchOp | AgentArchiveOp
 export interface AgentOutput {
   ops: AgentOp[]
   summary: string | null
+  /** 源对象里是否有 ops/operations/actions 数组键：false = 模型退化输出（{} 或纯 summary），调用方据此决定是否重试 */
+  opsKeyPresent: boolean
 }
 
 // ---------- 常量 ----------
@@ -130,7 +132,7 @@ function tryParseJson(slice: string): unknown | undefined {
     return JSON.parse(slice)
   } catch {
     const fixed = stripTrailingCommas(slice)
-      .replace(/[""]/g, "'")
+      .replace(/[\u201C\u201D]/g, '"') // 花引号 → 直双引号（显式码点，防引号归一化改坏）
       .replace(/\\(?!["\\/bfnrt])/g, '/')
     try {
       return JSON.parse(fixed)
@@ -182,8 +184,10 @@ export function parseAgentJson(raw: string): AgentOutput | null {
   //  3. 数组 [{...}] → 直接当 rawOps
   let rawOps: unknown[]
   let summary: string | null = null
+  let opsKeyPresent = false
   if (Array.isArray(parsed)) {
     rawOps = parsed
+    opsKeyPresent = true
   } else if (parsed && typeof parsed === 'object') {
     const obj = parsed as Record<string, unknown>
     // --json-schema 结构化输出：优先取 structured_output
@@ -195,6 +199,7 @@ export function parseAgentJson(raw: string): AgentOutput | null {
       : Array.isArray(src.operations) ? src.operations
       : Array.isArray(src.actions) ? src.actions
       : []
+    opsKeyPresent = Array.isArray(src.ops) || Array.isArray(src.operations) || Array.isArray(src.actions)
     summary = typeof src.summary === 'string' ? src.summary : null
   } else {
     return null
@@ -251,5 +256,5 @@ export function parseAgentJson(raw: string): AgentOutput | null {
   if (dropped.length > 0) {
     console.warn(`[mem-agent] ${dropped.length} 个非法 op 已剔除（${[...new Set(dropped)].join(',')}）`)
   }
-  return { ops, summary: summary?.trim() || null }
+  return { ops, summary: summary?.trim() || null, opsKeyPresent }
 }

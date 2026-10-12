@@ -67,6 +67,11 @@ for (const { name, mac } of productDirs) {
     'out/renderer/pet/working.mp4',
     'out/renderer/pet/error.mp4',
     'node_modules/better-sqlite3/package.json',
+    // node-pty：terminal 依赖二进制解包断言（mac 构建机陈旧漏资源的守卫）
+    'node_modules/node-pty/package.json',
+    'node_modules/node-pty/prebuilds',
+    // MCP server：被 claude CLI 外部 spawn，必须解包（缺了 = claude-cli 工具模式静默失联）
+    'out/main/mcp-server.js',
   ]
 
   const asarRequired = [

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { useAppStore } from '@/store/useAppStore'
 import { IconClose } from './icons'
 
@@ -33,6 +34,8 @@ export function Dialogs() {
     }
   }, [dialog])
 
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
+
   if (!dialog) return null
 
   const isPrompt = dialog.kind === 'prompt'
@@ -56,7 +59,7 @@ export function Dialogs() {
   }
 
   return (
-    <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !confirming) cancel() }}>
+    <div ref={trapRef} className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !confirming) cancel() }}>
       <div className="modal" role="dialog" aria-modal="true" aria-label={dialog.title}>
         <div className="modal__head">
           <span>{dialog.title}</span>
@@ -124,7 +127,7 @@ export function Dialogs() {
                 autoFocus
                 disabled={(isPrompt && !value.trim()) || confirming}
               >
-                {confirming ? (dialog.confirmingText ?? '处理中…') : isAlert ? '知道了' : '确定'}
+                {confirming ? (dialog.confirmingText ?? '处理中…') : isAlert ? '知道了' : dialog.confirmLabel ?? '确定'}
               </button>
             </>
           )}

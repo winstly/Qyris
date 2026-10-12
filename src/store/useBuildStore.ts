@@ -6,14 +6,17 @@
  * 多工程常驻：状态按工程（projectRoot）隔离。build-output/build-exit 事件携带 projectRoot，
  * 后台工程（非当前）的输出也照常写入对应切片，切回时状态已是最新。
  *
- * TODO(适配): 以下正则是针对 vite / next / webpack / create-react-app 的常见输出总结的，
- * 换其他构建工具时请在 READY_HINTS / FATAL_HINTS 中补充关键词。
+ * 行级启发式（提示词表/URL/端口短语）在 utils/buildHints（纯函数 + smoke 覆盖）；
+ * 本 store 只持相位策略与探测。未识别的构建工具不误判：行信号为空时由 HTTP 探测 + 退出码兜底。
  */
 import { create } from 'zustand'
 import { api } from '@/services/desktop'
 import { useProjectStore } from './useProjectStore'
 import { useChatStore } from './useChatStore'
 import type { BuildPhase } from '@/types'
+import {
+  extractCommandPort, extractLineUrl, extractLineUrlFromPort, isDeployLine, isFatalLine, isRunLine, localUrl, normalizeUrl,
+} from '@/utils/buildHints'
 
 const MAX_LOG_LINES = 500
 
@@ -54,88 +57,6 @@ function deriveProbeTarget(urlHint: string | undefined, command: string): string
   return port ? localUrl(port) : null
 }
 
-// 编译/构建完成 → 部署中（尚未确认监听端口）
-const DEPLOY_HINTS: RegExp[] = [
-  /compiled successfully/i, /webpack compiled/i, /built in/i, /transformed/i,
-]
-
-// 服务已启动/监听 → 运行中（即便无可预览 URL，如 Java / Go 后端）
-const RUN_HINTS: RegExp[] = [
-  /ready in/i, /listening/i, /running on/i, /serving on/i,
-  /started .* in \d/i, /started .* on port/i,
-  /started (server|development|worker)/i, /server (is )?running/i,
-  /accepting connections/i, /listen on/i,
-]
-
-const FATAL_HINTS: RegExp[] = [
-  /failed to compile/i, /error TS\d+/i, /SyntaxError/i, /\bEADDRINUSE\b/,
-  /Cannot find module/i, /Module not found/i, /^error:/im,
-]
-
-const URL_RE = /https?:\/\/[^\s"'<>）】]+/i
-
-/** 无完整 URL 时的高置信端口短语（仅在该行没有可归一 URL 时兜底）：
- *  - python -m http.server 旧格式「Serving HTTP on 0.0.0.0 port 8000」
- *  - 通用英文「listening/running/started … on (port) 8000」
- *  - 中文输出「端口 8000 / 监听端口: 8000」
- *  - 无协议的 host:port（0.0.0.0:8000 / localhost:3000） */
-const PORT_LINE_RES: RegExp[] = [
-  /serving http on [^\n]*? port (\d{1,5})/i,
-  /\b(?:listening|running|serving|started|available)\b[^\n]{0,40}?\bon (?:port )?(\d{1,5})\b/i,
-  /(?:端口|监听端口|端口号)[:：]?\s*(\d{1,5})/,
-  /\b(?:0\.0\.0\.0|127\.0\.0\.1|localhost):(\d{1,5})\b/i,
-]
-
-function validPort(raw: string): number | null {
-  const n = Number(raw)
-  return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null
-}
-
-function localUrl(port: number): string {
-  return `http://localhost:${port}`
-}
-
-/** 从启动命令提示端口：--port 8000 / http.server 8000 / PORT=3000 / -p 8080 / :8000
- *  （按置信度序取首个命中的最后一个）。
- *  用于「进程已运行但输出自始至终没有可识别地址」时的预览地址兜底合成 */
-export function extractCommandPort(cmd: string): number | null {
-  const patterns: RegExp[] = [
-    /(?:^|\s)--port[= ](\d{1,5})(?:\s|$)/i,
-    /\bhttp\.server\s+(\d{1,5})(?:\s|$)/i, // python -m http.server 8000（标准库，位置参数即端口）
-    /(?:^|\s)PORT=(\d{1,5})(?:\s|$)/i,
-    /(?:^|\s)-p[= ](\d{1,5})(?:\s|$)/,
-    /(?:^|\s):(\d{1,5})(?:\s|$)/,
-  ]
-  for (const re of patterns) {
-    let m: RegExpExecArray | null
-    const rx = new RegExp(re.source, 'gi')
-    let last: string | null = null
-    while ((m = rx.exec(cmd)) !== null) {
-      if (validPort(m[1])) last = m[1]
-    }
-    if (last) return validPort(last)
-  }
-  return null
-}
-
-function normalizeUrl(raw: string): string | null {
-  try {
-    // 剥掉 ANSI 控制字符
-    const cleaned = raw
-      .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
-      .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
-    const parsed = new URL(cleaned.replace(/\*+/g, 'localhost'))
-    const okHost =
-      ['localhost', '127.0.0.1', '0.0.0.0', '::1'].includes(parsed.hostname) ||
-      /^\d{1,3}(\.\d{1,3}){3}$/.test(parsed.hostname)
-    if (!okHost || !parsed.port) return null
-    parsed.hostname = 'localhost'
-    parsed.protocol = 'http:'
-    return parsed.origin + (parsed.pathname === '/' ? '' : parsed.pathname)
-  } catch {
-    return null
-  }
-}
 
 /** 单个服务槽的状态 */
 export interface SlotState {
@@ -488,8 +409,7 @@ export const useBuildStore = create<BuildState>()((set, get) => {
 
   // slot 不存在时自动创建
   onOutput: (projectRoot, name, stream, line) => {
-    const lineUrl = line.match(URL_RE)
-    const normUrl = lineUrl ? normalizeUrl(lineUrl[0]) : null
+    const normUrl = extractLineUrl(line)
     if (normUrl) {
       const conflict = findUrlConflict(get().byProject, projectRoot, normUrl)
       if (conflict) {
@@ -525,7 +445,7 @@ export const useBuildStore = create<BuildState>()((set, get) => {
       // EADDRINUSE 在 running 阶段也应转 error（探测可能已判 running，但 stderr 的端口占用才到——
       // 探测探到的可能是占用同端口的旁路进程）。其余 FATAL 仍维持 building/deploying 守卫。
       if (stream === 'stderr' && (
-        ((phase === 'building' || phase === 'deploying') && FATAL_HINTS.some((re) => re.test(line))) ||
+        ((phase === 'building' || phase === 'deploying') && isFatalLine(line)) ||
         (phase === 'running' && /\bEADDRINUSE\b/.test(line))
       )) {
         const tail = logs.filter((l) => l.stream === 'stderr').slice(-20).map((l) => l.line).join('\n')
@@ -533,19 +453,12 @@ export const useBuildStore = create<BuildState>()((set, get) => {
         // 相位跃迁（building/deploying → error）才采集，避免 error 后每一行输出重复触发
         fatalTransition = patch.errorText ?? null
       } else {
-        const m = line.match(URL_RE)
-        const norm = m ? normalizeUrl(m[0]) : null
-        // 兜底①：无 URL 行的高置信端口短语（python http.server 旧格式 / 中文输出 / host:port 无协议）。
-        // 护栏：跳过疑似报错行（占用/失败），避免把「端口已被占用」当就绪地址
-        let synth: string | null = null
-        if (!norm && (phase === 'building' || phase === 'deploying' || phase === 'running')
-            && !/in use|占用|failed|error/i.test(line)) {
-          for (const re of PORT_LINE_RES) {
-            const pm = line.match(re)
-            const port = pm ? validPort(pm[1]) : null
-            if (port) { synth = localUrl(port); break }
-          }
-        }
+        const norm = extractLineUrl(line)
+        // 兜底①：无 URL 行的高置信端口短语（python http.server 旧格式 / 中文输出 / host:port 无协议）；
+        // 报错/占用行不出地址（isNoiseLine 护栏在 buildHints）
+        const synth = !norm && (phase === 'building' || phase === 'deploying' || phase === 'running')
+          ? extractLineUrlFromPort(line)
+          : null
         const found = norm ?? synth
         if (found) {
           const urls = cur.detectedUrls.includes(found) ? cur.detectedUrls : [...cur.detectedUrls, found]
@@ -553,7 +466,7 @@ export const useBuildStore = create<BuildState>()((set, get) => {
           const activeSt = slice.activeSlot ? slots[slice.activeSlot] : undefined
           if (!(activeSt && activeSt.phase === 'running' && activeSt.detectedUrl)) autoSelect = key
         } else if (phase === 'building' || phase === 'deploying') {
-          if (RUN_HINTS.some((re) => re.test(line))) {
+          if (isRunLine(line)) {
             patch = { phase: 'running' }
             // 兜底②：进程已判定运行但自始至终没有地址 → 用启动命令里的端口合成预览地址
             if (!cur.detectedUrl) {
@@ -565,7 +478,7 @@ export const useBuildStore = create<BuildState>()((set, get) => {
               }
             }
           }
-          else if (phase === 'building' && DEPLOY_HINTS.some((re) => re.test(line))) patch = { phase: 'deploying' }
+          else if (phase === 'building' && isDeployLine(line)) patch = { phase: 'deploying' }
         }
       }
 

@@ -8,10 +8,12 @@ import { createPortal } from 'react-dom'
 import { api, onMemoryChanged } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { useMemoryStore } from '@/store/useMemoryStore'
-import { MemoryItemRow } from './MemoryItemRow'
+import { MemoryItemRow, memoryDetailRows } from './MemoryItemRow'
+import { DetailDialog } from '@/components/common/DetailDialog'
 import { MemoryEditModal } from './MemoryEditModal'
 import { EmptyState } from '@/components/common/EmptyState'
-import { IconAlert, IconCheck, IconLayers, IconSearch, IconClose } from '@/components/common/icons'
+import { Notice, useNotice } from '@/components/common/Notice'
+import { IconAlert, IconLayers, IconSearch, IconClose } from '@/components/common/icons'
 import type { MemoryItem, MemoryHit } from '@/types'
 import type { MemoryUpdatePatch } from '@/store/useMemoryStore'
 
@@ -34,6 +36,7 @@ export function UserMemorySection() {
   const [input, setInput] = useState('')
   /** 编辑弹窗目标（打开时以该条目快照初始化草稿，弹窗自持） */
   const [editingItem, setEditingItem] = useState<MemoryItem | null>(null)
+  const [viewingItem, setViewingItem] = useState<MemoryItem | null>(null)
 
   /** ⋯ 菜单：portal + fixed 定位（照 Select 惯例，摆脱滚动容器 overflow 裁剪） */
   const moreRef = useRef<HTMLDivElement>(null)
@@ -44,7 +47,7 @@ export function UserMemorySection() {
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
   /** 操作结果提示（ok/err，6s 自清） */
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [notice, setNotice] = useNotice()
 
   /** 整理中（任意工程在蒸馏）→ 禁用写操作：用户记忆是跨工程全局，任何工程蒸馏都可能写它 */
   const busy = extractingProjects.size > 0
@@ -106,13 +109,6 @@ export function UserMemorySection() {
     }, q ? 300 : 0)
     return () => window.clearTimeout(timer)
   }, [input])
-
-  // 提示语自动消失（成功/失败统一 6s）
-  useEffect(() => {
-    if (!notice) return
-    const timer = window.setTimeout(() => setNotice(null), 6000)
-    return () => window.clearTimeout(timer)
-  }, [notice])
 
   /** 导入/清空后刷新：有搜索词则重放搜索（保持 hits 视图），否则回全量列表 */
   const refreshAfterWrite = async () => {
@@ -270,6 +266,7 @@ export function UserMemorySection() {
         <div className="user-mem__search">
           <IconSearch size={12} />
           <input
+            aria-label="搜索用户记忆"
             className="user-mem__search-input"
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -329,12 +326,7 @@ export function UserMemorySection() {
       </div>
 
       {/* 操作结果提示 */}
-      {notice && (
-        <div className={`notice ${notice.kind === 'ok' ? 'notice--ok' : 'notice--err'}`}>
-          {notice.kind === 'ok' ? <IconCheck size={14} /> : <IconAlert size={14} />}
-          <span>{notice.text}</span>
-        </div>
-      )}
+      <Notice notice={notice} />
 
       {/* 列表 */}
       <div className="user-mem__list">
@@ -355,6 +347,7 @@ export function UserMemorySection() {
             <MemoryItemRow
               key={it.id}
               item={it}
+              onDetail={() => setViewingItem(it)}
               onEdit={() => setEditingItem(it)}
               onDelete={() => void onDelete(it.id, it.title)}
               onMoveScope={projectPath ? () => void onMoveScope(it.id, it.title) : undefined}
@@ -371,6 +364,18 @@ export function UserMemorySection() {
         {items.length} 条用户记忆
       </div>
 
+      {viewingItem && (
+        <DetailDialog
+          title={viewingItem.title}
+          rows={memoryDetailRows(viewingItem)}
+          onClose={() => setViewingItem(null)}
+          footer={
+            <button className="btn btn--primary" onClick={() => { const s = viewingItem; setViewingItem(null); setEditingItem(s) }}>
+              编辑
+            </button>
+          }
+        />
+      )}
       {editingItem && (
         <MemoryEditModal
           item={editingItem}

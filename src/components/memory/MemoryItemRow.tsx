@@ -5,6 +5,21 @@
 import type { MemoryCategory, MemoryItem } from '@/types'
 import { IconExternal, IconPencil, IconTrash } from '@/components/common/icons'
 import { timeAgo } from '@/utils/time'
+import type { DetailRow } from '@/components/common/DetailDialog'
+
+/** 只读详情行（DetailDialog 用）：两个记忆面板共用一套展示口径 */
+export function memoryDetailRows(item: MemoryItem): DetailRow[] {
+  return [
+    { label: '分类', value: MEMORY_CATEGORY_LABELS[item.category] ?? item.category, kind: 'chip' },
+    { label: '层级', value: item.tier === 'long' ? '长期记忆' : `短期记忆（会话 ${item.sessionId ?? '—'}）`, kind: 'chip' },
+    { label: '重要度', value: String(item.importance) },
+    { label: '正文', value: item.content },
+    { label: '状态', value: item.status === 'active' ? '' : STATUS_LABELS[item.status] ?? item.status, kind: 'chip' },
+    { label: '更新', value: timeAgo(item.updatedAt) },
+    { label: '创建', value: timeAgo(item.createdAt) },
+    { label: '来源', value: item.sourceJson ?? '', kind: 'mono' },
+  ]
+}
 
 export const MEMORY_CATEGORY_LABELS: Record<MemoryCategory, string> = {
   preference: '偏好',
@@ -17,8 +32,10 @@ export const MEMORY_CATEGORY_LABELS: Record<MemoryCategory, string> = {
 
 const STATUS_LABELS: Record<string, string> = { merged: '已合并', archived: '已归档' }
 
-export function MemoryItemRow({ item, onEdit, onDelete, compact, onMoveScope, moveScopeTitle, readOnly }: {
+export function MemoryItemRow({ item, onDetail, onEdit, onDelete, compact, onMoveScope, moveScopeTitle, readOnly }: {
   item: MemoryItem
+  /** 整卡点击 → 只读详情弹窗（查看不受 readOnly 门控） */
+  onDetail: () => void
   /** 打开编辑弹窗（父级持有 editingItem 状态） */
   onEdit: () => void
   onDelete: () => void
@@ -32,19 +49,20 @@ export function MemoryItemRow({ item, onEdit, onDelete, compact, onMoveScope, mo
   readOnly?: boolean
 }) {
   return (
-    <div className={`memory__item ${compact ? 'memory__item--compact' : ''}`} data-tier={item.tier} role="listitem">
+    <div className={`card memory__item ${compact ? 'memory__item--compact' : ''}`} data-tier={item.tier} role="listitem"
+      onClick={onDetail}>
       <div className="memory__item-head">
         <span className="memory__item-title" title={item.title}>{item.title}</span>
         <div className="memory__item-actions">
-          <button className="icon-btn" onClick={onEdit} aria-label="编辑" title="编辑" disabled={readOnly}>
+          <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onEdit() }} aria-label="编辑" title="编辑" disabled={readOnly}>
             <IconPencil size={13} />
           </button>
           {onMoveScope && (
-            <button className="icon-btn" onClick={onMoveScope} aria-label={moveScopeTitle} title={moveScopeTitle} disabled={readOnly}>
+            <button className="icon-btn" onClick={(e) => { e.stopPropagation(); onMoveScope?.() }} aria-label={moveScopeTitle} title={moveScopeTitle} disabled={readOnly}>
               <IconExternal size={13} />
             </button>
           )}
-          <button className="icon-btn memory__item-delete" onClick={onDelete} aria-label="删除" title="删除" disabled={readOnly}>
+          <button className="icon-btn memory__item-delete" onClick={(e) => { e.stopPropagation(); onDelete() }} aria-label="删除" title="删除" disabled={readOnly}>
             <IconTrash size={13} />
           </button>
         </div>

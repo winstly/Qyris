@@ -4,13 +4,28 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>轻驭</title>
+    <!-- 抢在渲染前从持久化偏好解析主题，splash 与首帧零闪：
+         React 挂载后 useThemeSync 会写入同值 data-theme（幂等） -->
+    <script>
+      (function () {
+        var t = 'dark'
+        try {
+          var raw = JSON.parse(localStorage.getItem('fw-ui') || '{}')
+          var pref = raw && raw.state && raw.state.theme
+          if (pref === 'light') t = 'light'
+          else if (pref === 'dark') t = 'dark'
+          else t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+        } catch (e) { /* 解析失败走暗色默认 */ }
+        document.documentElement.dataset.theme = t
+      })()
+    </script>
     <!-- 深色底色内联，避免启动瞬间白屏闪烁；启动过场（splash）为纯 HTML/CSS，
          bundle 解析期间即可见，React 挂载后由 main.tsx 淡出移除。
-         色板对齐 styles/tokens.css 暗色主题：#131315 暖灰底 + --accent #7c8da4 柔蓝灰点缀，
-         沿用「台灯氛围」签名元素；光影语言走「静奢」路线：缓旋极光(50s) + 拖尾流星（场景光痕 +
+         色板对齐 styles/tokens.css 暗色主题：#06070a 中性地面 + 品牌绿稀疏点缀，
+         沿用「深空紫雾」签名元素；光影语言走「静奢」路线：缓旋极光(50s) + 拖尾流星（场景光痕 +
          标题彗星，亮头渐隐尾）+ 尘埃漂移 + 徽标慢呼吸光晕，无任何闪烁/快速旋转元素 -->
     <style>
-      html, body { background: #131315; margin: 0; }
+      html, body { margin: 0; } /* 底色交给 tokens.css（data-theme 驱动）；防白闪由下方 fixed inset-0 的 #boot-splash 全屏覆盖承担 */
       #boot-splash {
         position: fixed;
         inset: 0;
@@ -22,10 +37,10 @@
         overflow: hidden;
         /* 台灯光（左上，--lamp-glow 加强版）+ 暖灰纵向过渡（s1 → bg）*/
         background:
-          radial-gradient(ellipse 75% 50% at 16% 0%, rgba(124, 141, 164, 0.10), transparent 62%),
-          linear-gradient(180deg, #1a1a1c 0%, #131315 52%, #0f0f11 100%);
-        color: #e8e4df;
-        font-family: "Outfit", "PingFang SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+          radial-gradient(ellipse 75% 50% at 16% 0%, rgba(124, 122, 255, 0.10), transparent 62%),
+          linear-gradient(180deg, #0e0f13 0%, #06070a 52%, #050508 100%);
+        color: #e8e8ec;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
         opacity: 1;
         transition: opacity 0.3s ease;
       }
@@ -52,9 +67,9 @@
         background: conic-gradient(
           from 0deg,
           transparent 0deg,
-          rgba(124, 141, 164, 0.13) 55deg,
+          rgba(124, 122, 255, 0.13) 55deg,
           transparent 130deg,
-          rgba(138, 154, 176, 0.09) 210deg,
+          rgba(124, 122, 255, 0.09) 210deg,
           transparent 290deg
         );
         filter: blur(64px);
@@ -68,7 +83,7 @@
         height: 560px;
         margin: -280px 0 0 -280px;
         filter: none;
-        background: radial-gradient(circle, rgba(196, 162, 101, 0.07), transparent 62%);
+        background: radial-gradient(circle, rgba(124, 122, 255, 0.07), transparent 62%);
         animation: splash-breathe 14s ease-in-out infinite alternate;
       }
       @keyframes splash-rotate { to { transform: rotate(360deg); } }
@@ -82,10 +97,10 @@
         /* 90deg 渐变：左端为尾（渐隐），右端为亮头——与 translateX 正向飞行一致 */
         background: linear-gradient(90deg,
           transparent 0%,
-          rgba(138, 154, 176, 0.05) 30%,
-          rgba(138, 154, 176, 0.16) 55%,
-          rgba(176, 192, 212, 0.42) 80%,
-          rgba(214, 226, 240, 0.85) 94%,
+          rgba(124, 122, 255, 0.05) 30%,
+          rgba(124, 122, 255, 0.16) 55%,
+          rgba(183, 182, 255, 0.42) 80%,
+          rgba(183, 182, 255, 0.85) 94%,
           transparent 100%);
         transform: rotate(var(--br, 32deg));
         opacity: 0;
@@ -104,8 +119,8 @@
         width: var(--s, 3px);
         height: var(--s, 3px);
         border-radius: 50%;
-        background: var(--c, #8a9ab0);
-        box-shadow: 0 0 7px 1px var(--g, rgba(124, 141, 164, 0.6));
+        background: var(--c, #7c7aff);
+        box-shadow: 0 0 7px 1px var(--g, rgba(124, 122, 255, 0.6));
         opacity: 0;
         animation: splash-mote var(--pd, 13s) linear var(--pdl, 0s) infinite;
       }
@@ -136,7 +151,7 @@
         margin-left: -92px;
         border-radius: 50%;
         pointer-events: none;
-        background: radial-gradient(circle, rgba(124, 141, 164, 0.10), transparent 65%);
+        background: radial-gradient(circle, rgba(124, 122, 255, 0.10), transparent 65%);
         animation: splash-breathe 10s ease-in-out infinite alternate;
       }
       .boot-splash__logo {
@@ -144,18 +159,18 @@
         width: 72px;
         height: 72px;
         border-radius: 18px;
-        border: 1px solid rgba(124, 141, 164, 0.32);
-        background: linear-gradient(180deg, rgba(124, 141, 164, 0.10), rgba(124, 141, 164, 0.04));
-        box-shadow: inset 0 1px 0 rgba(232, 228, 223, 0.06);
+        border: 1px solid rgba(124, 122, 255, 0.32);
+        background: linear-gradient(180deg, rgba(124, 122, 255, 0.10), rgba(124, 122, 255, 0.04));
+        box-shadow: inset 0 1px 0 rgba(250, 250, 250, 0.06);
         display: flex;
         align-items: center;
         justify-content: center;
-        font-family: "Instrument Serif", "PingFang SC", "Microsoft YaHei UI", Georgia, serif;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", serif;
         font-size: 32px;
-        color: #cfd6e0;
+        color: #e8e8ec;
       }
       .boot-splash__title {
-        font-family: "Instrument Serif", "PingFang SC", "Microsoft YaHei UI", Georgia, serif;
+        font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", serif;
         font-size: 46px;
         font-weight: 400;
         letter-spacing: 0.14em;
@@ -163,10 +178,10 @@
         /* 拖尾流星掠过字面：亮头 + 渐隐长尾自右向左划过，9s 一遇（划过约 1.8s），
            其余时间字面保持安静的 --fg-2 基色 */
         background: linear-gradient(110deg,
-          #a8a29e 0%, #a8a29e 56.5%,
+          #8b8b97 0%, #8b8b97 56.5%,
           #ffffff 58.5%, #ffffff 60%,
-          #d8d3cc 61.5%, #c6c1ba 66%, #b4afa8 72%, #a9a39c 80%, #a8a29e 86%,
-          #a8a29e 100%);
+          #c3c2ff 61.5%, #b0aefe 66%, #a19efb 72%, #948ff8 80%, #8b8b97 86%,
+          #8b8b97 100%);
         background-size: 250% 100%;
         -webkit-background-clip: text;
         background-clip: text;
@@ -181,7 +196,7 @@
         font-size: 11px;
         letter-spacing: 0.42em;
         text-indent: 0.42em;
-        color: #6b6560;
+        color: #55555f;
       }
       .boot-splash__feats {
         display: flex;
@@ -194,14 +209,14 @@
         gap: 8px;
         font-size: 12px;
         letter-spacing: 0.08em;
-        color: #a8a29e;
+        color: #8b8b97;
       }
       .boot-splash__feat i {
         width: 4px;
         height: 4px;
         border-radius: 50%;
-        background: #7c8da4;
-        box-shadow: 0 0 6px rgba(124, 141, 164, 0.45);
+        background: #7c7aff;
+        box-shadow: 0 0 6px rgba(124, 122, 255, 0.45);
       }
       .boot-splash__loader {
         position: relative;
@@ -214,7 +229,7 @@
         position: absolute;
         inset: 0;
         border-radius: 50%;
-        border: 1px solid rgba(124, 141, 164, 0.26);
+        border: 1px solid rgba(124, 122, 255, 0.26);
       }
       .boot-splash__orbit {
         position: absolute;
@@ -230,8 +245,8 @@
         width: 3px;
         height: 3px;
         border-radius: 50%;
-        background: #8a9ab0;
-        box-shadow: 0 0 6px rgba(124, 141, 164, 0.55);
+        background: #7c7aff;
+        box-shadow: 0 0 6px rgba(124, 122, 255, 0.55);
       }
       @keyframes splash-spin { to { transform: rotate(360deg); } }
 
@@ -246,9 +261,59 @@
         font-size: 10px;
         letter-spacing: 1em;
         text-indent: 1em;
-        color: rgba(232, 228, 223, 0.07);
+        color: rgba(250, 250, 250, 0.07);
         white-space: nowrap;
       }
+
+      /* ---- 亮色主题 splash（data-theme 由 head 内联脚本抢设） ---- */
+      [data-theme='light'] #boot-splash {
+        background:
+          radial-gradient(ellipse 75% 50% at 16% 0%, rgba(124, 122, 255, 0.12), transparent 62%),
+          linear-gradient(180deg, #ffffff 0%, #f8f9fc 52%, #eef0f7 100%);
+        color: #1a1a2e;
+      }
+      [data-theme='light'] #boot-splash::after {
+        background: radial-gradient(ellipse 90% 90% at 50% 45%, transparent 55%, rgba(26, 26, 46, 0.08));
+      }
+      [data-theme='light'] .boot-splash__aurora {
+        background: conic-gradient(
+          from 0deg,
+          transparent 0deg,
+          rgba(124, 122, 255, 0.16) 55deg,
+          transparent 130deg,
+          rgba(124, 122, 255, 0.11) 210deg,
+          transparent 290deg
+        );
+      }
+      [data-theme='light'] .boot-splash__logo {
+        border-color: rgba(99, 102, 241, 0.38);
+        background: linear-gradient(180deg, rgba(99, 102, 241, 0.12), rgba(99, 102, 241, 0.05));
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+        color: #1a1a2e;
+      }
+      [data-theme='light'] .boot-splash__title {
+        background: linear-gradient(110deg,
+          #6b6b80 0%, #6b6b80 56.5%,
+          #10101c 58.5%, #10101c 60%,
+          #4f46e5 61.5%, #6366f1 66%, #818cf8 72%, #6b6b80 80%, #6b6b80 86%,
+          #6b6b80 100%);
+        background-size: 250% 100%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        -webkit-text-fill-color: transparent;
+      }
+      [data-theme='light'] .boot-splash__tag { color: #6b6b80; }
+      [data-theme='light'] .boot-splash__feat { color: #6b6b80; }
+      [data-theme='light'] .boot-splash__feat i {
+        background: #6366f1;
+        box-shadow: 0 0 6px rgba(99, 102, 241, 0.45);
+      }
+      [data-theme='light'] .boot-splash__loader::before { border-color: rgba(99, 102, 241, 0.35); }
+      [data-theme='light'] .boot-splash__orbit::after {
+        background: #6366f1;
+        box-shadow: 0 0 6px rgba(99, 102, 241, 0.55);
+      }
+      [data-theme='light'] .boot-splash__deco { color: rgba(26, 26, 46, 0.10); }
 
       @media (prefers-reduced-motion: reduce) {
         #boot-splash,
@@ -277,11 +342,11 @@
       <i class="boot-splash__p" style="left: 10%; top: 18%; --s: 3px; --mx: 130px; --my: 170px; --pd: 10s; --pdl: -2s; --o: 0.8"></i>
       <i class="boot-splash__p" style="left: 22%; top: 46%; --s: 2px; --mx: 110px; --my: 140px; --pd: 13s; --pdl: -7s; --o: 0.6"></i>
       <i class="boot-splash__p" style="left: 34%; top: 70%; --s: 3px; --mx: 90px; --my: 110px; --pd: 11s; --pdl: -4s; --o: 0.7"></i>
-      <i class="boot-splash__p" style="left: 44%; top: 12%; --s: 2px; --mx: 150px; --my: 180px; --pd: 14s; --pdl: -9s; --o: 0.55; --c: #c4a265; --g: rgba(196, 162, 101, 0.45)"></i>
+      <i class="boot-splash__p" style="left: 44%; top: 12%; --s: 2px; --mx: 150px; --my: 180px; --pd: 14s; --pdl: -9s; --o: 0.55; --c: #7c7aff; --g: rgba(124, 122, 255, 0.45)"></i>
       <i class="boot-splash__p" style="left: 56%; top: 58%; --s: 4px; --mx: 120px; --my: 150px; --pd: 10.5s; --pdl: -6s; --o: 0.75"></i>
       <i class="boot-splash__p" style="left: 64%; top: 26%; --s: 2px; --mx: 100px; --my: 130px; --pd: 13.5s; --pdl: -11s; --o: 0.6"></i>
       <i class="boot-splash__p" style="left: 74%; top: 62%; --s: 3px; --mx: 140px; --my: 160px; --pd: 9s; --pdl: -3s; --o: 0.7"></i>
-      <i class="boot-splash__p" style="left: 82%; top: 16%; --s: 2px; --mx: 110px; --my: 140px; --pd: 15s; --pdl: -13s; --o: 0.5; --c: #c4a265; --g: rgba(196, 162, 101, 0.4)"></i>
+      <i class="boot-splash__p" style="left: 82%; top: 16%; --s: 2px; --mx: 110px; --my: 140px; --pd: 15s; --pdl: -13s; --o: 0.5; --c: #7c7aff; --g: rgba(124, 122, 255, 0.4)"></i>
       <i class="boot-splash__p" style="left: 87%; top: 44%; --s: 3px; --mx: 120px; --my: 170px; --pd: 12s; --pdl: -8s; --o: 0.65"></i>
       <i class="boot-splash__p" style="left: 16%; top: 80%; --s: 2px; --mx: 90px; --my: 100px; --pd: 16s; --pdl: -14s; --o: 0.5"></i>
 

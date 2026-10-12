@@ -225,7 +225,7 @@ export function GitPanel() {
       {/* 顶部拖拽手柄：调面板高度（store 持久化）；折叠态无高度可调，隐藏 */}
       <div
         className="gitpanel__grip"
-        onMouseDown={onGripDown}
+        onPointerDown={onGripDown}
         role="separator"
         aria-orientation="horizontal"
         aria-label="拖拽调整 Git 面板高度"

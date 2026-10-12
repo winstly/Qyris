@@ -45,6 +45,43 @@ export function format(value: unknown): string {
   }
 }
 
+/**
+ * 日志流熔断：stdout/stderr 被关闭（EIO/EPIPE）后，console 的异步写会持续抛错，
+ * 每次抛错又进 uncaughtException → 再打日志 → 再抛错，自循环刷屏直到进程拖死。
+ * 一旦流坏了就永久停写 console（文件日志不受影响），自循环到此为止。
+ */
+let STREAM_BROKEN = false
+
+export function markStreamBroken(): void {
+  STREAM_BROKEN = true
+}
+
+export function isStreamBroken(): boolean {
+  return STREAM_BROKEN
+}
+
+/** 熔断写：流已坏/写入抛错都不再发声，防止 console 异步写错误自循环 */
+function safeConsoleWrite(fn: () => void): void {
+  if (STREAM_BROKEN) return
+  try {
+    fn()
+  } catch {
+    STREAM_BROKEN = true
+  }
+}
+
+/**
+ * 给 stdout/stderr 挂 error 监听：流关闭后的异步写错误走这里而不是 uncaughtException
+ * （主进程启动早期调用一次；渲染进程无 process.stdout 时静默跳过）
+ */
+export function guardStdioStreams(): void {
+  try {
+    const p = (globalThis as { process?: { stdout?: NodeJS.WritableStream; stderr?: NodeJS.WritableStream } }).process
+    p?.stdout?.on?.('error', () => markStreamBroken())
+    p?.stderr?.on?.('error', () => markStreamBroken())
+  } catch { /* 非 Node 环境 */ }
+}
+
 /** 抽象基类：子类只实现 log(level, message) 一个方法 */
 export abstract class AbstractMessageLogger implements ILogger {
   abstract log(level: LogLevel, message: string): void
@@ -64,17 +101,18 @@ export class ConsoleLogger extends AbstractMessageLogger {
   override log(level: LogLevel, message: string): void {
     if (level < this.levelThreshold || level === LogLevel.Off) return
     const line = `[${new Date().toISOString()}] [${LEVEL_LABEL[level]}] ${message}`
+    // 全部经 safeConsoleWrite：流坏即熔断，不再让 console 异步写错误自循环
     switch (level) {
       case LogLevel.Trace:
       case LogLevel.Debug:
       case LogLevel.Info:
-        console.log(line)
+        safeConsoleWrite(() => console.log(line))
         break
       case LogLevel.Warn:
-        console.warn(line)
+        safeConsoleWrite(() => console.warn(line))
         break
       case LogLevel.Error:
-        console.error(line)
+        safeConsoleWrite(() => console.error(line))
         break
     }
   }

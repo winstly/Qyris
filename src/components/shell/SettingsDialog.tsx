@@ -1,150 +1,51 @@
+/**
+ * 设置面板：桌宠 + 系统设置（全局资产）。
+ * 模型/记忆配置在「模型与记忆」弹窗（对话头部 chip；本面板「系统设置」亦有入口——
+ * 聊天面板折叠时头部按钮不可点）；Skills 全局目录在技能 tab 全局组。
+ * 桌宠专属项（音效/显示）只在「桌宠」tab；「系统设置」含主窗口关闭行为与数据存储位置（迁移）。
+ */
 import { useEffect, useState } from 'react'
-import { useAppStore, type Theme } from '@/store/useAppStore'
+import { useFocusTrap } from '@/hooks/useFocusTrap'
+import { useAppStore } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
-import { SECRET_KEY } from '@/services/ai'
 import { useMemoryStore } from '@/store/useMemoryStore'
-import type { ModelTiers } from '@/types'
 import { IconClose, IconCheck, IconCopy } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
-import { ModelSettingsTab } from './ModelSettingsTab'
+import { TabStrip } from '@/components/common/TabStrip'
 
-/**
- * 设置面板：模型设置 + 记忆设置 + 系统设置。
- * API Key 只写入系统 keychain，绝不落配置文件或 localStorage。
- */
 export function SettingsDialog() {
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
   const open = useAppStore((s) => s.settingsOpen)
   const setOpen = useAppStore((s) => s.setSettingsOpen)
-  const settings = useAppStore((s) => s.settings)
-  const saveSettings = useAppStore((s) => s.saveSettings)
-  const hasApiKey = useAppStore((s) => s.hasApiKey)
-  const refreshHasApiKey = useAppStore((s) => s.refreshHasApiKey)
-  const theme = useAppStore((s) => s.theme)
-  const setTheme = useAppStore((s) => s.setTheme)
+  const setModelCfgOpen = useAppStore((s) => s.setModelCfgOpen)
   const showConfirm = useAppStore((s) => s.showConfirm)
   const showAlert = useAppStore((s) => s.showAlert)
-  const skillsDirs = useAppStore((s) => s.skillsDirs)
-  const setSkillsDirs = useAppStore((s) => s.setSkillsDirs)
-  const skillMetas = useAppStore((s) => s.skillMetas)
-  const loadSkills = useAppStore((s) => s.loadSkills)
 
-  const [tab, setTab] = useState<'model' | 'memory' | 'system'>('model')
-  const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
-  const [model, setModel] = useState(settings.model)
-  const [provider, setProvider] = useState<'openai' | 'anthropic'>(settings.provider)
-  const [dispatchMode, setDispatchMode] = useState<'api' | 'claude-cli'>(settings.dispatchMode)
-  const [cliPermission, setCliPermission] = useState<'auto' | 'readonly'>(settings.cliPermission)
-  const [cliCommand, setCliCommand] = useState(settings.cliCommand ?? '')
-  const [tiers, setTiers] = useState<ModelTiers>(settings.tiers ?? {})
-  const [apiKeyInput, setApiKeyInput] = useState('')
-  const [testing, setTesting] = useState(false)
-  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null)
-  // Skills 目录草稿：输入过程不落盘不重扫，失焦/增删行时统一提交
-  const [dirsDraft, setDirsDraft] = useState<string[] | null>(null)
-  // 记忆 tab：数据存储位置 + 触发轮次
+  const [tab, setTab] = useState<'pet' | 'system'>('pet')
   const [dataDir, setDataDir] = useState<string | null>(null)
   const [dirBusy, setDirBusy] = useState<'pick' | 'migrate' | null>(null)
   const [dirCopied, setDirCopied] = useState(false)
-  const [memRounds, setMemRounds] = useState('')
-  const [compressThreshold, setCompressThreshold] = useState('')
-  // 系统设置：主窗口关闭行为（ask=每次询问，落盘值为 minimize/quit）
   const [closeAction, setCloseAction] = useState<'ask' | 'minimize' | 'quit'>('ask')
-  // 桌宠音效开关
   const [petSound, setPetSound] = useState(false)
+  const [petHidden, setPetHidden] = useState(false)
 
+  // 打开即取值：关闭行为 + 桌宠开关 + 数据存储位置（都是全局资产，一次读齐）
   useEffect(() => {
     if (!open) return
-    setTab('model')
-    setBaseUrl(settings.baseUrl)
-    setModel(settings.model)
-    setProvider(settings.provider)
-    setDispatchMode(settings.dispatchMode)
-    setCliPermission(settings.cliPermission)
-    setCliCommand(settings.cliCommand ?? '')
-    setTiers(settings.tiers ?? {})
-    setApiKeyInput('')
-    setTestResult(null)
-    setDirsDraft(null)
+    setTab('pet')
     setDirBusy(null)
-    setMemRounds('')
-    setCompressThreshold('')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open])
-
-  // 进入系统 tab 时读取主窗口关闭行为偏好 + 桌宠音效开关
-  useEffect(() => {
-    if (!open || tab !== 'system') return
     let alive = true
     api.getConfig().then((c) => {
       if (!alive) return
       setCloseAction(c.closeAction === 'minimize' || c.closeAction === 'quit' ? c.closeAction : 'ask')
       setPetSound(c.petSound === true)
+      setPetHidden(c.petHidden === true)
     }).catch(() => {})
-    return () => { alive = false }
-  }, [open, tab])
-
-  // 进入记忆 tab 时读取配置 + 数据存储位置
-  useEffect(() => {
-    if (!open || tab !== 'memory') return
-    let alive = true
     api.getDataDir().then((d) => { if (alive) setDataDir(d) }).catch(() => {})
-    api.getConfig().then((c) => {
-      if (!alive) return
-      setMemRounds(c.memExtractRounds != null ? String(c.memExtractRounds) : '')
-      setCompressThreshold(c.contextCompressThreshold != null ? String(c.contextCompressThreshold) : '')
-    }).catch(() => {})
     return () => { alive = false }
-  }, [open, tab])
+  }, [open])
 
   if (!open) return null
-
-  const editingDirs = dirsDraft ?? skillsDirs
-  const commitDirs = (list: string[]) => {
-    const clean = [...new Set(list.map((d) => d.trim()).filter(Boolean))]
-    setDirsDraft(null)
-    if (clean.join('\n') !== skillsDirs.join('\n')) setSkillsDirs(clean)
-  }
-
-  const onSave = async () => {
-    if (apiKeyInput.trim()) await api.setSecret(SECRET_KEY, apiKeyInput.trim())
-    const cleanTiers: ModelTiers = {}
-    for (const [k, v] of Object.entries(tiers)) {
-      if (v && v.trim()) cleanTiers[k as keyof ModelTiers] = v.trim()
-    }
-    await saveSettings({
-      baseUrl: baseUrl.trim(), model: model.trim(), provider, dispatchMode, cliPermission,
-      cliCommand: cliCommand.trim() || null,
-      tiers: Object.keys(cleanTiers).length ? cleanTiers : undefined,
-    })
-    const rounds = Math.floor(Number(memRounds))
-    const threshold = Math.floor(Number(compressThreshold))
-    await api.mergeConfig({
-      memExtractRounds: Number.isFinite(rounds) && rounds >= 2 ? Math.min(60, rounds) : undefined,
-      contextCompressThreshold: Number.isFinite(threshold) && threshold >= 64000 ? Math.min(512000, threshold) : undefined,
-    })
-    await refreshHasApiKey()
-    setOpen(false)
-  }
-
-  const onClearKey = async () => {
-    await api.deleteSecret(SECRET_KEY)
-    await refreshHasApiKey()
-  }
-
-  const onTest = async () => {
-    setTesting(true)
-    setTestResult(null)
-    try {
-      if (apiKeyInput.trim()) await api.setSecret(SECRET_KEY, apiKeyInput.trim())
-      const msg = await api.aiTestConnection(provider, baseUrl.trim(), model.trim(), dispatchMode)
-      setTestResult({ ok: true, text: msg })
-    } catch (e) {
-      setTestResult({ ok: false, text: String(e) })
-    } finally {
-      setTesting(false)
-      await refreshHasApiKey()
-    }
-  }
 
   const onCopyDataDir = async () => {
     if (!dataDir) return
@@ -179,107 +80,68 @@ export function SettingsDialog() {
     }
   }
 
-  const pickSkillsDir = () => api.pickSkillsDir()
-
   return (
-    <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(false) }}>
+    <div ref={trapRef} className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) setOpen(false) }}>
       <div className="modal modal--wide" role="dialog" aria-modal="true" aria-label="设置">
         <div className="modal__head">
           <span>设置</span>
           <button className="icon-btn" onClick={() => setOpen(false)} aria-label="关闭"><IconClose size={14} /></button>
         </div>
 
-        <div className="settings-tabs" role="tablist" aria-label="设置分类">
-          {(['model', 'memory', 'system'] as const).map((t) => (
-            <button
-              key={t}
-              className={`settings-tab ${tab === t ? 'settings-tab--active' : ''}`}
-              onClick={() => setTab(t)}
-              role="tab"
-              aria-selected={tab === t}
-            >
-              {t === 'model' ? '模型设置' : t === 'memory' ? '记忆设置' : '系统设置'}
-            </button>
-          ))}
-        </div>
+        <TabStrip
+          label="设置分类"
+          active={tab}
+          onChange={setTab}
+          items={[
+            { id: 'pet', label: '桌宠' },
+            { id: 'system', label: '系统设置' },
+          ]}
+        />
 
-        {tab === 'model' ? (
-          <ModelSettingsTab
-            dispatchMode={dispatchMode} setDispatchMode={setDispatchMode}
-            cliPermission={cliPermission} setCliPermission={setCliPermission}
-            cliCommand={cliCommand} setCliCommand={setCliCommand}
-            provider={provider} setProvider={setProvider}
-            baseUrl={baseUrl} setBaseUrl={setBaseUrl}
-            apiKeyInput={apiKeyInput} setApiKeyInput={setApiKeyInput}
-            hasApiKey={hasApiKey}
-            model={model} setModel={setModel}
-            tiers={tiers} setTiers={setTiers}
-            editingDirs={editingDirs} setDirsDraft={setDirsDraft}
-            commitDirs={commitDirs}
-            skillsDirs={skillsDirs} skillMetas={skillMetas}
-            loadSkills={loadSkills} pickSkillsDir={pickSkillsDir}
-            testResult={testResult} testing={testing}
-            onTest={onTest} onClearKey={onClearKey} onSave={onSave}
-            onClose={() => setOpen(false)}
-          />
-        ) : tab === 'memory' ? (
+        {tab === 'pet' ? (
           <>
             <div className="modal__body">
               <div className="field">
-                <span className="field__label">记忆整理触发轮次</span>
-                <div className="settings-memrounds">
-                  <input className="field__input" type="number" min={2} max={60} step={1}
-                    value={memRounds} onChange={(e) => setMemRounds(e.target.value)}
-                    placeholder="默认 6" aria-label="记忆整理触发轮次" />
-                  <span className="settings-memrounds__unit">轮 AI 回复</span>
-                </div>
-                <span className="field__hint">每累计多少轮 AI 回复后自动把对话蒸馏进记忆——越小记得越勤、token 消耗越多；清空输入恢复默认</span>
+                <span className="field__label">桌宠音效</span>
+                <label className="modal__check">
+                  <input
+                    type="checkbox"
+                    checked={petSound}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                      setPetSound(next)
+                      void api.mergeConfig({ petSound: next })
+                    }}
+                  />
+                  <span className="modal__check-label">播放桌宠动画音效</span>
+                </label>
+                <span className="field__hint">开启后桌宠动画将播放内置音轨；默认静音</span>
               </div>
               <div className="field">
-                <span className="field__label">上下文压缩阈值</span>
-                <div className="settings-memrounds">
-                  <input className="field__input" type="number" min={64000} max={512000} step={16000}
-                    value={compressThreshold} onChange={(e) => setCompressThreshold(e.target.value)}
-                    placeholder="默认 256000" aria-label="上下文压缩阈值" />
-                  <span className="settings-memrounds__unit">token</span>
-                </div>
-                <span className="field__hint">对话历史总 token 超过此值时，自动压缩旧消息为摘要（保留最近 40 条原文）——越大越晚压缩、token 消耗越多；清空输入恢复默认（256k）</span>
-              </div>
-              <div className="field">
-                <span className="field__label">数据存储位置</span>
-                <div className="settings-datadir">
-                  <code className="settings-datadir__path mono" title={dataDir ?? ''}>{dataDir ?? '—'}</code>
-                  <button className="icon-btn" onClick={() => void onCopyDataDir()} disabled={!dataDir} aria-label="复制路径" title="复制路径">
-                    {dirCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
-                  </button>
-                  <button className="btn btn--ghost btn--sm" onClick={() => void onChangeDataDir()} disabled={dirBusy !== null}>
-                    {dirBusy === 'migrate' ? '迁移中…' : '更改位置…'}
-                  </button>
-                </div>
-                <span className="field__hint">对话历史、记忆与文件快照存储于此目录；更改位置时自动迁移</span>
+                <span className="field__label">桌宠显示</span>
+                <label className="modal__check">
+                  <input
+                    type="checkbox"
+                    checked={petHidden}
+                    onChange={(e) => {
+                      const next = e.target.checked
+                      setPetHidden(next)
+                      void api.mergeConfig({ petHidden: next })
+                      window.desktopAPI?.setPetHidden?.(next)
+                    }}
+                  />
+                  <span className="modal__check-label">隐藏桌宠</span>
+                </label>
+                <span className="field__hint">隐藏后桌宠不显示，取消勾选即恢复；不销毁桌宠进程</span>
               </div>
             </div>
             <div className="modal__actions">
-              <button className="btn btn--ghost btn--sm" onClick={() => setOpen(false)}>取消</button>
-              <button className="btn btn--primary btn--sm" onClick={() => void onSave()}>保存</button>
+              <button className="btn btn--primary" onClick={() => setOpen(false)}>完成</button>
             </div>
           </>
         ) : (
           <>
             <div className="modal__body">
-              <label className="field">
-                <span className="field__label">主题</span>
-                <Select
-                  value={theme}
-                  onChange={(v) => setTheme(v as Theme)}
-                  options={[
-                    { value: 'system', label: '跟随系统（白天浅色 / 晚上深色）' },
-                    { value: 'light', label: '浅色' },
-                    { value: 'dark', label: '深色' },
-                  ]}
-                />
-                <span className="field__hint">选择后立即生效；「跟随系统」随操作系统外观自动切换</span>
-              </label>
               <label className="field">
                 <span className="field__label">关闭主窗口时</span>
                 <Select
@@ -298,20 +160,27 @@ export function SettingsDialog() {
                 <span className="field__hint">最小化后主窗口从任务栏消失，右键桌宠选「打开工作台」找回</span>
               </label>
               <div className="field">
-                <span className="field__label">桌宠音效</span>
-                <label className="modal__check">
-                  <input
-                    type="checkbox"
-                    checked={petSound}
-                    onChange={(e) => {
-                      const next = e.target.checked
-                      setPetSound(next)
-                      void api.mergeConfig({ petSound: next })
-                    }}
-                  />
-                  <span className="modal__check-label">播放桌宠动画音效</span>
-                </label>
-                <span className="field__hint">开启后桌宠动画将播放内置音轨；默认静音</span>
+                <span className="field__label">模型与记忆配置</span>
+                <button
+                  className="btn btn--ghost btn--sm"
+                  onClick={() => { setOpen(false); setModelCfgOpen(true) }}
+                >
+                  打开「模型与记忆」…
+                </button>
+                <span className="field__hint">调度方式 / 服务商 / API Key / 任务档位 / 记忆触发——也在对话头部入口可达</span>
+              </div>
+              <div className="field">
+                <span className="field__label">数据存储位置</span>
+                <div className="settings-datadir">
+                  <code className="settings-datadir__path mono" title={dataDir ?? ''}>{dataDir ?? '—'}</code>
+                  <button className="icon-btn" onClick={() => void onCopyDataDir()} disabled={!dataDir} aria-label="复制路径" title="复制路径">
+                    {dirCopied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+                  </button>
+                  <button className="btn btn--ghost btn--sm" onClick={() => void onChangeDataDir()} disabled={dirBusy !== null}>
+                    {dirBusy === 'migrate' ? '迁移中…' : '更改位置…'}
+                  </button>
+                </div>
+                <span className="field__hint">对话历史、记忆与文件快照存储于此目录；更改位置时自动迁移</span>
               </div>
             </div>
             <div className="modal__actions">

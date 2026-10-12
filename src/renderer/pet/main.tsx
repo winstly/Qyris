@@ -6,6 +6,8 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import type { AppConfig } from '@/types'
+import { useThemeSync } from '@/hooks/useThemeSync'
+import '@/styles/tokens.css'
 import './pet.css'
 
 type PetState = 'idle' | 'working' | 'waiting' | 'error'
@@ -24,6 +26,11 @@ function Pet() {
   const [videoUrls, setVideoUrls] = useState<Record<string, string>>({})
   const videoRef = useRef<HTMLVideoElement>(null)
   const dragRef = useRef({ dragging: false, startX: 0, startY: 0 })
+
+  // 主题跟随系统切换（桌宠是常驻透明窗，光晕用 --red/--amber/--green，不同步就跟主窗色层错位）。
+  // 跟的是 prefers-color-scheme 而非 app 里的主题档位：theme 存在主窗 zustand(localStorage)，
+  // 桌宠入口只有 React，不该为一个色点把 useAppStore 整条依赖拖进来。
+  useThemeSync('system')
 
   // 监听主进程推送的状态
   useEffect(() => {

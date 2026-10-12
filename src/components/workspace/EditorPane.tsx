@@ -62,9 +62,25 @@ function cssVar(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim()
 }
 
-/** 给 6 位 hex 追加 2 位 alpha */
-function withAlpha(hex: string, alpha: string): string {
-  return hex.startsWith('#') && hex.length === 7 ? hex + alpha : hex
+/**
+ * 给颜色追加/替换 alpha 通道。
+ *
+ * 非 7 位 hex（rgb()/color-mix()/8 位 hex）若静默原样返回，
+ * 选区/光标/滚动条会丢失透明度变实心块——故 #rrggbb 追加 2 位；
+ * #rrggbbaa 替换末 2 位；rgb()/rgba() 重建 alpha；其它（含 color-mix()）原样返回并在 dev 下告警。
+ */
+function withAlpha(color: string, alpha: string): string {
+  const c = color.trim()
+  if (/^#([0-9a-f]{6})$/i.test(c)) return c + alpha
+  if (/^#([0-9a-f]{8})$/i.test(c)) return c.slice(0, 7) + alpha
+  const m = c.match(/^rgba?\(([^)]+)\)$/i)
+  if (m) {
+    const parts = m[1].split(/[,/\s]+/).filter(Boolean)
+    const [r, g, b] = parts
+    return `rgba(${r}, ${g}, ${b}, ${parseInt(alpha, 16) / 255})`
+  }
+  console.warn(`[withAlpha] 无法解析颜色 "${color}"，已跳过 alpha=${alpha}（请保持 Monaco 通道 token 为 7 位 hex）`)
+  return c
 }
 
 /** 从 tokens.css 读取当前配色并（重新）定义 Monaco 主题 */
@@ -77,7 +93,6 @@ function applyMonacoTheme(): void {
   const edge = cssVar('--edge')
   const edgeHair = cssVar('--edge-hair')
   const fg = cssVar('--fg')
-  const fg2 = cssVar('--fg-2')
   const muted = cssVar('--muted')
   const accent = cssVar('--accent')
   const warn = cssVar('--warn')
@@ -160,23 +175,26 @@ function applyMonacoTheme(): void {
       'editorGutter.background': s1,
       'editorGutter.border': edgeHair,
       'editor.foreground': fg,
-      'editorCursor.foreground': accent,
-      'editor.lineHighlightBackground': s3,
-      'editor.lineHighlightBorder': '#00000000',
       'editorLineNumber.foreground': muted,
-      'editorLineNumber.activeForeground': fg2,
+      'editorCursor.foreground': accent,
+      // Monaco 只认 hex：Color.fromHex 解析失败会回退 Color.red（光标行 2px 红框的真因）。
+      // 「透明」必须写 #00000000，不能写 'transparent'——同 [HEX] 锁口径。
+      'editor.lineHighlightBorder': '#00000000',
+      'editor.lineHighlightBackground': withAlpha(warn, '0f'),
+      'editorLineNumber.activeForeground': warn,
       'editor.selectionBackground': withAlpha(accent, '33'),
       'editor.inactiveSelectionBackground': withAlpha(accent, '1a'),
       'editor.selectionHighlightBackground': withAlpha(accent, '1a'),
-      'editorBracketMatch.background': withAlpha(accent, '30'),
-      'editorBracketMatch.border': withAlpha(accent, '60'),
+      'editorBracketMatch.background': withAlpha(accent, '18'),
+      'editorBracketMatch.border': '#00000000',
+      'editor.findMatchBorder': '#00000000',
       'editorIndentGuide.background': edgeHair,
       'editorIndentGuide.activeBackground': edge,
       'editor.findMatchBackground': withAlpha(warn, '40'),
       'editor.findMatchHighlightBackground': withAlpha(warn, '20'),
       'editorWidget.border': edge,
       'editorWidget.background': s3,
-      'scrollbar.shadow': '#00000030',
+      'scrollbar.shadow': withAlpha(cssVar('--text-strong') || '#000000', '30'),
       'scrollbarSlider.background': withAlpha(muted, '30'),
       'scrollbarSlider.hoverBackground': withAlpha(muted, '50'),
       'scrollbarSlider.activeBackground': withAlpha(muted, '70'),
@@ -244,13 +262,13 @@ export function EditorPane() {
       language: 'plaintext',
       theme: 'qyris',
       automaticLayout: true,
-      fontSize: 13,
       fontFamily: '"JetBrains Mono", ui-monospace, Menlo, monospace',
-      lineHeight: 20,
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
+      fontSize: 12.5,
+      lineHeight: 22,
       renderLineHighlight: 'line',
-      cursorBlinking: 'solid',
+      cursorBlinking: 'blink',
       cursorWidth: 2,
       smoothScrolling: true,
       bracketPairColorization: { enabled: true },
@@ -376,10 +394,23 @@ export function EditorPane() {
     try {
       const model = editor.getModel()
       if (model) {
+        // 保光标/选区：记录 offset，替换后钳制回同位置（AI 写文件时
+        // 用户正在看的位置不跳走；func-workspace P1-4）
+        const sel = editor.getSelection()
+        const cursorOffset = sel ? model.getOffsetAt(sel.getStartPosition()) : 0
         editor.executeEdits('external', [{
           range: model.getFullModelRange(),
           text: newValue,
         }])
+        if (sel) {
+          const maxOffset = Math.max(newValue.length, 1) - 1
+          const restored = Math.min(cursorOffset, maxOffset)
+          const pos = model.getPositionAt(restored)
+          editor.setSelection({
+            startLineNumber: pos.lineNumber, startColumn: pos.column,
+            endLineNumber: pos.lineNumber, endColumn: pos.column,
+          })
+        }
       }
     } finally {
       applyingRef.current = false
@@ -399,12 +430,30 @@ export function EditorPane() {
     <div className="editor">
       {/* 打开文件页签 */}
       {openTabs.length > 0 && (
-        <div className="editor__tabs" role="tablist" aria-label="打开的文件">
+        <div
+          className="editor__tabs"
+          role="tablist"
+          aria-label="打开的文件"
+          onKeyDown={(e) => {
+            // WAI-ARIA tabs 模式：←/→ 在页签间切换激活（roving 焦点跟走）
+            if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+            const tabs = openTabs
+            if (tabs.length === 0 || !activePath) return
+            const idx = tabs.indexOf(activePath)
+            const dir = e.key === 'ArrowRight' ? 1 : -1
+            const next = (idx + dir + tabs.length) % tabs.length
+            void openFile(tabs[next])
+            const els = (e.currentTarget as HTMLElement).querySelectorAll<HTMLDivElement>('[role="tab"]')
+            els[next]?.focus()
+            e.preventDefault()
+          }}
+        >
           {openTabs.map((p) => (
             <div
               key={p}
               role="tab"
               aria-selected={p === activePath}
+              tabIndex={p === activePath ? 0 : -1}
               className={`editor__tab ${p === activePath ? 'editor__tab--active' : ''}`}
               onClick={() => void openFile(p)}
               onContextMenu={(e) => {

@@ -1,5 +1,5 @@
 import type { ModelTiers } from '@/types'
-import { IconClose, IconCheck, IconAlert, IconFolder } from '@/components/common/icons'
+import { IconCheck, IconAlert } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
 
 interface Props {
@@ -9,6 +9,10 @@ interface Props {
   setCliPermission: (v: 'auto' | 'readonly') => void
   cliCommand: string
   setCliCommand: (v: string) => void
+  maxTurns: string
+  setMaxTurns: (v: string) => void
+  subagentMaxTurns: string
+  setSubagentMaxTurns: (v: string) => void
   provider: 'openai' | 'anthropic'
   setProvider: (v: 'openai' | 'anthropic') => void
   baseUrl: string
@@ -20,22 +24,11 @@ interface Props {
   setModel: (v: string) => void
   tiers: ModelTiers
   setTiers: React.Dispatch<React.SetStateAction<ModelTiers>>
-  editingDirs: string[]
-  setDirsDraft: React.Dispatch<React.SetStateAction<string[] | null>>
-  commitDirs: (list: string[]) => void
-  skillsDirs: string[]
-  skillMetas: { id: string }[]
-  loadSkills: () => void
-  pickSkillsDir: () => Promise<string | null | undefined>
   testResult: { ok: boolean; text: string } | null
-  testing: boolean
-  onTest: () => void
-  onClearKey: () => void
-  onSave: () => void
-  onClose: () => void
 }
 
-/** 模型设置 tab：调度方式、服务商、Base URL、API Key、任务档位、Skills 目录 */
+/** 模型配置段（模型/记忆弹窗上半）：调度方式、服务商、Base URL、API Key、任务档位。
+ *  纯 body——保存/测试等动作由宿主（ModelMemoryDialog）持有；Skills 目录已迁技能 tab 全局组 */
 export function ModelSettingsTab(p: Props) {
   return (
     <>
@@ -78,6 +71,20 @@ export function ModelSettingsTab(p: Props) {
             </label>
           </>
         )}
+        <label className="field">
+          <span className="field__label">主对话工具循环轮数上限</span>
+          <input className="field__input" type="number" min={4} max={500} step={1}
+            value={p.maxTurns} onChange={(e) => p.setMaxTurns(e.target.value)}
+            placeholder="默认 60" aria-label="主对话工具循环轮数上限" />
+          <span className="field__hint">AI 自主持续执行的单次轮数上限（API/CLI 通用），到顶即收口防失控；长程任务可调大，清空恢复默认 60</span>
+        </label>
+        <label className="field">
+          <span className="field__label">子 agent 工具循环轮数上限</span>
+          <input className="field__input" type="number" min={2} max={200} step={1}
+            value={p.subagentMaxTurns} onChange={(e) => p.setSubagentMaxTurns(e.target.value)}
+            placeholder="默认 20" aria-label="子 agent 工具循环轮数上限" />
+          <span className="field__hint">每个派发子任务的独立执行轮数（子任务聚焦语义，缺省保守）；清空恢复默认 20</span>
+        </label>
 
         {p.dispatchMode === 'api' && (
           <>
@@ -145,84 +152,12 @@ export function ModelSettingsTab(p: Props) {
           </>
         )}
 
-        {/* Skills 目录 */}
-        <div className="field">
-          <span className="field__label">Skills 目录（可多个，按序扫描，同名取首个；失焦后生效）</span>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-            {p.editingDirs.map((d, i) => (
-              <div key={i} style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                <input
-                  className="field__input mono"
-                  value={d}
-                  onChange={(e) => {
-                    const next = [...p.editingDirs]
-                    next[i] = e.target.value
-                    p.setDirsDraft(next)
-                  }}
-                  onBlur={() => p.commitDirs(p.editingDirs)}
-                  placeholder="Skills 目录绝对路径"
-                  style={{ flex: 1 }}
-                />
-                <button
-                  className="icon-btn"
-                  onClick={() => p.commitDirs(p.editingDirs.filter((_, j) => j !== i))}
-                  aria-label="移除该目录"
-                  title="移除该目录"
-                >
-                  <IconClose size={12} />
-                </button>
-              </div>
-            ))}
-            <div style={{ display: 'flex', gap: '8px' }}>
-              <button
-                className="btn btn--ghost btn--sm"
-                onClick={async () => {
-                  try {
-                    const dir = await p.pickSkillsDir()
-                    if (dir && !p.editingDirs.includes(dir)) p.commitDirs([...p.editingDirs, dir])
-                  } catch (e) { console.error('pickSkillsDir 失败：', e) }
-                }}
-                title="浏览选择目录"
-              >
-                <IconFolder size={13} /> 添加目录
-              </button>
-              {p.skillsDirs.length > 0 && (
-                <button className="btn btn--ghost btn--sm" onClick={() => void p.loadSkills()} title="重新扫描 Skills">
-                  刷新
-                </button>
-              )}
-            </div>
-          </div>
-          <span className="field__hint">
-            {p.skillsDirs.length > 0
-              ? `已扫描到 ${p.skillMetas.length} 个 Skill（每个 Skill 是一个含 SKILL.md 的子目录）`
-              : '配置目录后，AI 可在对话中按场景加载专业指令集（每个 Skill 是一个含 SKILL.md 的子目录）'}
-          </span>
-        </div>
-
         {p.testResult && (
           <div className={`notice ${p.testResult.ok ? 'notice--ok' : 'notice--err'}`}>
             {p.testResult.ok ? <IconCheck size={14} /> : <IconAlert size={14} />}
             <span>{p.testResult.text}</span>
           </div>
         )}
-      </div>
-
-      <div className="modal__actions modal__actions--split">
-        <div className="modal__actions-left">
-          {p.hasApiKey && (
-            <button className="btn btn--danger-ghost" onClick={p.onClearKey}>清除已存 Key</button>
-          )}
-        </div>
-        <div className="modal__actions-right">
-          <button className="btn btn--ghost" onClick={p.onTest} disabled={p.testing || (p.dispatchMode === 'api' && !p.baseUrl.trim())}>
-            {p.testing ? '测试中…' : '测试连接'}
-          </button>
-          <button className="btn btn--ghost" onClick={p.onClose}>取消</button>
-          <button className="btn btn--primary" onClick={p.onSave} disabled={(p.dispatchMode === 'api' && (!p.model.trim() || !p.baseUrl.trim()))}>
-            保存
-          </button>
-        </div>
       </div>
     </>
   )

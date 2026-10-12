@@ -11,3 +11,6 @@ export const dialog = { showOpenDialog: async () => ({ canceled: true, filePaths
 export const Menu = { buildFromTemplate: (): unknown => ({ popup: (): void => {} }) }
 export const screen = { getDisplayMatching: (): unknown => ({ workArea: { x: 0, y: 0, width: 0, height: 0 } }) }
 export const ipcMain = { on: (): void => {}, handle: (): void => {} }
+
+/** preview.ts 具名依赖：工具层动态 import 在桩环境加载期只要求名字存在（调用期走递归桩降级） */
+export const WebContentsView = function WebContentsView(): void {}
