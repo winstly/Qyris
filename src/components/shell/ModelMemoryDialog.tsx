@@ -41,6 +41,8 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
 
   const [memRounds, setMemRounds] = useState('')
   const [compressThreshold, setCompressThreshold] = useState('')
+  /** 自动归档长期未使用的短期/事件记忆（缺省开；显式保存的记忆永不自动清理） */
+  const [memAutoArchive, setMemAutoArchive] = useState(true)
   const [memLoaded, setMemLoaded] = useState(false)
   /** 记忆字段读取失败：保存时该段跳过写回，必须显式告知而非静默 */
   const [memError, setMemError] = useState(false)
@@ -71,6 +73,7 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
       if (!alive) return
       setMemRounds(c.memExtractRounds != null ? String(c.memExtractRounds) : '')
       setCompressThreshold(c.contextCompressThreshold != null ? String(c.contextCompressThreshold) : '')
+      setMemAutoArchive(c.memAutoArchive !== false)
       setMemLoaded(true)
     }).catch(() => {
       if (!alive) return
@@ -109,6 +112,7 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
       await api.mergeConfig({
         memExtractRounds: clampIntInput(memRounds, 2, 60) ?? undefined,
         contextCompressThreshold: clampIntInput(compressThreshold, 64000, 512000) ?? undefined,
+        memAutoArchive: memAutoArchive ? undefined : false,
       })
     }
     await refreshHasApiKey()
@@ -188,6 +192,21 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
               <span className="settings-memrounds__unit">轮 AI 回复</span>
             </div>
             <span className="field__hint">每累计多少轮 AI 回复后自动把对话蒸馏进记忆——越小记得越勤、token 消耗越多；清空输入恢复默认</span>
+          </div>
+          <div className="field">
+            <label className="settings-memtoggle">
+              <input
+                type="checkbox"
+                checked={memAutoArchive}
+                onChange={(e) => setMemAutoArchive(e.target.checked)}
+                aria-label="自动归档长期未使用的短期记忆"
+              />
+              <span>自动归档长期未使用的短期记忆</span>
+            </label>
+            <span className="field__hint">
+              30 天没用过的会话记忆与 60 天没更新的事件会被收起，不再参与检索；随时可在记忆面板恢复。
+              你明确保存的记忆永远不会被自动清理（长期记忆只调整排序，任何情况下不会自动清除）。
+            </span>
           </div>
           <div className="field">
             <span className="field__label">上下文压缩阈值</span>

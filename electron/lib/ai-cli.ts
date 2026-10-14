@@ -20,7 +20,7 @@ import { readSkillFromDirs, scanSkillsDirs } from './skills'
 import { cancelRunOnce, detectCommand, makeStreamDecoder } from './proc'
 import { buildCmdLine, splitCliCommand } from './cmd-quote'
 import { SESSION_SUMMARY_HEADING } from '../../shared/prompt-contract'
-import { SKILL_ATTACH_RE, SKILL_MULTI_RE, SKILL_SINGLE_RE } from '../../shared/skill-protocol'
+import { SKILL_MULTI_RE, SKILL_SINGLE_RE } from '../../shared/skill-protocol'
 import { buildChildEnv } from './proc-env'
 import { errorMessage } from './util'
 import { mainLog } from './log-file'
@@ -182,18 +182,6 @@ export function serializeConversation(messages: unknown, sessionSummary?: string
   return head ? `${head}\n\n${joined}` : joined
 }
 
-/** @internal 下一轮 Skill 请求指令（尾行协议；id 允许中文目录名） */
-const NEXT_SKILL_RE = /\[\[NEXT_SKILL:\s*([^\]\n]+?)\s*\]\]\s*$/i
-
-/** 从回复尾部提取 [[NEXT_SKILL: id1, id2]] 并剥离 */
-export function extractNextSkill(text: string): { text: string; ids: string[] } {
-  if (!text) return { text, ids: [] }
-  const m = text.match(NEXT_SKILL_RE)
-  if (!m || m.index === undefined) return { text, ids: [] }
-  const ids = m[1].split(/[,，、]/).map((s) => s.trim()).filter(Boolean)
-  return { text: text.slice(0, m.index).trimEnd(), ids }
-}
-
 /** @internal 从回复尾部提取 [[START_COMMANDS: ...]] 并剥离 */
 export function extractStartCommands(text: string): { text: string; commands: { name: string; run: string; url?: string }[] } {
   if (!text) return { text, commands: [] }
@@ -234,7 +222,7 @@ export function extractSkillIds(messages: unknown): string[] {
   }
   for (const m of msgs) {
     if (typeof m?.content !== 'string') continue
-    for (const re of [SKILL_MULTI_RE, SKILL_SINGLE_RE, SKILL_ATTACH_RE]) {
+    for (const re of [SKILL_MULTI_RE, SKILL_SINGLE_RE]) {
       const rx = new RegExp(re.source, 'g')
       for (let x = rx.exec(m.content); x; x = rx.exec(m.content)) pushIds(x[1])
     }
@@ -260,8 +248,8 @@ export async function resolveSkillBlock(dirs: string[], ids: string[]): Promise<
   ].join('\n\n')
 }
 
-/** @internal 可用 Skill 索引（名称+描述，排除已内联全文的）：CLI 无按需加载工具，
- *  索引让它感知可用域，并给出 [[NEXT_SKILL]] 请求通道（下一轮附带全文） */
+/** @internal 可用 Skill 索引（名称+描述，排除已内联全文的）：统一教 load_skill 工具——
+ *  API 档原生 tool-call、CLI 档经 MCP 工具面，两档都可达 */
 export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Promise<string> {
   if (dirs.length === 0) return ''
   const excluded = new Set(excludeIds)
@@ -272,7 +260,7 @@ export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Pro
   }
   if (rows.length === 0) return ''
   return [
-    '可用 Skill 索引（仅有摘要；若某个 Skill 与任务相关，在回复最后一行输出 [[NEXT_SKILL: <id>]] 请求下一轮附带其完整内容，多个用逗号分隔。该行由系统消费、不会展示给用户）：',
+    '可用 Skill 索引（仅有摘要；若某个 Skill 与任务相关，调用 load_skill 工具加载其完整内容，本轮即生效）：',
     ...rows,
   ].join('\n')
 }

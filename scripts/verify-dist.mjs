@@ -88,7 +88,10 @@ for (const { name, mac } of productDirs) {
 
   for (const rel of unpackedRequired) {
     const p = path.join(resources, 'app.asar.unpacked', rel)
-    if (!existsSync(p) || statSync(p).size === 0) {
+    // 目录条目（如 node-pty/prebuilds）：exists 即可——Windows 的 statSync 对目录恒报 size 0，
+    // 不能拿 size 判空；size 断言只对文件有意义
+    const st = existsSync(p) ? statSync(p) : null
+    if (!st || (st.isFile() && st.size === 0)) {
       console.error(`[verify-dist] ❌ ${name}: app.asar.unpacked 缺少 ${rel}`)
       failed = true
     }

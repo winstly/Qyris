@@ -40,7 +40,7 @@ export function DetailDialog({ title, rows, onClose, footer }: {
     <div className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose() }}>
       <div ref={trapRef} className="modal modal--wide" role="dialog" aria-modal="true" aria-label={`${title} 详情`}>
         <div className="modal__head">
-          <span>{title}</span>
+          <span title={title}>{title}</span>
           <button className="icon-btn" onClick={onClose} aria-label="关闭"><IconClose size={14} /></button>
         </div>
         <div className="modal__body">

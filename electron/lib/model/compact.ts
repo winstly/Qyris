@@ -4,7 +4,7 @@
  * 纯度纪律（为什么 summarize 不自己调 provider）：
  *   补全能力是运行期注入的（complete 回调），本模块因此不 import 任何 provider——
  *   既不把 ai-api / ai-cli 的耦合带进来，也能用假 complete 离线测全链路。
- *   （同 memory/agent.ts 的 setLlmHook 思路：被测模块不选通道，通道由调用方给。）
+ *   （同 memory/agent.ts 的 setProviderOverride 思路：被测模块不选通道，通道由调用方给。）
  *
  * 与渲染层（useChatStore.maybeCompressContext）的对齐口径：
  *   · 同一份转录组装：user/assistant 原文 + 工具压一行，不付工具结果全文 token；

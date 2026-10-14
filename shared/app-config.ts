@@ -84,6 +84,8 @@ export interface AppConfig {
   embedRemoteHost?: string | null
   /** 记忆整理触发轮次：自游标起累计多少轮 assistant 回复后做滚动提取（2..60），缺省 6 */
   memExtractRounds?: number
+  /** 自动归档长期未使用的短期/事件记忆（缺省 true；显式保存的记忆永不自动清理） */
+  memAutoArchive?: boolean
   /** 上下文压缩阈值（token 数）：历史超过此值时自动压缩旧消息为摘要，缺省 256000；范围 64000~512000 */
   contextCompressThreshold?: number
   /** 主窗口关闭行为：缺省/ask=每次询问；minimize=隐藏窗口保留桌宠；quit=退出整个应用 */

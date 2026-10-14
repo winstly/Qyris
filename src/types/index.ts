@@ -5,7 +5,7 @@
 import type {
   AiCompletion, AiDeltaPayload, AiReasoningPayload, AiToolCall, ChatMessage, ChatMessagePatch,
   CliAgentEventPayload, CliToolEventPayload, CliToolResultPayload, FileContent, GitFileEntry, GitStatus,
-  MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, MemoryStatus, MemoryTier,
+  MemoryCategory, MemoryHit, MemoryItem, MemoryLastTidy, MemoryPatch, MemoryStats, MemoryStatus, MemoryTier,
   MessageMeta, PreviewConsoleEntry, SkillMeta, ToolCall, ToolResultEntry, TreeNode,
 } from '../../shared/ipc-types'
 import type { AppConfig, DeployServer, ModelTiers, RecentProject, StartCommand } from '../../shared/app-config'
@@ -14,7 +14,7 @@ import type { McpServerEntry, McpServerOptions } from '../../shared/mcp'
 export type {
   AiCompletion, AiDeltaPayload, AiReasoningPayload, AiToolCall, ChatMessage, ChatMessagePatch,
   CliAgentEventPayload, CliToolEventPayload, CliToolResultPayload, FileContent, GitFileEntry, GitStatus,
-  MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, MemoryStatus, MemoryTier,
+  MemoryCategory, MemoryHit, MemoryItem, MemoryLastTidy, MemoryPatch, MemoryStats, MemoryStatus, MemoryTier,
   MessageMeta, PreviewConsoleEntry, SkillMeta, ToolCall, ToolResultEntry, TreeNode,
   AppConfig, DeployServer, ModelTiers, RecentProject, StartCommand,
   McpServerEntry, McpServerOptions,

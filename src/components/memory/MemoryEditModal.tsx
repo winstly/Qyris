@@ -111,7 +111,7 @@ export function MemoryEditModal({ item, onSave, onClose, readOnly }: {
               />
             </label>
             <label className="field memory-modal__field-importance">
-              <span className="field__label">重要度</span>
+              <span className="field__label">基础重要度</span>
               <input
                 className="field__input memory-modal__importance"
                 type="number"

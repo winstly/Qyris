@@ -108,9 +108,12 @@ CREATE TABLE IF NOT EXISTS mem_items (
   title TEXT NOT NULL, content TEXT NOT NULL, source_json TEXT,
   importance REAL NOT NULL DEFAULT 0.5, access_count INTEGER NOT NULL DEFAULT 0,
   last_accessed_at INTEGER, status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','merged','archived')),
-  superseded_by TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+  superseded_by TEXT, origin TEXT NOT NULL DEFAULT 'distill',
+  archived_at INTEGER, archived_by TEXT, archived_reason TEXT,
+  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mem_scope ON mem_items(project_key, tier, status);
+CREATE INDEX IF NOT EXISTS idx_mem_active_cat_upd ON mem_items(category, updated_at) WHERE status = 'active';
 CREATE VIRTUAL TABLE IF NOT EXISTS mem_fts USING fts5(title, content, content='mem_items', content_rowid='rowid', tokenize='trigram');
 CREATE TRIGGER IF NOT EXISTS mem_fts_ai AFTER INSERT ON mem_items BEGIN INSERT INTO mem_fts(rowid, title, content) VALUES (new.rowid, new.title, new.content); END;
 CREATE TRIGGER IF NOT EXISTS mem_fts_ad AFTER DELETE ON mem_items BEGIN INSERT INTO mem_fts(mem_fts, rowid, title, content) VALUES ('delete', old.rowid, old.title, old.content); END;
@@ -120,11 +123,13 @@ const SCHEMA_VEC = 'CREATE VIRTUAL TABLE IF NOT EXISTS mem_vec USING vec0(item_i
 let db = null, vecReady = false;
 function loadVec(t) { try { const v = require('sqlite-vec'); v.load(t); vecReady = true; } catch { vecReady = false; } }
 function ensureIdx(t) { try { if (t.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_mem_active_title'").get()) return; t.transaction(() => { const gs = t.prepare("SELECT project_key, category, title, COUNT(*) AS n FROM mem_items WHERE status = 'active' AND category != 'summary' GROUP BY project_key, category, title HAVING n > 1").all(); if (gs.length > 0) { const a = t.prepare("UPDATE mem_items SET status = 'archived', superseded_by = ? WHERE id = ?"); for (const g of gs) { const k = t.prepare("SELECT id FROM mem_items WHERE project_key = ? AND category = ? AND title = ? AND status = 'active' ORDER BY updated_at DESC, rowid DESC LIMIT 1").get(g.project_key, g.category, g.title); const os = t.prepare("SELECT id FROM mem_items WHERE project_key = ? AND category = ? AND title = ? AND status = 'active' AND id != ?").all(g.project_key, g.category, g.title, k.id); for (const o of os) a.run(k.id, o.id); } } t.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_mem_active_title ON mem_items(project_key, category, title) WHERE status = 'active' AND category != 'summary'"); })(); } catch {} }
+// 既有库补列（CREATE TABLE IF NOT EXISTS 不会加列）：origin 契约 + 归档痕迹三列
+function ensureCols(t) { for (const c of ["ALTER TABLE mem_items ADD COLUMN origin TEXT NOT NULL DEFAULT 'distill'", 'ALTER TABLE mem_items ADD COLUMN archived_at INTEGER', 'ALTER TABLE mem_items ADD COLUMN archived_by TEXT', 'ALTER TABLE mem_items ADD COLUMN archived_reason TEXT']) { try { t.exec(c); } catch {} } }
 parentPort.on('message', (msg) => {
   const { id, op } = msg;
   try {
     switch (op) {
-      case 'init': { const d = msg.dir; mkdirSync(d, { recursive: true }); const inst = new Database(path.join(d, 'qyris.db')); inst.pragma(d.startsWith('\\\\\\\\') ? 'journal_mode = DELETE' : 'journal_mode = WAL'); inst.pragma('foreign_keys = ON'); loadVec(inst); inst.exec(SCHEMA); if (vecReady) inst.exec(SCHEMA_VEC); ensureIdx(inst); db = inst; parentPort.postMessage({ id, result: { vecReady } }); break; }
+      case 'init': { const d = msg.dir; mkdirSync(d, { recursive: true }); const inst = new Database(path.join(d, 'qyris.db')); inst.pragma(d.startsWith('\\\\\\\\') ? 'journal_mode = DELETE' : 'journal_mode = WAL'); inst.pragma('foreign_keys = ON'); loadVec(inst); inst.exec(SCHEMA); if (vecReady) inst.exec(SCHEMA_VEC); ensureCols(inst); ensureIdx(inst); db = inst; parentPort.postMessage({ id, result: { vecReady } }); break; }
       case 'get': { const s = db.prepare(msg.sql); const r = msg.params ? s.get(...msg.params) : s.get(); parentPort.postMessage({ id, result: r ?? null }); break; }
       case 'all': { const s = db.prepare(msg.sql); const r = msg.params ? s.all(...msg.params) : s.all(); parentPort.postMessage({ id, result: r }); break; }
       case 'run': { const s = db.prepare(msg.sql); const i = msg.params ? s.run(...msg.params) : s.run(); parentPort.postMessage({ id, result: { changes: i.changes, lastInsertRowid: Number(i.lastInsertRowid) } }); break; }

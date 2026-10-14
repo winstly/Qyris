@@ -29,7 +29,6 @@ import { uid, safeParseObject } from '@/utils/id'
 import { estimateTokens, estimateMessagesTokens } from '@/utils/tokens'
 import { buildHistory, HISTORY_WINDOW } from '@/utils/chatHistory'
 import { CONTEXT_SUMMARY_HEADING, MEMORY_BLOCK_HEADING, SESSION_SUMMARY_HEADING } from '../../shared/prompt-contract'
-import { skillAttachMark } from '../../shared/skill-protocol'
 import { CancellationTokenSource } from '@base/cancellation'
 import { sleepInterruptible as tokenSleep } from '@base/async'
 import type {
@@ -69,8 +68,6 @@ interface ChatSlice {
   usage: { input: number; output: number; agents?: { input: number; output: number } }
   /** 当前对话会话 id：AI 写文件的快照按会话分组，重置对话时换新 */
   sessionId: string
-  /** CLI 模式：模型请求下一轮附带的 Skill id（按已扫描索引校验后写入） */
-  cliSkills: string[]
   /** 最近一次记忆上下文取到的会话摘要原文（null = 暂无摘要）；CLI 模式随 aiChatStream 透传主进程前置 */
   lastSummary: string | null
   /** 是否还有更早的历史可向上翻页（keyset 分页游标，restore 时由主进程给出） */
@@ -96,7 +93,6 @@ function emptyChatSlice(): ChatSlice {
     pendingElement: null,
     usage: { input: 0, output: 0 },
     sessionId: uid(),
-    cliSkills: [],
     lastSummary: null,
     hasMoreOlder: false,
     oldestSeq: null,
@@ -620,7 +616,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const epoch = oldEpoch + 1
     patchSlice(project, {
       messages: [], status: 'idle', pendingAsk: null, activeRequestId: null,
-      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: newSessionId, cliSkills: [], epoch,
+      answers: {}, pendingElement: null, usage: { input: 0, output: 0 }, sessionId: newSessionId, epoch,
       lastSummary: null,
       hasMoreOlder: false, oldestSeq: null, loadingOlder: false,
     })
@@ -694,8 +690,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       pendingAsk: null,
       activeRequestId: null,
       answers: {},
-      cliSkills: [],
-      epoch: cur.epoch + 1,
+        epoch: cur.epoch + 1,
     })
     // DB 同步：await 截断+覆写完成后再广播——确保对端 resync 时 DB 已是最新态。
     // 编辑重发本来就丢掉原 toolCalls/后续消息（上面 slice），库与切片保持一致。
@@ -727,8 +722,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       cancelled: false,
       pendingElement: null,
       usage: { input: 0, output: 0 },
-      cliSkills: [],
-      lastSummary: null,
+        lastSummary: null,
       sessionId: session.sessionId,
       hasMoreOlder: session.hasMoreOlder,
       oldestSeq: session.oldestSeq,
@@ -817,7 +811,7 @@ async function resyncMirrored(project: string): Promise<void> {
         patchSlice(project, {
           messages: resp.messages, sessionId: resp.sessionId, status: 'idle',
           activeRequestId: null, mirrored: null, pendingAsk: null, answers: {},
-          usage: { input: 0, output: 0 }, cliSkills: [], lastSummary: null,
+          usage: { input: 0, output: 0 }, lastSummary: null,
           hasMoreOlder: resp.hasMore, oldestSeq: resp.oldestSeq, loadingOlder: false,
         })
         return
@@ -1001,7 +995,11 @@ function searchQueryOf(content: string): string {
 /** 单条记忆的注入行：content 截 80 字摘要 */
 function memoryLine(h: MemoryHit): string {
   const digest = h.content.length > 80 ? h.content.slice(0, 80) + '…' : h.content
-  return `- [${h.category}] ${h.title}：${digest}`
+  // 新鲜度标注（Claude Code memoryFreshnessText 同思路）：旧记忆容易把对话拽回历史话题，
+  // 让模型显式看到「这条有多老」，与块标题「可能过时」形成双重折扣信号
+  const age = Math.floor((Date.now() - h.updatedAt) / 86_400_000)
+  const stamp = age >= 1 ? `（${age} 天前记录）` : ''
+  return `- [${h.category}] ${h.title}${stamp}：${digest}`
 }
 
 /** 引用 chip：把命中的记忆 id/title 写进最后一条 user 消息 meta.citations（纯 UI 元数据，不进 AI payload），并同步回库 */
@@ -1207,17 +1205,6 @@ async function runAgentLoop(project: string) {
   if (getSlice(project)?.epoch !== epoch) return
   const history = historyMessages
 
-  // CLI 模式：把上一轮模型请求附带的 Skill 以标记注入本轮首条 user 历史
-  if (appState.settings.dispatchMode === 'claude-cli' && slice0 && slice0.cliSkills.length > 0) {
-    const pending = slice0.cliSkills
-    for (let i = 0; i < history.length; i++) {
-      if (history[i].role === 'user') {
-        history[i] = { ...history[i], content: `${history[i].content ?? ''}\n${skillAttachMark(pending)}` }
-        break
-      }
-    }
-  }
-
   // 工具调用不设轮数上限：由「停止生成」取消（cancelled 每轮检查）兜底
   let lastRequestId: string | null = null
   for (;;) {
@@ -1300,10 +1287,6 @@ async function runAgentLoop(project: string) {
     history.push(toHistoryEntry(completion))
 
     if (appState.settings.dispatchMode === 'claude-cli') {
-      // 合并用户级 + 项目级 Skill 校验
-      const projectMetas = useAppStore.getState().projectSkillMetas
-      const knownSkills = new Set([...appState.skillMetas, ...projectMetas].map((m) => m.id))
-      const skillReq = (completion.nextSkill ?? []).map((s) => s.trim()).filter((s) => s && knownSkills.has(s))
       const cmds = (completion.startCommands ?? [])
         .map((s) => ({
           name: String(s?.name ?? '').trim(),
@@ -1311,11 +1294,10 @@ async function runAgentLoop(project: string) {
           url: typeof s?.url === 'string' && s.url.trim() ? s.url.trim() : undefined,
         }))
         .filter((s) => s.name && s.run)
-      // [[START_COMMANDS]] 协议：AI 编译首次提交 + 发给 AI 修复后的修正均生效
+      // [[START_COMMANDS]] 协议（AI 编译/诊断修复 prompt 教学）：首次提交 + 修正均生效
       if (cmds.length > 0) {
         void useStartupStore.getState().setStartupCommands(cmds, project)
       }
-      if (getSlice(project)?.epoch === epoch) patchSlice(project, { cliSkills: skillReq })
     }
 
     if (completion.toolCalls.length === 0) {

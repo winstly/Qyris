@@ -53,7 +53,11 @@ async function main(): Promise<void> {
   setReadyOverride(true)
   setEmbedder((texts) => Promise.resolve(texts.map(fakeVec)))
 
-  const [search, save, archive] = memoryTools
+  // 按名取工具（不按位置解构——memoryTools 数组可插入新工具，位置契约不存在）
+  const pick = (name: string) => memoryTools.find((t) => t.name === name)!
+  const search = pick('memory_search')
+  const save = pick('memory_save')
+  const archive = pick('memory_archive')
   const [previewOpen, previewConsole] = previewTools
   const ctx = { projectRoot: root, permission: 'write' as const }
 
@@ -80,12 +84,12 @@ async function main(): Promise<void> {
     console.log('③ memory_archive：归档与幂等：')
     const id = /id=(mem_[0-9a-f-]+)/.exec(s1.content)?.[1] ?? ''
     assert(id.startsWith('mem_'), `从检索结果提取到 id`)
-    const a1 = await archive.execute({ id }, ctx)
+    const a1 = await archive.execute({ id, reason: '测试归档' }, ctx)
     assert(!a1.isError, `归档成功（实际：${a1.content.slice(0, 80)}）`)
     const s3 = await search.execute({ query: '包管理器 pnpm' }, { projectRoot: root, permission: 'readonly' })
     assert(!s3.content.includes(id), `归档后默认检索不再出现`)
-    const a2 = await archive.execute({ id }, ctx)
-    assert(!a2.isError, `重复归档幂等成功（UPDATE 无 status 过滤，重复归档无害）`)
+    const a2 = await archive.execute({ id, reason: '测试归档' }, ctx)
+    assert(!a2.isError, `重复归档幂等成功（已归档 → 无操作不报错）`)
 
     console.log('④ applyServerPatch：标签/策略/备注纯函数（原样应用语义，去重在工具层入参校验）：')
     const servers: DeployServer[] = [

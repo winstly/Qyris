@@ -11,7 +11,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import { serializeConversation, testCliConnection, setCliCommandForTest, extractNextSkill, extractStartCommands, extractSkillIds, resolveSkillBlock, buildSkillIndex } from '../electron/lib/ai-cli'
+import { serializeConversation, testCliConnection, setCliCommandForTest, extractStartCommands, extractSkillIds, resolveSkillBlock, buildSkillIndex } from '../electron/lib/ai-cli'
 
 let failures = 0
 function assert(cond: boolean, label: string): void {
@@ -85,18 +85,11 @@ async function main(): Promise<void> {
     { role: 'system', content: 'sys' },
     { role: 'user', content: '请先用 load_skill 依次加载以下 2 个 Skill，全部加载后再执行：ding, frontend-design\n\n任务正文' },
     { role: 'assistant', content: 'ok' },
-    { role: 'user', content: '请先用 load_skill 加载 Skill「debug-react」，再执行。\n还有 ding\n[附带 Skill：review-style]' },
+    { role: 'user', content: '请先用 load_skill 加载 Skill「debug-react」，再执行。\n还有 ding' },
   ]
   const ids = extractSkillIds(skillMsgs)
-  assert(JSON.stringify(ids) === JSON.stringify(['ding', 'frontend-design', 'debug-react', 'review-style']), `三种指令形态提取 + 去重保序（实际 ${JSON.stringify(ids)}）`)
+  assert(JSON.stringify(ids) === JSON.stringify(['ding', 'frontend-design', 'debug-react']), `两种指令形态提取 + 去重保序（实际 ${JSON.stringify(ids)}）`)
   assert(extractSkillIds([{ role: 'user', content: '普通消息' }]).length === 0, '无指令返回空')
-
-  console.log('extractNextSkill：')
-  const ns = extractNextSkill('正文\n[[NEXT_SKILL: ding, 钉味2]]')
-  assert(ns.ids.join('|') === 'ding|钉味2' && ns.text === '正文', '尾行多 id 提取（含中文目录名）+ 剥离')
-  assert(extractNextSkill('正文没有指令').ids.length === 0, '无指令返回空')
-  assert(extractNextSkill('[[NEXT_SKILL: a]]\n后续').ids.length === 0, '非末尾不提取')
-  assert((extractNextSkill('正文\n[[NEXT_MODEL: m1]]').text.includes('NEXT_MODEL')), 'NEXT_SKILL 提取不误伤 NEXT_MODEL')
 
   console.log('extractStartCommands：')
   const sc = extractStartCommands('正文\n[[START_COMMANDS: [{"name":"portal","run":"npm run dev"},{"name":"admin","run":"npm run dev"}]]]')
@@ -141,7 +134,8 @@ async function main(): Promise<void> {
     const idx = await buildSkillIndex(dirs, ['ding'])
     assert(idx.includes('review-style：评审风格（多 agent 代码评审）'), '索引含名称与描述')
     assert(!idx.includes('钉味'), '已内联的 id 从索引排除')
-    assert(idx.includes('[[NEXT_SKILL:'), '索引含请求通道说明')
+    assert(idx.includes('load_skill'), '索引统一教 load_skill（本轮生效，标签协议已退役）')
+    assert(!idx.includes('[[NEXT_SKILL:'), '不再教正文标签（协议已删）')
     assert(await buildSkillIndex([], []) === '', '无目录索引为空')
   } finally {
     rmSync(skillDir, { recursive: true, force: true })

@@ -49,13 +49,13 @@
  */
 import { activeMcpServers, getConfig, isMcpEnabled, type AppConfig } from './config'
 import { CONTEXT_SUMMARY_HEADING, CONTEXT_SUMMARY_PREFIX, MEMORY_BLOCK_PREFIX, SESSION_SUMMARY_HEADING } from '../../shared/prompt-contract'
+import type { MemoryOrigin } from '../../shared/ipc-types'
 import { mainLog } from './log-file'
 import { testApiConnection } from './ai-api'
 import {
   buildSkillIndex,
   cliCancel,
   extractSkillIds,
-  extractNextSkill,
   extractStartCommands,
   resolveSkillBlock,
   testCliConnection,
@@ -74,7 +74,7 @@ import { setAgentRunContext } from './model/run-context'
 import { resolveChatProvider } from './model/provider-resolve'
 import { isHostRoutedTool, openHostToolProxy, type HostToolProxyEndpoint } from './mcp/proxy'
 import { executeTool, isDeferredTool, toolsForPermission } from './tools'
-import { ensureExternalTools } from './mcp/external'
+import { ensureExternalTools, externalPoolStatus } from './mcp/external'
 import type { ContentPart, Message, ModelProvider, Tool, ToolPermission, Usage } from './model/types'
 
 /** 补全结果 / 工具调用载荷（唯一定义在 shared/ipc-types，此处再导出供主进程消费） */
@@ -119,9 +119,8 @@ export async function aiChatStream(
   windowId: number | null = null,
   /** 记忆反哺通道（渲染层同时把摘要/记忆块写进 system 消息，二者互为兜底）：
    *  sessionSummary=工作记忆滚动摘要；memoryBlock=长期记忆检索块（预格式化含节标题，原样透传）；
-   *  contextSummary=早期对话压缩摘要；systemPrompt=覆盖系统提示（蒸馏类单轮调用用）；
-   *  outputFormat=旧 CLI 输出格式开关（mem agent 用 json）——统一后无对应物，保留签名不读值。 */
-  opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string },
+   *  contextSummary=早期对话压缩摘要；systemPrompt=覆盖系统提示（蒸馏类单轮调用用）。 */
+  opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string },
 ): Promise<AiCompletion> {
   const cfg = await getConfig().catch(() => null)
   const permission: ToolPermission = cfg?.aiCliPermission === 'readonly' ? 'readonly' : 'exec'
@@ -131,12 +130,16 @@ export async function aiChatStream(
   inflight.set(requestId, controller)
   if (windowId != null) registerRequestWindow(requestId, windowId)
 
+  // 工具调用来源（记忆写入打标）：用户明说「记住」类意图 → user_explicit（终身保护契约）；
+  // 否则 agent_suggest。蒸馏档由 memory/agent 自带 distill，不走这里
+  const toolOrigin: MemoryOrigin = inferToolOrigin(messages)
+
   // 编排工具（dispatch_subtasks）的事件出口挂在本 run 上，CLI 通道只能经 MCP 调工具——
   // 拉起主进程代行通道让 MCP 子进程把编排调用送回本进程执行（见 mcp/proxy.ts）
   let hostProxy: HostToolProxyEndpoint | null = null
   if (dispatchMode === 'claude-cli' && wantTools) {
     hostProxy = await openHostToolProxy((name, input) =>
-      executeTool(name, input, { projectRoot, signal: controller.signal, permission }),
+      executeTool(name, input, { projectRoot, signal: controller.signal, permission, origin: toolOrigin }),
     )
   }
 
@@ -155,7 +158,7 @@ export async function aiChatStream(
   let providerHandle: ModelProvider | null = null
   try {
     providerHandle = await resolveChatProvider({
-      dispatchMode, provider, baseUrl, model, projectRoot, cfg, permission, wantTools, hostProxy,
+      dispatchMode, provider, baseUrl, model, projectRoot, cfg, permission, wantTools, hostProxy, toolOrigin,
     })
     const modelProvider = providerHandle
     // 提示词工具面 = 通道实际可达面（与 MCP 暴露面 / runner 执行面同源，不许提示词多说一个字）
@@ -263,6 +266,7 @@ export async function aiChatStream(
       ...(dispatchMode === 'claude-cli' ? { maxContextTokens: CLI_CONTEXT_TOKENS } : {}),
       signal: controller.signal,
       projectRoot,
+      toolOrigin,
       onEvent,
     })
 
@@ -278,11 +282,9 @@ export async function aiChatStream(
         name: p.name,
         arguments: typeof p.input === 'string' ? p.input : JSON.stringify(p.input ?? {}),
       }))
-    const skill = extractNextSkill(rawText)
-    const cmds = extractStartCommands(skill.text)
+    const cmds = extractStartCommands(rawText)
     let reasoning = reasoningParts.join('')
     const notes: string[] = []
-    if (skill.ids.length > 0) notes.push(`下一轮将附带 Skill：${skill.ids.join('、')}`)
     if (cmds.commands.length > 0) {
       notes.push(`启动命令清单已提交（${cmds.commands.length} 项：${cmds.commands.map((c) => c.name).join('、')}）`)
     }
@@ -301,8 +303,7 @@ export async function aiChatStream(
       // 只含交互型调用（askUserQuestion）：渲染层按既有 askUser 流程挂起等回答；常规工具恒为空
       toolCalls: deferredCalls,
       finishReason: 'stop',
-      nextSkill: skill.ids,
-      // 原样透传（含可选 url：AI 编译的预览地址，渲染层会读）——与旧 CLI 链路同口径
+      // 原样透传（含可选 url：AI 编译的预览地址，渲染层会读）
       startCommands: cmds.commands,
     }
   } catch (e) {
@@ -408,6 +409,19 @@ function collectSkillDirs(projectRoot: string | null, cfg: AppConfig | null): st
   return collectSkillDirsShared(projectRoot, cfg ?? { skillsDirs: [] })
 }
 
+/** 工具调用来源推断（v1 启发式）：本轮用户话语含「记住」类显式意图 → user_explicit（记忆终身保护
+ *  契约的触发点）；否则 agent_suggest（agent 主动沉淀）。打标在执行侧，模型不可自填。 */
+function inferToolOrigin(messages: unknown): MemoryOrigin {
+  const arr = Array.isArray(messages) ? messages : []
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const m = arr[i] as { role?: unknown; content?: unknown } | null
+    if (m && m.role === 'user' && typeof m.content === 'string') {
+      return /记住|记一下|别忘了|帮我记|存下来|remember/i.test(m.content) ? 'user_explicit' : 'agent_suggest'
+    }
+  }
+  return 'agent_suggest'
+}
+
 /**
  * 装载：渲染层消息 → store；本轮用户输入从尾部拆出交给 runAgent（runAgent 负责落这条 user）。
  *
@@ -448,7 +462,8 @@ async function seedConversation(
     system = opts.systemPrompt
   } else {
     const parts: string[] = [buildToolRealityBlock(surfaceTools)]
-    // Skill 内联（历史引用的全文）+ 可用索引（[[NEXT_SKILL]] 请求通道），与旧 CLI 同一套协议。
+    // Skill 内联（历史引用的全文）+ 可用索引（统一教 load_skill 工具，本轮生效——
+    // API 档原生 tool-call、CLI 档经 MCP 工具面，两档都可达）。
     // 引用提取看**全量 wire**（含本轮 user）：skillInstruction.ts 的加载指令是拼在用户消息上的，
     // 只扫 history 会漏掉「本轮刚触发的 Skill」——那正是最需要内联的一次
     const skillDirs = collectSkillDirs(projectRoot, cfg)
@@ -459,16 +474,32 @@ async function seedConversation(
     ])
     if (skillBlock) parts.push(skillBlock)
     if (skillIndex) parts.push(skillIndex)
-    // 外部 MCP 现状兜底：本域配了启用 server 但工具面暂无 mcp__ 工具（连接中/失败）时，
-    // 给模型一句现状说明——「知晓」不冒充「可用」，不编造工具（可达面原则不破）
+    // 外部 MCP 现状兜底：本域配了启用 server 但工具面暂无 mcp__ 工具时，按连接池真实状态
+    // 分两态说明——「知晓」不冒充「可用」，不编造工具（可达面原则不破）
     {
       const mcpCfg = activeMcpServers(cfg, projectRoot)
       const names = Object.keys(mcpCfg).filter((n) => isMcpEnabled(mcpCfg[n]))
       if (names.length > 0 && !surfaceTools.some((t) => t.name.startsWith('mcp__'))) {
-        parts.push(
-          `【外部 MCP 现状】本工程配置了 ${names.length} 个 MCP server（${names.join('、')}），` +
-          '当前工具面暂无其工具（启动中或连接失败）。用户要用它们时，如实说明现状并可稍后重试。',
-        )
+        const st = externalPoolStatus(projectRoot)
+        if (st.connecting) {
+          parts.push(
+            `【外部 MCP 现状】本工程配置了 ${names.length} 个 MCP server（${names.join('、')}），` +
+            '连接正在建立中，当前工具面暂无其工具。用户要用它们时，如实说明并建议稍后重试（连接完成后的下一轮即可用）。',
+          )
+        } else if (Object.keys(st.errors).length > 0) {
+          const detail = Object.entries(st.errors)
+            .map(([n, e]) => `- ${n}：${e}`)
+            .join('\n')
+          parts.push(
+            `【外部 MCP 现状】本工程配置了 ${names.length} 个 MCP server，但当前均未连接成功：\n${detail}\n` +
+            '用户要用它们时，如实说明失败原因，不要尝试调用不存在的工具；用户修复配置或恢复 server 后再试。',
+          )
+        } else {
+          parts.push(
+            `【外部 MCP 现状】本工程配置了 ${names.length} 个 MCP server（${names.join('、')}），` +
+            '当前工具面暂无其工具。用户要用它们时，如实说明现状并可稍后重试。',
+          )
+        }
       }
     }
     if (systemTexts.length > 0) {

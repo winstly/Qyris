@@ -9,7 +9,7 @@ import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync } from 'node:
 import os from 'node:os'
 import path from 'node:path'
 import assert from 'node:assert/strict'
-import { initDbAt, closeDb, dataDir, vecReadyFlag, projectKey } from '../electron/lib/db'
+import { initDbAt, closeDb, dataDir, getDb, vecReadyFlag, projectKey } from '../electron/lib/db'
 import {
   messagesRecent, messagesBefore, messageAppend, messagePatch, messagesTruncate, projectDataDelete,
 } from '../electron/lib/messages'
@@ -17,7 +17,8 @@ import type { StoredMessage } from '../electron/lib/messages'
 import {
   memoryList, memorySearch, memoryUpdate, memoryDelete, memoryClear, memoryStats,
   memoryCreate, memoryMoveScope, addDistillTokens, setEmbedder, memoryArchive,
-  createOrFoldAtomic, memoryImportData,
+  memoryUnarchive, createOrFoldAtomic, memoryImportData,
+  runDecayJob, memoryDecayAudit, memoryRestoreMany,
 } from '../electron/lib/memory/service'
 import { setReadyOverride } from '../electron/lib/memory/embed'
 import { setConfigWriter, migrateDataDir } from '../electron/lib/migrate'
@@ -290,11 +291,15 @@ async function main(): Promise<void> {
       assert.equal(r.hits[0].id, itemT2.id)
       assert.ok(r.hits[0].score > 1 / 61, '向量路贡献了 RRF 基础分')
     })
-    await checkAsync('RRF 融合：双路命中分值 = 2/(60+1) + importance 加权 + 新近度（封顶 0.1）', async () => {
+    await checkAsync('双轨打分 = 0.55·rrf_norm + 0.20·importance + 0.25·activation（钉公式形状）', async () => {
+      // 行状态取检索前快照（打分先于 access 回写），镜像公式与实现对照
+      const it = (await memoryList(root)).items.find((i) => i.id === itemA.id)!
       const r = await memorySearch('支付结算', root)
       assert.equal(r.hits[0].id, itemA.id)
-      // itemA：FTS rank1 + vec rank1 ≈ 0.0328，importance 0.8*0.05=0.04，新近 ≈0.1 → ≈0.1728
-      assert.ok(r.hits[0].score > 0.17 && r.hits[0].score < 0.18, `实得 ${r.hits[0].score}`)
+      // 双路 rank1 → rrf_norm = 1.0；activation 按契约公式从行字段自算（权重/归一变动即破此断言）
+      const s = (1 + it.accessCount) / (1 + it.accessCount + 3)
+      const expected = 0.55 * 1.0 + 0.2 * it.importance + 0.25 * s
+      assert.ok(Math.abs(r.hits[0].score - expected) < 0.01, `实得 ${r.hits[0].score} 预期 ${expected}`)
     })
     await checkAsync('FTS 同步三态③：删除后全搜不到且向量同步清', async () => {
       await memoryDelete(itemA.id)
@@ -496,6 +501,184 @@ async function main(): Promise<void> {
       const ok2 = await createOrFoldAtomic({ projectRoot: root, tier: 'long', category: 'lesson', title: '孤儿守卫目标', content: 'v3' })
       assert.equal(ok2.folded, false)
     })
+
+    console.log('⑬ 信任地基（origin 契约 / 显式保护 / 归档痕迹 / 恢复往返 / supersede）：')
+    {
+      // origin 打标与缺省
+      const r1 = await createOrFoldAtomic({ projectRoot: root, tier: 'long', category: 'fact', title: 'origin 缺省', content: 'v1' })
+      await checkAsync('origin 缺省 = agent_suggest', async () => {
+        const it = (await memoryList(root, true)).items.find((i) => i.id === r1.id)
+        assert.equal(it?.origin, 'agent_suggest')
+      })
+      // 显式条目：importance 下限 0.6 + 免自动保护
+      const r2 = await createOrFoldAtomic({
+        projectRoot: root, tier: 'long', category: 'preference', title: '显式偏好',
+        content: '用户亲口说的', importance: 0.3, origin: 'user_explicit',
+      })
+      await checkAsync('显式条目 importance 抬到下限 0.6', async () => {
+        const it = (await memoryList(root, true)).items.find((i) => i.id === r2.id)
+        assert.equal(it?.origin, 'user_explicit')
+        assert.equal(it?.importance, 0.6)
+      })
+      // 显式保护：默认拒归档 + 显式放行可归档（带痕迹）
+      await checkAsync('显式条目默认拒归档（保护契约）', async () => {
+        await assert.rejects(() => memoryArchive(r2.id, { reason: 'x' }), /显式保存/)
+      })
+      await checkAsync('显式放行可归档且痕迹落库', async () => {
+        assert.equal(await memoryArchive(r2.id, { reason: '用户改了偏好', by: 'user', allowArchiveExplicit: true }), true)
+        const it = (await memoryList(root, true)).items.find((i) => i.id === r2.id)
+        assert.equal(it?.status, 'archived')
+        assert.equal(it?.archivedBy, 'user')
+        assert.equal(it?.archivedReason, '用户改了偏好')
+        assert.ok(it?.archivedAt)
+      })
+      // 恢复往返：清痕迹 + 重新计活
+      await checkAsync('恢复往返（unarchive 清痕迹 + 重新计活）', async () => {
+        const restored = await memoryUnarchive(r2.id)
+        assert.equal(restored.status, 'active')
+        assert.equal(restored.archivedAt, null)
+        assert.equal(restored.archivedReason, null)
+        assert.ok(restored.lastAccessedAt, '恢复即重新计活')
+      })
+      // 显式条目折叠 → supersede 不覆写（旧文保留可回看）
+      await checkAsync('显式条目折叠 → supersede（不覆写旧文）', async () => {
+        const r3 = await createOrFoldAtomic({
+          projectRoot: root, tier: 'long', category: 'preference', title: '显式偏好',
+          content: '新版表述', origin: 'distill',
+        })
+        assert.equal(r3.folded, true, '同题折叠计数')
+        const all = (await memoryList(root, true)).items.filter((i) => i.title === '显式偏好')
+        assert.equal(all.length, 2, '旧行归档留痕 + 新行 active（不覆写）')
+        const oldRow = all.find((i) => i.id === r2.id)
+        const newRow = all.find((i) => i.id === r3.id)
+        assert.equal(oldRow?.status, 'archived')
+        assert.equal(oldRow?.supersededBy, r3.id, '旧链指向新')
+        assert.equal(oldRow?.content, '用户亲口说的', '旧文保留')
+        assert.equal(newRow?.origin, 'user_explicit', '契约随版本传递')
+        assert.equal(newRow?.content, '新版表述')
+      })
+      // 普通条目折叠契约升级（agent_suggest 行被显式 caller 再保存 → 升为 user_explicit）
+      await checkAsync('折叠契约升级（显式 caller 保存同题 → 升级保护）', async () => {
+        await createOrFoldAtomic({
+          projectRoot: root, tier: 'long', category: 'fact', title: 'origin 缺省',
+          content: 'v2 用户确认', origin: 'user_explicit',
+        })
+        const it = (await memoryList(root, true)).items.find((i) => i.id === r1.id)
+        assert.equal(it?.origin, 'user_explicit')
+        assert.equal(it?.content, 'v2 用户确认')
+      })
+    }
+
+    console.log('⑭ 衰减作业（event 归档 / 显式豁免 / 触底谓词 / 幂等 / 审计 / 时钟守卫）：')
+    {
+      // 信息量门控（mem0 式 UPDATE-with-gate）：退化覆写拒绝、合法重写放行
+      const g1 = await createOrFoldAtomic({ projectRoot: root, tier: 'long', category: 'fact', title: '门控目标', content: '完整信息包含很多细节与约定' })
+      await checkAsync('信息量门控：折叠到大幅子串被拒（退化覆写）', async () => {
+        await assert.rejects(() => createOrFoldAtomic({
+          projectRoot: root, tier: 'long', category: 'fact', title: '门控目标', content: '完整信息',
+        }), /信息退化/)
+        assert.equal((await memoryList(root, true)).items.find((i) => i.id === g1.id)?.content, '完整信息包含很多细节与约定')
+      })
+      await checkAsync('信息量门控：合法重写/加长放行', async () => {
+        const r = await createOrFoldAtomic({
+          projectRoot: root, tier: 'long', category: 'fact', title: '门控目标', content: '完整信息包含很多细节与约定（补充了新约定与例外）',
+        })
+        assert.equal(r.folded, true)
+        await assert.rejects(() => memoryUpdate(g1.id, { content: '约定' }), /信息退化/)
+      })
+    }
+    {
+      const NOW = 10_000_000_000_000
+      const DAY = 86_400_000
+      // 造 event 条目并回拨 updated_at（memoryCreate 恒写 now，衰减边界要按绝对时刻造）
+      const mk = async (title: string, updatedAt: number, origin?: 'user_explicit' | 'agent_suggest' | 'distill') => {
+        const it = await memoryCreate({
+          projectRoot: root, tier: 'long', category: 'event', title, content: 'x',
+          ...(origin ? { origin } : {}),
+        })
+        const db = await getDb()
+        await db.prepare('UPDATE mem_items SET updated_at = ? WHERE id = ?').run(updatedAt, it.id)
+        return it
+      }
+      /** 时间手术：三时间列（+ 归档行的 archived_at）统一拨到绝对时刻（清理线/老化按受控值造） */
+      const setTimes = async (id: string, t: number): Promise<void> => {
+        const db = await getDb()
+        await db.prepare(
+          "UPDATE mem_items SET last_accessed_at = ?, created_at = ?, updated_at = ?, archived_at = CASE WHEN status = 'archived' THEN ? ELSE archived_at END WHERE id = ?",
+        ).run(t, t, t, t, id)
+      }
+      // event 边界：恰好 60d 不归档（严格 <），60d+1ms 归档
+      const ev1 = await mk('event边界恰好', NOW - 60 * DAY)
+      const ev2 = await mk('event边界超', NOW - 60 * DAY - 1)
+      // 显式豁免：user_explicit 的 event 超期也不归档
+      const ev3 = await mk('event显式豁免', NOW - 90 * DAY, 'user_explicit')
+      const s1 = await runDecayJob(NOW)
+      assert.equal(s1.decayed, 0, 'importance 静态化：作业不写 importance')
+      assert.equal(s1.archived >= 1, true, `至少归档超期 event（实得 ${s1.archived}）`)
+      await checkAsync('event 恰 60d 不归档（严格小于）', async () => {
+        assert.equal((await memoryList(root, true)).items.find((i) => i.id === ev1.id)?.status, 'active')
+      })
+      await checkAsync('event 超 60d 归档（by=decay + reason）', async () => {
+        const it = (await memoryList(root, true)).items.find((i) => i.id === ev2.id)
+        assert.equal(it?.status, 'archived')
+        assert.equal(it?.archivedBy, 'decay')
+        assert.ok(it?.archivedReason?.includes('自动收起'))
+      })
+      await checkAsync('显式条目豁免自动归档（90d 超期仍活跃）', async () => {
+        assert.equal((await memoryList(root, true)).items.find((i) => i.id === ev3.id)?.status, 'active')
+      })
+      // 批量恢复（趁清理发生前——v2 物理清理窗口 180d 会吃掉更早批次的归档行）
+      await checkAsync('审计锚点 + 批量恢复（误归档还原）', async () => {
+        const audit = await memoryDecayAudit()
+        assert.ok(audit && audit.archivedIds.includes(ev2.id), '审计含归档 id')
+        const r = await memoryRestoreMany(audit!.archivedIds)
+        assert.ok(r.restored >= 1, `至少恢复本轮归档（实得 ${r.restored}）`)
+        assert.equal((await memoryList(root, true)).items.find((i) => i.id === ev2.id)?.status, 'active')
+      })
+      // fact 规则：importance 触底(≤0.1) 且 180d 未访问 → 归档；未触底的陈旧 fact 不动
+      const ft1 = await memoryCreate({ projectRoot: root, tier: 'long', category: 'fact', title: 'fact低值陈旧', content: 'x', importance: 0.1 })
+      const ft2 = await memoryCreate({ projectRoot: root, tier: 'long', category: 'fact', title: 'fact正常陈旧', content: 'x', importance: 0.5 })
+      // v2 物理清理靶：agent 来源 event 手动归档并把 archived_at 拨到清理线之前；显式对照行同样拨旧
+      const evP = await mk('event清理靶', NOW - 90 * DAY)
+      await memoryArchive(evP.id, { reason: '测试预归档', allowArchiveExplicit: false })
+      await setTimes(evP.id, NOW - 90 * DAY)
+      const evX = await mk('event显式清理豁免', NOW - 90 * DAY, 'user_explicit')
+      await memoryArchive(evX.id, { reason: '显式对照', allowArchiveExplicit: true })
+      await setTimes(evX.id, NOW - 90 * DAY)
+      const s2 = await runDecayJob(NOW + 200 * DAY)
+      assert.equal(s2.decayed, 0, 'importance 静态化：作业恒不写 importance')
+      await checkAsync('fact 规则：触底低值陈旧归档、正常值陈旧保留', async () => {
+        assert.equal((await memoryList(root, true)).items.find((i) => i.id === ft1.id)?.status, 'archived')
+        assert.equal((await memoryList(root, true)).items.find((i) => i.id === ft2.id)?.status, 'active')
+      })
+      await checkAsync('v2 物理清理：agent 来源超期归档 event 被物理删除', async () => {
+        const db = await getDb()
+        const row = await db.prepare('SELECT 1 FROM mem_items WHERE id = ?').get(evP.id)
+        assert.ok(!row, '行已物理删除（含 mem_vec）')
+        assert.ok(s2.purged >= 1, `purge 计数（实得 ${s2.purged}）`)
+      })
+      await checkAsync('v2 物理清理：显式条目豁免（归档再久也不删）', async () => {
+        const db = await getDb()
+        const row = await db.prepare('SELECT 1 FROM mem_items WHERE id = ?').get(evX.id)
+        assert.ok(row, '显式条目仍在库')
+      })
+      // 幂等：清账后同 now 再跑一轮全零
+      await checkAsync('衰减幂等（清账后第二轮全零）', async () => {
+        const s = await runDecayJob(NOW + 200 * DAY)
+        assert.deepEqual(s, { decayed: 0, archived: 0, purged: 0 })
+      })
+      // 审计锚点（近 5 轮并集）
+      await checkAsync('审计锚点保留多轮 archivedIds（误归档恢复依据）', async () => {
+        const audit = await memoryDecayAudit()
+        assert.ok(audit && audit.archivedIds.includes(ev2.id), '审计含首轮归档 id')
+        assert.ok(audit.archivedIds.includes(ft1.id), '审计含次轮归档 id')
+      })
+      // 时钟回拨守卫：now 落后上次 60s 以上 → 跳过
+      await checkAsync('时钟回拨守卫（now 回拨跳过本轮）', async () => {
+        const s = await runDecayJob(NOW - 120_000)
+        assert.deepEqual(s, { decayed: 0, archived: 0, purged: 0 })
+      })
+    }
     setEmbedder(null)
     setReadyOverride(null)
 

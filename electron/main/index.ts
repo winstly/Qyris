@@ -1,6 +1,6 @@
 /** Electron 主进程入口：多窗口管理、IPC 注册、退出清理 */
 import { app, BrowserWindow, dialog, ipcMain, Menu, screen, shell, Tray, nativeImage } from 'electron'
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { registerWindow, removeWindow, getAllWindows, emitToAllWindows, broadcastToWindows } from '../lib/emitter'
 import * as pet from '../lib/pet'
@@ -143,6 +143,9 @@ function registerIpc(): void {
   // IPC 慢调用埋点：>100ms 才记（正常调用不进日志，只在异常阈值留线索）。
   // 「点了没反应」类卡死排查时，先看这里定位是哪个 channel 在堵
   const ipcStats = new Map<string, { count: number; slow: number; maxMs: number }>()
+  // 设计内长任务 channel（记忆蒸馏等 LLM 旁路作业，秒级到几十秒；面板有 extracting 态反馈）：
+  // 不进 100ms 慢调用口径——它们慢是本职，报出来只是噪音，不是回归信号
+  const SLOW_CALL_EXEMPT = new Set(['memory_run_now', 'memory_maybe_extract'])
   const handle = (channel: string, listener: (event: Electron.IpcMainInvokeEvent, payload: any) => unknown): void => {
     ipcMain.handle(channel, async (event, payload: any) => {
       const t0 = Date.now()
@@ -150,7 +153,7 @@ function registerIpc(): void {
         return await listener(event, payload)
       } finally {
         const ms = Date.now() - t0
-        if (ms > 100) {
+        if (ms > 100 && !SLOW_CALL_EXEMPT.has(channel)) {
           const st = ipcStats.get(channel) ?? { count: 0, slow: 0, maxMs: 0 }
           st.count++
           st.slow++
@@ -164,6 +167,15 @@ function registerIpc(): void {
 
   // 文件系统（projectRoot 来自渲染层，主进程做 ensureInside 校验）
   handle('list_dir', (_e, p) => fsops.listDir(p.projectRoot, p.dir))
+  // 绝对路径存在性检查（项目列表清理用，不走 projectRoot 越界防护——本就是检任意路径）：
+  // 只回布尔，不暴露文件内容
+  handle('path_exists', (_e, p) => {
+    try {
+      return statSync(String(p?.path ?? ''), { throwIfNoEntry: false })?.isDirectory() === true
+    } catch {
+      return false
+    }
+  })
   handle('list_dir_batch', (_e, p) => fsops.listDirBatch(p.projectRoot, p.dirs))
   handle('search_files', (_e, p) => fsops.searchFiles(p.projectRoot, p.query))
   handle('grep_files', (_e, p) =>
@@ -222,10 +234,12 @@ function registerIpc(): void {
   handle('memory_search', (_e, p) =>
     memory.memorySearch(String(p.query ?? ''), p.projectRoot, p.topK, p.includeArchived === true))
   handle('memory_update', (_e, p) => memory.memoryUpdate(p.id, p.patch))
+  handle('memory_unarchive', (_e, p) => memory.memoryUnarchive(String(p.id)))
   handle('memory_delete', (_e, p) => memory.memoryDelete(p.id))
   handle('memory_move_scope', (_e, p) => memory.memoryMoveScope(p.id, p.target, p.projectRoot))
   handle('memory_clear', (_e, p) => memory.memoryClear(p.scope, p.projectRoot))
   handle('memory_stats', () => memory.memoryStats())
+  handle('memory_last_tidy', () => memory.lastTidy())
   // P3 备份通道（对话框绑定调用方窗口）
   handle('memory_export', (e, p) =>
     memory.memoryExport(p.scope, p.projectRoot ?? undefined, BrowserWindow.fromWebContents(e.sender)))
@@ -436,6 +450,7 @@ function registerIpc(): void {
   handle('git_pull', (_e, p) => git.gitPull(p.dir))
   handle('git_fetch', (_e, p) => git.gitFetch(p.dir))
   handle('git_push', (_e, p) => git.gitPush(p.dir))
+  handle('git_merge', (_e, p) => git.gitMerge(p.dir, String(p.branch ?? '')))
   handle('git_discard', (_e, p) => git.gitDiscard(p.dir, p.paths ?? []))
   handle('pick_parent_dir', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)

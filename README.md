@@ -40,7 +40,7 @@
 - **API 模式**：OpenAI 兼容（SSE）+ Anthropic 协议，直连云端模型；支持多档位模型（Thinking / Haiku / Sonnet / Opus），按子任务难度自动选档
 - **CLI 模式**：经本机 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 调度自主 agent，CLI 自带文件读写、命令执行工具与模型配置，无需 API Key
 - 两种模式共享同一对话界面，设置中一键切换
-- CLI 模式支持 **Skill 协议**（`[[NEXT_SKILL]]` 请求附带指令集）和**启动命令协议**（`[[START_COMMANDS]]` 自动存档）
+- CLI 模式支持 **Skill 协议**（`load_skill` 工具按需加载指令集）和**启动命令协议**（`[[START_COMMANDS]]` 自动存档）
 - CLI 工具调用实时回填：每个工具（Read / Write / Bash / Glob 等）渲染为折叠卡片，点击展开完整输入与输出
 - CLI 子 agent（Agent/Task 派发）实时面板：工具调用逐条入账，结果自动回填，token 账目独立记账
 
@@ -139,7 +139,7 @@
 
 - 可自定义的 Skill 指令集，扩展 AI 能力
 - 支持**多目录**配置（`skillsDirs`），按目录序首中优先
-- Skill 索引注入系统提示，CLI 可通过 `[[NEXT_SKILL: id]]` 请求下一轮附带全文
+- Skill 索引注入系统提示，模型经 `load_skill` 工具按需加载全文（本轮生效）
 - AI 根据用户问题自动匹配并加载对应 Skill
 
 ## 快速开始

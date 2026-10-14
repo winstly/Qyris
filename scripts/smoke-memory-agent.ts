@@ -1,27 +1,13 @@
 /**
- * mem agent 记忆蒸馏管线冒烟测试：LLM mock（setLlmHook）+ 假时钟（setClock）+ 假 embedder 离线全链路。
- * 覆盖：
- *   ① 增量提取 create/patch/archive/summary 全生效 + prompt 组装断言 + 防自食（messages 表零写入）
- *   ② no-op 纪律（空 ops 不产生行）与 code fence 剥除
- *   ③ 非法 JSON 按 no-op
- *   ④ 游标推进（重复 maybe_extract 不重复提取）
- *   ⑤ 6 轮阈值与 60s 冷却（时间注入可测）
- *   ⑥ 收尾提取 + 游标作废幂等
- *   ⑦ summary last-write-wins（旧摘要 archived）
- *   ⑧ note_lesson 去重强化路径
- *   ⑨ run_now：无视冷却 + 并发防护 + 无活跃会话报错
- *   ⑩ parseAgentJson 直测（非法 op 剔除 / importance 收敛 / 围栏剥除）
- *   ⑪ 嵌入模型指纹不符 → 向量路停用（P1 遗留修复②）
- *   ⑫ 迁移中断接管（P1 遗留修复①：源库缺失 / 空库源 → 接管；源库非空仍拒绝）
- *   ⑭ 游标持久化（meta 表跨重启恢复）/ 无游标会话基线 0（首轮内容不漏，P2 修复回归）
- *   ⑮ create 去重护栏（重扫同题折叠为 patch，不产生重复行）
- *   ⑯ 转录护栏（最新一条超预算截断入选，游标不空转）
+ * mem agent 记忆蒸馏管线冒烟测试：假 provider（真 runner 工具循环）+ 假时钟 + 假 embedder 离线全链路。
+ * 蒸馏走 agent+tools（与主对话同一条 runAgent 链路）：假 provider 发 tool-call → runner 真执行
+ * memory_* 工具 → 断言直接查库（落库即真执行，不做解析层 mock）。
  * 运行：npm run smoke:memory-agent
  */
-import { mkdtempSync, rmSync, existsSync, copyFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, renameSync, copyFileSync, rmSync, existsSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
-import assert from 'node:assert/strict'
+import assert from 'node:assert'
 import { initDbAt, closeDb, dataDir, getDb, projectKey, vecReadyFlag } from '../electron/lib/db'
 import { messageAppend, messagePatch, messagesRecent } from '../electron/lib/messages'
 import {
@@ -29,11 +15,11 @@ import {
 } from '../electron/lib/memory/service'
 import { setReadyOverride } from '../electron/lib/memory/embed'
 import {
-  SYSTEM_PROMPT, setLlmHook, setClock, memoryMaybeExtract, sessionEnded, memoryRunNow,
+  SYSTEM_PROMPT, setProviderOverride, setClock, memoryMaybeExtract, sessionEnded, memoryRunNow,
   resetExtractStateForTest,
 } from '../electron/lib/memory/agent'
-import { parseAgentJson } from '../electron/lib/memory/parse'
 import { setConfigWriter, migrateDataDir } from '../electron/lib/migrate'
+import type { ContentPart, ModelProvider } from '../electron/lib/model/types'
 
 let failures = 0
 function check(label: string, fn: () => void): void {
@@ -90,31 +76,78 @@ function fakeVec(text: string): Float32Array {
   for (const x of v) norm += x * x
   if (norm > 0) {
     const inv = 1 / Math.sqrt(norm)
-    for (let i = 0; i < v.length; i++) v[i] *= inv
+    for (let j = 0; j < v.length; j++) v[j] *= inv
   }
   return v
 }
 
-// ---------- LLM mock：记录器 + 可切换回复 ----------
+// ---------- 假 provider：真 runner 工具循环（tool-call → runner 执行 → 回喂 → done） ----------
 
-let hookCalls: { system: string; user: string }[] = []
-let hookReply = '{"ops":[],"summary":null}'
-
-function installRecorder(): void {
-  setLlmHook(async (system, user) => {
-    hookCalls.push({ system, user })
-    return hookReply
-  })
+/** 一步脚本：calls = 本轮发出的工具调用（runner 真执行）；text = 本轮正文（收尾轮即滚动摘要） */
+interface FakeStep {
+  calls?: { name: string; input: unknown }[]
+  text?: string
 }
 
-const NOOP = '{"ops":[],"summary":null}'
+let completeCalls = 0
+const capturedUsers: string[] = []
+const capturedSystems: string[] = []
+/** 工具执行观测（name→次数）：断言 runner 真的跑了 executeTool */
+const executedTools: string[] = []
+
+function installFake(step: FakeStep, opts?: { gate?: Promise<void> }): void {
+  const steps = Array.isArray(step) ? step : [step]
+  completeCalls = 0
+  capturedUsers.length = 0
+  capturedSystems.length = 0
+  executedTools.length = 0
+  let turn = 0
+  const provider: ModelProvider = {
+    id: 'fake-mem',
+    capabilities: { streaming: true, tools: true, thinking: false, jsonSchema: false },
+    async *complete(req) {
+      if (opts?.gate) await opts.gate
+      // 脚本步按轮消费；耗尽后的轮次（工具结果回喂）只给收尾正文，不再重复发调用（防循环执行）
+      const scripted = turn < steps.length
+      const s = steps[Math.min(turn, steps.length - 1)]
+      turn++
+      completeCalls++
+      const userMsg = [...req.messages].reverse().find((m) => m.role === 'user')
+      const userText = textOf(userMsg?.content ?? [])
+      capturedUsers.push(userText)
+      const sysMsg = req.messages.find((m) => m.role === 'system')
+      capturedSystems.push(textOf(sysMsg?.content ?? []))
+      if (scripted) {
+        for (const [idx, c] of (s.calls ?? []).entries()) {
+          executedTools.push(c.name)
+          yield { type: 'tool-call', id: `fake-${turn}-${idx}`, name: c.name, input: c.input }
+        }
+      }
+      yield {
+        type: 'done',
+        message: { role: 'assistant', content: [{ type: 'text', text: s.text ?? '' }], meta: { ts: 0 } },
+        usage: { inputTokens: 10, outputTokens: 10 },
+      }
+    },
+  }
+  setProviderOverride(provider)
+}
+
+function textOf(parts: readonly ContentPart[]): string {
+  return parts
+    .filter((p): p is Extract<ContentPart, { type: 'text' }> => p.type === 'text')
+    .map((p) => p.text)
+    .join('')
+}
+
+const NOOP_STEP: FakeStep = { text: '' }
 
 async function main(): Promise<void> {
   const root = 'E:\\fake\\agent-alpha'
   const root2 = 'E:\\fake\\agent-beta'
   const dir = mkdtempSync(path.join(os.tmpdir(), 'qyris-agent-smoke-'))
   const extraDirs: string[] = [] // 迁移接管段临时目录，finally 统一清理
-  installRecorder()
+  installFake(NOOP_STEP)
   try {
     console.log('① 初始化：')
     await initDbAt(dir)
@@ -129,19 +162,20 @@ async function main(): Promise<void> {
     await memoryMaybeExtract(root, 'S1') // 首见：空会话，游标落 0
     for (let n = 1; n <= 5; n++) await appendTurn(root, 'S1', 't1', n)
     await memoryMaybeExtract(root, 'S1')
-    check('5 轮 assistant 未达 6 轮阈值 → 不提取', () => assert.equal(hookCalls.length, 0))
+    check('5 轮 assistant 未达 6 轮阈值 → 不提取', () => assert.equal(completeCalls, 0))
     await appendTurn(root, 'S1', 't1', 6)
     await memoryMaybeExtract(root, 'S1')
-    check('第 6 轮 assistant 达阈值 → 提取一次（no-op）', () => assert.equal(hookCalls.length, 1))
+    check('第 6 轮 assistant 达阈值 → 提取一次（no-op）', () => assert.equal(completeCalls, 1))
     now = 1_030_000 // 距上次提取 30s
     for (let n = 7; n <= 12; n++) await appendTurn(root, 'S1', 't1', n)
     await memoryMaybeExtract(root, 'S1')
-    check('冷却中（30s < 60s）→ 不提取', () => assert.equal(hookCalls.length, 1))
+    check('冷却中（30s < 60s）→ 不提取', () => assert.equal(completeCalls, 1))
     now = 1_061_000 // 距上次提取 61s
+    for (let n = 13; n <= 18; n++) await appendTurn(root, 'S1', 't2', n)
     await memoryMaybeExtract(root, 'S1')
-    check('冷却过（61s ≥ 60s）→ 提取', () => assert.equal(hookCalls.length, 2))
+    check('冷却过 → 提取', () => assert.equal(completeCalls, 2))
 
-    console.log('③ 增量提取全生效（create/patch/archive/summary）：')
+    console.log('③ 增量提取全生效（save/update/archive/summary，工具真执行）：')
     const m1 = await memoryCreate({
       projectRoot: root, tier: 'long', category: 'fact', title: '部署流程约定', content: '旧正文', importance: 0.6,
     })
@@ -157,33 +191,46 @@ async function main(): Promise<void> {
       },
     })
     const msgsBefore = await messageCount()
-    hookReply = JSON.stringify({
-      ops: [
-        { op: 'create', tier: 'long', category: 'preference', title: '包管理器用 pnpm', content: '用户明确要求一律用 pnpm', importance: 0.8, sources: ['#25'] },
-        { op: 'patch', targetId: m1.id, content: '部署流程约定（已合并 pnpm 偏好）', reason: '同主题合并' },
-        { op: 'archive', targetId: m2.id, reason: '已过时' },
+    installFake({
+      calls: [
+        {
+          name: 'memory_save',
+          input: {
+            scope: 'user', category: 'preference', title: '包管理器用 pnpm',
+            content: '用户明确要求一律用 pnpm', importance: 0.8, sources: ['#25'],
+          },
+        },
+        { name: 'memory_update', input: { id: m1.id, content: '部署流程约定（已合并 pnpm 偏好）' } },
+        { name: 'memory_archive', input: { id: m2.id, reason: '已被淘汰' } },
       ],
-      summary: 'S1 阶段进展：确定包管理器与部署约定',
+      text: 'S1 阶段进展：确定包管理器与部署约定',
     })
     await memoryMaybeExtract(root, 'S1')
-    check('LLM 恰被调用一次', () => assert.equal(hookCalls.length, 3))
-    check('系统提示 = agent 纪律条款常量', () => assert.equal(hookCalls[2].system, SYSTEM_PROMPT))
-    const user = hookCalls[2].user
+    check('runner 两轮收敛（工具轮 + 收尾轮）', () => assert.equal(completeCalls, 2))
+    check('三个记忆工具被真执行', () =>
+      assert.deepEqual(executedTools, ['memory_save', 'memory_update', 'memory_archive']))
+    const system = capturedSystems[capturedSystems.length - 1]
+    check('系统提示 = 蒸馏纪律常量', () => assert.equal(system, SYSTEM_PROMPT))
+    const user = capturedUsers[capturedUsers.length - 1]
     check('prompt 含增量转录节与消息行', () => {
       assert.ok(user.includes('【增量转录】'))
-      assert.ok(user.includes('#25 用户：t3 用户请求 1'))
-      assert.ok(user.includes('#26 助手：t3 助手回复 1'))
+      assert.ok(user.includes('#37 用户：t3 用户请求 1'))
+      assert.ok(user.includes('#40 助手：t3 助手回复 2'))
     })
     check('prompt 工具一行摘要：只取 command 第一行，不付工具结果 token', () => {
       assert.ok(user.includes('工具 run_command：pnpm install --frozen-lockfile'))
       assert.ok(!user.includes('echo done'))
     })
-    check('prompt 含现有记忆清单（long + 本会话 short，带 id 供 patch/archive 定位）', () => {
+    check('prompt 含白名单说明（工具提交通道，非 JSON 手写）', () => {
+      assert.ok(system.includes('memory_save'))
+      assert.ok(!system.includes('"ops"'))
+    })
+    check('prompt 含现有记忆清单（long + 本会话 short，带 id 供 update/archive 定位）', () => {
       assert.ok(user.includes('【现有记忆清单】'))
       assert.ok(user.includes(`- [fact] 部署流程约定（${m1.id}）`))
       assert.ok(user.includes(`- [skill] 过时技巧（${m2.id}）`))
     })
-    await checkAsync('create op 生效（tier/category/importance/sources）', async () => {
+    await checkAsync('memory_save 生效（category/importance/sources 落库）', async () => {
       const item = (await memoryList(root)).items.find((i) => i.title === '包管理器用 pnpm')
       assert.ok(item)
       assert.equal(item.tier, 'long')
@@ -193,66 +240,71 @@ async function main(): Promise<void> {
       assert.ok(item.sourceJson?.includes('#25'))
       assert.equal(item.sessionId, null) // long 层不挂 session
     })
-    await checkAsync('patch op 生效（按 targetId 更新正文）', async () => {
+    await checkAsync('memory_update 生效（按 id 更新正文）', async () => {
       const item = (await memoryList(root, true)).items.find((i) => i.id === m1.id)
       assert.equal(item?.content, '部署流程约定（已合并 pnpm 偏好）')
     })
-    await checkAsync('archive op 生效（status=archived）', async () => {
+    await checkAsync('memory_archive 生效（status=archived）', async () => {
       const item = (await memoryList(root, true)).items.find((i) => i.id === m2.id)
       assert.equal(item?.status, 'archived')
     })
     await checkAsync('summary 落为该 session 的 active 摘要', async () =>
       assert.equal(await sessionSummary(root, 'S1'), 'S1 阶段进展：确定包管理器与部署约定'))
-    await checkAsync('防自食：提取前后 messages 行数一致（agent 不写 messages 表）', async () =>
+    await checkAsync('防自食：提取前后 messages 行数一致（蒸馏不写 messages 表）', async () =>
       assert.equal(await messageCount(), msgsBefore))
 
     console.log('④ 游标推进：')
     now = 3_000_000
     await memoryMaybeExtract(root, 'S1')
     await memoryMaybeExtract(root, 'S1')
-    check('无新增消息时重复触发不再提取', () => assert.equal(hookCalls.length, 3))
+    check('无新增消息时重复触发不再提取', () => assert.equal(completeCalls, 2))
 
-    console.log('⑤ no-op 纪律 + code fence：')
+    console.log('⑤ no-op 纪律（不调工具纯收尾）：')
     now = 3_100_000
     for (let n = 1; n <= 6; n++) await appendTurn(root, 'S1', 't5', n)
     const memBefore5 = await memRowCount()
-    hookReply = '```json\n{"ops":[],"summary":null}\n```'
+    installFake({ text: '' })
     await memoryMaybeExtract(root, 'S1')
-    check('围栏包裹的空 ops 正常解析执行', () => assert.equal(hookCalls.length, 4))
+    check('单轮收敛（无工具轮）', () => assert.equal(completeCalls, 1))
     await checkAsync('no-op 不产生任何记忆行', async () => assert.equal(await memRowCount(), memBefore5))
-    await checkAsync('summary=null 不动已有摘要', async () =>
+    await checkAsync('空摘要不动已有摘要', async () =>
       assert.equal(await sessionSummary(root, 'S1'), 'S1 阶段进展：确定包管理器与部署约定'))
 
-    console.log('⑥ 非法 JSON 按 no-op：')
+    console.log('⑥ 纯文本收尾（婉拒场景）：正文即摘要，无记忆条目，游标推进：')
     now = 3_200_000
     for (let n = 1; n <= 6; n++) await appendTurn(root, 'S1', 't6', n)
-    hookReply = '这段对话都是一次性任务细节，没什么值得长期记住的。'
-    const memBefore6 = await memRowCount()
+    installFake({ text: '都是一次性任务细节，无长期可记内容' })
+    const memBefore6 = await getDb().then((db) => db
+      .prepare("SELECT COUNT(*) AS n FROM mem_items WHERE category != 'summary'").get()) as { n: number }
     await memoryMaybeExtract(root, 'S1')
-    check('纯文本回复不炸不挂', () => assert.equal(hookCalls.length, 5))
-    await checkAsync('非法 JSON 不产生记忆行且游标推进（下轮不重复）', async () => {
-      assert.equal(await memRowCount(), memBefore6)
+    check('纯文本收尾不炸不挂（单轮）', () => assert.equal(completeCalls, 1))
+    await checkAsync('无记忆条目（summary 除外）、summary 落盘、游标推进（下轮不重复）', async () => {
+      const db = await getDb()
+      const after = await db
+        .prepare("SELECT COUNT(*) AS n FROM mem_items WHERE category != 'summary'").get() as { n: number }
+      assert.equal(after.n, memBefore6.n, '婉拒不产生记忆条目')
+      assert.equal(await sessionSummary(root, 'S1'), '都是一次性任务细节，无长期可记内容')
       await memoryMaybeExtract(root, 'S1')
-      assert.equal(hookCalls.length, 5)
+      assert.equal(completeCalls, 1, '游标已推进，重复触发不再提取')
     })
 
     console.log('⑦ 收尾提取 + 游标作废幂等（会话 S2）：')
     await memoryMaybeExtract(root, 'S2') // 首见：游标落 0
     for (let n = 1; n <= 2; n++) await appendTurn(root, 'S2', 's2', n) // 2 轮，低于阈值
-    hookReply = '{"ops":[],"summary":"S2 做了环境搭建"}'
+    installFake({ text: 'S2 做了环境搭建' })
     await sessionEnded(root, 'S2')
-    check('收尾无视阈值，提取一次', () => assert.equal(hookCalls.length, 6))
+    check('收尾无视阈值，提取一次', () => assert.equal(completeCalls, 1))
     await checkAsync('收尾摘要落库', async () => assert.equal(await sessionSummary(root, 'S2'), 'S2 做了环境搭建'))
     await sessionEnded(root, 'S2')
-    check('重复 session_ended 幂等（游标已作废）', () => assert.equal(hookCalls.length, 6))
+    check('重复 session_ended 幂等（游标已作废）', () => assert.equal(completeCalls, 1))
     await appendTurn(root, 'S2', 's2', 3)
     await memoryMaybeExtract(root, 'S2')
-    check('作废后重建游标（首见基线 0，历史 3 轮低于阈值不触发）', () => assert.equal(hookCalls.length, 6))
+    check('作废后重建游标（首见基线 0，历史 3 轮低于阈值不触发）', () => assert.equal(completeCalls, 1))
 
     console.log('⑧ summary last-write-wins：')
     now = 4_000_000
     for (let n = 4; n <= 9; n++) await appendTurn(root, 'S2', 's2b', n)
-    hookReply = '{"ops":[],"summary":"S2 新摘要（覆盖版）"}'
+    installFake({ text: 'S2 新摘要（覆盖版）' })
     await memoryMaybeExtract(root, 'S2')
     await checkAsync('滚动摘要被新值覆盖', async () =>
       assert.equal(await sessionSummary(root, 'S2'), 'S2 新摘要（覆盖版）'))
@@ -277,7 +329,7 @@ async function main(): Promise<void> {
         .prepare("SELECT * FROM mem_items WHERE project_key = ? AND category = 'lesson' AND title = ?")
         .all(projectKey(root), '端口 5173 被占用') as { tier: string; session_id: string | null; importance: number }[]
       assert.equal(rows.length, 1)
-      assert.equal(rows[0].tier, 'short')
+      assert.equal(rows[0].tier, 'long') // 教训恒 long：落 short 会被 30 天自动归档扔进坟场
       assert.equal(rows[0].session_id, 'S1')
       assert.equal(rows[0].importance, 0.5)
     })
@@ -309,16 +361,11 @@ async function main(): Promise<void> {
     now = 4_010_000 // 距上次提取仅 10s，冷却未过——run_now 必须无视
     for (let n = 10; n <= 15; n++) await appendTurn(root, 'S2', 's2c', n)
     let release!: () => void
-    // 门外先备好 deferred：release 若在 hook 进门后才捕获，晚到的 release?.() 会空跑 → await first 永久挂起
+    // 门外先备好 deferred：release 若在 provider 进门后才捕获，晚到的 release?.() 会空跑 → await first 永久挂起
     const gate = new Promise<void>((resolve) => { release = resolve })
-    const callsBeforeGate = hookCalls.length
-    setLlmHook(async (system, user) => {
-      hookCalls.push({ system, user })
-      await gate
-      return NOOP
-    })
+    installFake({ text: '' }, { gate })
     const first = memoryRunNow(root)
-    await sleep(30) // 让首个任务进入 LLM 门
+    await sleep(30) // 让首个任务进入门
     const second = await memoryRunNow(root)
     check('提取中再触发 run_now 被并发防护拒绝', () => {
       assert.equal(second.ok, false)
@@ -327,37 +374,9 @@ async function main(): Promise<void> {
     release()
     const firstResult = await first
     check('run_now ok=true（无视冷却）', () => assert.equal(firstResult.ok, true))
-    check('并发触发合并：LLM 只跑一次', () => assert.equal(hookCalls.length, callsBeforeGate + 1))
-    installRecorder()
+    check('并发触发合并：只跑一次', () => assert.equal(completeCalls, 1))
 
-    console.log('⑪ parseAgentJson 直测：')
-    check('纯文本 → null', () => assert.equal(parseAgentJson('没有任何 JSON'), null))
-    check('残缺 JSON → null', () => assert.equal(parseAgentJson('{"ops":[{"op":"create"'), null))
-    const parsed = parseAgentJson(
-      '```json\n{"ops":['
-      + '{"op":"create","title":"有效","content":"正文","importance":9,"tier":"short","category":"weird"},'
-      + '{"op":"create","content":"缺 title"},'
-      + '{"op":"patch","content":"缺 targetId"},'
-      + '{"op":"archive"},'
-      + '{"op":"nope"},'
-      + '{"op":"patch","targetId":"mem_x","content":"合并正文","reason":"r"},'
-      + '{"op":"archive","targetId":"mem_y","reason":"旧"}'
-      + '],"summary":"  "}\n```',
-    )
-    check('非法 op 剔除、合法保留、importance 收敛、category 兜底', () => {
-      assert.ok(parsed)
-      assert.equal(parsed!.ops.length, 3)
-      const create = parsed!.ops[0]
-      assert.equal(create.op, 'create')
-      assert.equal((create as { importance: number }).importance, 1)
-      assert.equal((create as { category: string }).category, 'fact')
-      assert.equal((create as { tier: string }).tier, 'short')
-      assert.equal(parsed!.ops[1].op, 'patch')
-      assert.equal(parsed!.ops[2].op, 'archive')
-    })
-    check('空白 summary 归一为 null', () => assert.equal(parsed!.summary, null))
-
-    console.log('⑫ 嵌入模型指纹（P1 遗留修复②）：')
+    console.log('⑪ 嵌入模型指纹（P1 遗留修复②）：')
     const dbFp = await getDb()
     const readFp = async (): Promise<string | undefined> =>
       (await dbFp.prepare("SELECT value FROM meta WHERE key = 'embed_model_fingerprint'").get() as { value: string } | undefined)?.value
@@ -374,7 +393,7 @@ async function main(): Promise<void> {
     const d2 = await memorySearch('部署流程约定', root)
     check('指纹恢复 → 向量路恢复（degraded=false）', () => assert.equal(d2.degraded, false))
 
-    console.log('⑬ 迁移中断接管（P1 遗留修复①）：')
+    console.log('⑫ 迁移中断接管（P1 遗留修复①）：')
     const configWrites: (string | null)[] = []
     setConfigWriter(async (d) => {
       configWrites.push(d)
@@ -423,8 +442,8 @@ async function main(): Promise<void> {
     })
     setConfigWriter(null)
 
-    console.log('⑭ 游标持久化 + 首见基线 0（P2 修复回归）：')
-    // ⑬ 之后现库在接管目标目录（overrideDir 已重定向）；重开同库 + 清内存态 = 模拟进程重启
+    console.log('⑬ 游标持久化 + 首见基线 0（P2 修复回归）：')
+    // ⑫ 之后现库在接管目标目录（overrideDir 已重定向）；重开同库 + 清内存态 = 模拟进程重启
     const dbCur = await getDb()
     const savedCursor = await dbCur
       .prepare('SELECT value FROM meta WHERE key = ?')
@@ -436,30 +455,30 @@ async function main(): Promise<void> {
     await closeDb()
     await initDbAt(await dataDir())
     resetExtractStateForTest()
-    const callsBeforeRestart = hookCalls.length
+    installFake({ text: '' })
     await memoryMaybeExtract(root, 'S2')
-    check('重启后游标自 meta 恢复：无新增消息不重复提取', () => assert.equal(hookCalls.length, callsBeforeRestart))
+    check('重启后游标自 meta 恢复：无新增消息不重复提取', () => assert.equal(completeCalls, 0))
     // 从未蒸馏过的会话（无持久化游标）：首见基线 0，历史 ≥6 轮即触发，首轮内容进转录窗口
     now = 5_000_000
     for (let n = 1; n <= 6; n++) await appendTurn(root, 'S3', 's3', n)
-    hookReply = NOOP
     await memoryMaybeExtract(root, 'S3')
-    check('无游标会话首见基线 0：6 轮历史即提取', () =>
-      assert.equal(hookCalls.length, callsBeforeRestart + 1))
+    check('无游标会话首见基线 0：6 轮历史即提取', () => assert.equal(completeCalls, 1))
     check('首轮内容不漏（旧实现会把首轮误标为已蒸馏基线）', () => {
-      const firstUser = hookCalls[hookCalls.length - 1].user
-      assert.ok(firstUser.includes('#1 用户：s3 用户请求 1'))
+      assert.ok(capturedUsers[capturedUsers.length - 1].includes('#1 用户：s3 用户请求 1'))
     })
 
-    console.log('⑮ create 去重护栏（重扫不重复建条）：')
-    // S3 游标已在末尾 → run_now 走「重置 0 全量重扫」路径；同题 active 条目（③ 所建）必须折叠为 patch
-    hookReply = JSON.stringify({
-      ops: [{ op: 'create', tier: 'long', category: 'preference', title: '包管理器用 pnpm', content: '重扫后的新表述', importance: 0.9 }],
-      summary: null,
+    console.log('⑭ create 去重护栏（重扫不重复建条）：')
+    // S3 游标已在末尾 → run_now 走「重置 0 全量重扫」路径；同题 active 条目（③ 所建）必须折叠
+    installFake({
+      calls: [{
+        name: 'memory_save',
+        input: { scope: 'user', category: 'preference', title: '包管理器用 pnpm', content: '重扫后的新表述', importance: 0.9 },
+      }],
+      text: '',
     })
     now = 5_100_000
     const dup = await memoryRunNow(root)
-    await checkAsync('重扫同题 create → 折叠为 patch，行数不变', async () => {
+    await checkAsync('重扫同题 save → 折叠，行数不变', async () => {
       assert.equal(dup.ok, true, dup.error)
       const db = await getDb()
       const rows = await db
@@ -470,106 +489,48 @@ async function main(): Promise<void> {
       assert.equal(rows[0].importance, 0.9) // max(0.8, 0.9)
     })
 
-    console.log('⑯ 转录护栏（最新一条超预算必入选）：')
+    console.log('⑮ 转录护栏（最新一条超预算必入选）：')
     // 单条 assistant 挂 120 个工具行（≈12.6k > 12k 预算）：护栏 = 最新一条截断入选，不许整窗漏蒸
     const hugeCalls = Array.from({ length: 120 }, (_, i) => ({
       id: `hc-${i}`, name: 'run_command', args: { command: `cmd-${i} ${'x'.repeat(90)}` }, status: 'done' as const,
     }))
     for (let n = 1; n <= 6; n++) await appendTurn(root, 'S4', 's4', n)
     await messagePatch(root, 'S4', 's4-a6', { tool: { toolCalls: hugeCalls } })
-    hookReply = NOOP
+    installFake({ text: '' })
     now = 5_200_000
     await memoryMaybeExtract(root, 'S4')
     check('最新一条截断入选，转录非空', () => {
-      const user = hookCalls[hookCalls.length - 1].user
-      assert.ok(user.includes('#12 助手：s4 助手回复 6'))
-      assert.ok(user.includes('（更早已省略）'))
+      const u = capturedUsers[capturedUsers.length - 1]
+      assert.ok(u.includes('#12 助手：s4 助手回复 6'))
+      assert.ok(u.includes('（更早已省略）'))
     })
 
-    console.log('⑯.5 scope 铁律 + 【当前工程】锚点（串工程污染防线）：')
+    console.log('⑯ scope 铁律 + 【当前工程】锚点（串工程污染防线）：')
     // 当前工程 agent-alpha，转录内容讲的是 BetaProject 的事——铁律 3 要求 no-op（不串工程），
     // 并且 prompt 必须带【当前工程】锚点，否则模型无从判定「这是别的工程」
     for (let n = 1; n <= 2; n++) await appendTurn(root, 'S5', 's5', n)
     await messageAppend(root, 'S5', { id: 's5-x', role: 'user', content: 'BetaProject 卡死，排查一下它启动时挂住的问题' })
-    hookReply = NOOP
+    installFake({ text: '' })
     now = 5_300_000
     await memoryRunNow(root)
     check('prompt 带【当前工程】锚点（basename）', () => {
-      const user = hookCalls[hookCalls.length - 1].user
-      assert.ok(user.includes('【当前工程】agent-alpha'), user.slice(0, 300))
+      const u = capturedUsers[capturedUsers.length - 1]
+      assert.ok(u.includes('【当前工程】agent-alpha'), u.slice(0, 300))
     })
     check('铁律 3 声明串工程 no-op（别的具名工程/两可都不产出）', () => {
-      const system = hookCalls[hookCalls.length - 1].system
-      assert.ok(system.includes('串工程'), '铁律缺串工程声明')
-      assert.ok(/no-op/.test(system) && system.includes('两可'), '铁律缺两可 no-op')
+      const sys = capturedSystems[capturedSystems.length - 1]
+      assert.ok(sys.includes('串工程'), '铁律缺串工程声明')
+      assert.ok(/no-op/.test(sys) && sys.includes('两可'), '铁律缺两可 no-op')
     })
 
-    console.log('⑰ 非 JSON 容错（尾随逗号/平衡括号 + 带反馈重试 + 游标推进）：')
-    check('尾随逗号剥离后解析', () => {
-      const p = parseAgentJson('{"ops":[{"op":"create","scope":"user","tier":"long","title":"t","content":"c"},],"summary":null}')
-      assert.ok(p)
-      assert.equal(p!.ops.length, 1)
-      assert.equal((p!.ops[0] as { title?: string }).title, 't')
-      assert.equal((p!.ops[0] as { scope?: string }).scope, 'user')
-    })
-    check('平衡括号：正文含额外 } 不切错边界', () => {
-      const p = parseAgentJson('{"ops":[{"op":"create","title":"t","content":"含 } 括号的正文"}],"summary":null}')
-      assert.ok(p)
-      assert.equal(p!.ops.length, 1)
-      assert.equal((p!.ops[0] as { content: string }).content, '含 } 括号的正文')
-    })
-    check('preference 类恒 user（覆盖模型误标 project）', () => {
-      const p = parseAgentJson('{"ops":[{"op":"create","scope":"project","category":"preference","title":"t","content":"c"}]}')
-      assert.ok(p)
-      assert.equal(p!.ops.length, 1)
-      assert.equal((p!.ops[0] as { scope?: string }).scope, 'user')
-    })
-    // 带反馈重试 + 游标推进（首答坏 JSON，次答 no-op）
-    now = 6_000_000
-    const callsBeforeRetry = hookCalls.length
-    let badFirst = true
-    setLlmHook(async (system, user) => {
-      hookCalls.push({ system, user })
-      if (badFirst) { badFirst = false; return '{{{broken' }
-      return NOOP
-    })
-    for (let n = 1; n <= 6; n++) await appendTurn(root, 'S6', 's6', n)
-    await memoryMaybeExtract(root, 'S6')
-    check('解析失败 → 带反馈重试一次（LLM 共 2 次）', () => assert.equal(hookCalls.length, callsBeforeRetry + 2))
-    check('重试 prompt 含错误反馈与上次坏输出', () => {
-      const u = hookCalls[hookCalls.length - 1].user
-      assert.ok(u.includes('无法解析为 JSON'))
-      assert.ok(u.includes('{{{broken'))
-    })
-    await checkAsync('重试成功后游标推进（再触发不重提）', async () => {
-      await memoryMaybeExtract(root, 'S6')
-      assert.equal(hookCalls.length, callsBeforeRetry + 2)
-    })
-    // 重试耗尽也推进游标（不卡死同一窗口反复烧 token）
-    now = 6_100_000
-    const callsBeforeExhaust = hookCalls.length
-    setLlmHook(async (system, user) => {
-      hookCalls.push({ system, user })
-      return '{{{still-broken'
-    })
-    for (let n = 1; n <= 6; n++) await appendTurn(root, 'S7', 's7', n)
-    await memoryMaybeExtract(root, 'S7')
-    check('重试耗尽 → LLM 共 3 次（1 首答 + 2 重试）', () => assert.equal(hookCalls.length, callsBeforeExhaust + 3))
-    await checkAsync('重试耗尽后游标推进（再触发不重提，不卡死）', async () => {
-      await memoryMaybeExtract(root, 'S7')
-      assert.equal(hookCalls.length, callsBeforeExhaust + 3)
-    })
-    installRecorder()
-
-    // ⑰ 空转录快路径：窗口全空（纯思考/占位行——content 空且无工具行）→ 跳过 LLM 直推游标
     console.log('⑰ 空转录快路径（全空窗口不烧 LLM，游标照常推进）：')
     now = 6_200_000
-    const callsBeforeBlank = hookCalls.length
+    const callsBeforeBlank = completeCalls
     for (let n = 1; n <= 6; n++) {
       await messageAppend(root, 'S8', { id: `s8-a${n}`, role: 'assistant', content: '' })
     }
     await memoryMaybeExtract(root, 'S8')
-    check('全空窗口不调 LLM（无可提取内容）', () => assert.equal(hookCalls.length, callsBeforeBlank))
+    check('全空窗口不调 provider（无可提取内容）', () => assert.equal(completeCalls, callsBeforeBlank))
     await checkAsync('全空窗口游标照常推进（不空转、不回溯）', async () => {
       const db = await getDb()
       const row = await db.prepare('SELECT value FROM meta WHERE key = ?')
@@ -580,9 +541,53 @@ async function main(): Promise<void> {
       assert.equal(Number(row!.value), max.seq, '游标 = 窗口末尾')
     })
 
+    console.log('⑱ 蒸馏执行面（write 档 ∩ memory 白名单 = 窄面，无 fs/shell）：')
+    await checkAsync('执行面恰为四个 memory 工具', async () => {
+      const { toolsForPermission } = await import('../electron/lib/tools')
+      const surface = toolsForPermission('write').filter((t) =>
+        ['memory_search', 'memory_save', 'memory_update', 'memory_archive'].includes(t.name))
+      assert.deepEqual(surface.map((t) => t.name).sort(), ['memory_archive', 'memory_save', 'memory_search', 'memory_update'])
+    })
+
+    console.log('⑲ 每轮操作预算 + 显式条目归档拒绝（防幻觉批量清洗）：')
+    {
+      now = 6_500_000
+      for (let n = 1; n <= 6; n++) await appendTurn(root, 'S10', 's10', n)
+      // 一轮发 4 个 save（预算 3）：第 4 个应被预算拦截
+      installFake({
+        calls: [1, 2, 3, 4].map((n) => ({
+          name: 'memory_save',
+          input: { scope: 'user', category: 'fact', title: `预算条目${n}`, content: `c${n}` },
+        })),
+        text: '',
+      })
+      const beforeBudget = (await memoryList(root)).items.filter((i) => i.title.startsWith('预算条目')).length
+      await memoryMaybeExtract(root, 'S10')
+      await checkAsync('预算 3/轮：第 4 次 save 被拦截，只落 3 条', async () => {
+        const after = (await memoryList(root)).items.filter((i) => i.title.startsWith('预算条目'))
+        assert.equal(after.length, beforeBudget + 3)
+      })
+      // 显式条目归档拒绝：蒸馏器调 archive 被保护契约弹回，条目保持活跃
+      await memoryCreate({
+        projectRoot: root, tier: 'long', category: 'preference',
+        title: '用户显式偏好', content: '亲口说的', origin: 'user_explicit',
+      })
+      now = 6_600_000
+      for (let n = 1; n <= 6; n++) await appendTurn(root, 'S11', 's11', n)
+      installFake({
+        calls: [{ name: 'memory_archive', input: { id: (await memoryList(root)).items.find((i) => i.title === '用户显式偏好')!.id, reason: '蒸馏想清理' } }],
+        text: '',
+      })
+      await memoryMaybeExtract(root, 'S11')
+      await checkAsync('蒸馏器归档显式条目被拒（保护契约生效）', async () => {
+        const it = (await memoryList(root, true)).items.find((i) => i.title === '用户显式偏好')
+        assert.equal(it?.status, 'active', '显式条目仍活跃')
+      })
+    }
+
     setEmbedder(null)
     setReadyOverride(null)
-    setLlmHook(null)
+    setProviderOverride(null)
     setClock(null)
   } finally {
     // 先 await 关库再删临时目录：Windows 上 Worker 还握着 db 文件时 rm 会 EPERM
@@ -601,7 +606,4 @@ async function main(): Promise<void> {
   process.exit(0)
 }
 
-void main().catch((e) => {
-  console.error('smoke 崩溃：', e)
-  process.exit(1)
-})
+void main()

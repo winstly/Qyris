@@ -1,13 +1,14 @@
 /**
- * Git 工作区库冒烟测试：对临时真实仓库跑 gitStatus / diff / add / commit / unstage / discard，
- * 覆盖 rename、中文文件名、空格文件名、暂存+工作区双改动、暂存删除、非仓库目录。
+ * Git 工作区库冒烟测试：对临时真实仓库跑 gitStatus / diff / add / commit / unstage / discard / merge，
+ * 覆盖 rename、中文文件名、空格文件名、暂存+工作区双改动、暂存删除、非仓库目录、
+ * 合并（快进/幂等/冲突/脏树/引用注入守卫）。
  * 运行：npm run smoke:git
  */
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { gitStatus, gitAdd, gitCommit, gitDiff, gitUnstage, gitDiscard } from '../electron/lib/git'
+import { gitStatus, gitAdd, gitCommit, gitDiff, gitUnstage, gitDiscard, gitMerge } from '../electron/lib/git'
 
 let failures = 0
 function assert(cond: boolean, label: string): void {
@@ -98,6 +99,59 @@ async function main(): Promise<void> {
       threw = true
     }
     assert(threw, '空提交信息被拒绝')
+
+    console.log('gitMerge：')
+    // 收拢前段场景的残留改动，保证合并场景从干净树出发
+    sh('git add -A && git commit -m merge-base --allow-empty', dir)
+    // 快进合并：feature 领先 main 一步
+    sh('git checkout -b feature', dir)
+    writeFileSync(path.join(dir, 'f.txt'), 'feature\n')
+    sh('git add f.txt && git commit -m feature', dir)
+    sh('git checkout main', dir)
+    const ff = await gitMerge(dir, 'feature')
+    assert(/fast-forward/i.test(ff), `快进合并（实际首行：${ff.split('\n')[0]}）`)
+    // 重复合并幂等：已包含
+    const again = await gitMerge(dir, 'feature')
+    assert(/already up to date/i.test(again), '重复合并 → Already up to date')
+    // 冲突：两分支同建同名不同内容 → CONFLICT 转译为可读文案
+    sh('git checkout -b side', dir)
+    writeFileSync(path.join(dir, 'c.txt'), 'side\n')
+    sh('git add c.txt && git commit -m side', dir)
+    sh('git checkout main', dir)
+    writeFileSync(path.join(dir, 'c.txt'), 'main\n')
+    sh('git add c.txt && git commit -m main2', dir)
+    let conflictMsg = ''
+    try {
+      await gitMerge(dir, 'side')
+    } catch (e) {
+      conflictMsg = String(e)
+    }
+    assert(conflictMsg.includes('合并冲突'), `冲突合并抛可读转译（实际：${conflictMsg.slice(0, 60)}）`)
+    sh('git merge --abort', dir)
+    // 脏工作区：合并将覆盖未提交改动 → 拒绝
+    writeFileSync(path.join(dir, 'e.txt'), 'base\n')
+    sh('git add e.txt && git commit -m base', dir)
+    sh('git checkout -b touch', dir)
+    writeFileSync(path.join(dir, 'e.txt'), 'branch\n')
+    sh('git add e.txt && git commit -m touch', dir)
+    sh('git checkout main', dir)
+    writeFileSync(path.join(dir, 'e.txt'), 'local edit\n')
+    threw = false
+    try {
+      await gitMerge(dir, 'touch')
+    } catch {
+      threw = true
+    }
+    assert(threw, '脏工作区合并被拒（本地改动会被覆盖）')
+    sh('git checkout -- e.txt', dir)
+    // 分支名注入守卫：- 开头按选项处理会被吞，必须拒
+    threw = false
+    try {
+      await gitMerge(dir, '-evil')
+    } catch {
+      threw = true
+    }
+    assert(threw, '分支名以 - 开头被拒（选项注入守卫）')
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

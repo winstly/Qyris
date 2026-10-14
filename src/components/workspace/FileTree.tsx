@@ -12,11 +12,36 @@ import { Select } from '@/components/common/Select'
 import { IconChevron, IconFolder, IconFolderOpen, IconFile, IconPlus, IconFolderPlus, IconPencil, IconTrash, IconRefresh, IconSearch, IconClose, IconBranch, IconUndo, IconCopy, IconScissors, IconCheck, IconSend, IconTarget } from '@/components/common/icons'
 import { focusGitCommit } from '@/components/workspace/GitPanel'
 
-/** 右键「切换分支」对话框的目标目录与其仓库信息 */
-interface BranchTarget {
+/** 右键「切换/合并分支」对话框的目标目录、仓库信息与动作模式 */
+export interface BranchTarget {
   dir: string
   currentBranch: string | null
   branches: string[]
+  /** 'switch' = checkout 切换；'merge' = 把所选分支合并进当前分支 */
+  mode: 'switch' | 'merge'
+}
+
+/** 打开分支切换/合并对话框前的仓库检查（文件树右键与 Git 面板共用）：
+ *  检查通过返回 BranchTarget；不是仓库/无可用分支/查询失败弹告警并返回 null。 */
+export async function prepareBranchTarget(dir: string, mode: 'switch' | 'merge'): Promise<BranchTarget | null> {
+  const alert = useAppStore.getState().showAlert
+  const label = mode === 'merge' ? '合并分支' : '切换分支'
+  try {
+    const info = await api.gitRepoInfo(dir)
+    if (!info.isRepo) {
+      void alert(label, '该目录不是 Git 仓库（未找到 .git）。')
+      return null
+    }
+    const selectable = info.branches.filter((b) => b !== info.currentBranch)
+    if (info.branches.length === 0 || (mode === 'merge' && selectable.length === 0)) {
+      void alert(label, mode === 'merge' ? '该仓库没有可合并的其他本地分支。' : '该仓库没有任何本地分支。')
+      return null
+    }
+    return { dir, currentBranch: info.currentBranch, branches: info.branches, mode }
+  } catch (e) {
+    void alert(label, String(e))
+    return null
+  }
 }
 
 /** 搜索框 ref，供全局快捷键 Ctrl+F 聚焦 */
@@ -41,23 +66,10 @@ export function FileTree() {
   const seqRef = useRef(0)
   const [branchTarget, setBranchTarget] = useState<BranchTarget | null>(null)
 
-  /** 右键「切换分支」：目录必须是 Git 仓库（有本地分支）才弹选择框 */
-  const openBranchSwitch = useCallback(async (dir: string) => {
-    const alert = useAppStore.getState().showAlert
-    try {
-      const info = await api.gitRepoInfo(dir)
-      if (!info.isRepo) {
-        void alert('切换分支', '该目录不是 Git 仓库（未找到 .git）。')
-        return
-      }
-      if (info.branches.length === 0) {
-        void alert('切换分支', '该仓库没有任何本地分支。')
-        return
-      }
-      setBranchTarget({ dir, currentBranch: info.currentBranch, branches: info.branches })
-    } catch (e) {
-      void alert('切换分支', String(e))
-    }
+  /** 右键「切换/合并分支」：目录必须是 Git 仓库（有可选分支）才弹选择框 */
+  const openBranchAction = useCallback(async (dir: string, mode: 'switch' | 'merge') => {
+    const target = await prepareBranchTarget(dir, mode)
+    if (target) setBranchTarget(target)
   }, [])
 
   // 防抖 200ms；seq 防竞态
@@ -180,12 +192,16 @@ export function FileTree() {
               first?.focus()
             }
           }}>
-            <NodeRow node={rootNode} depth={0} onSwitchBranch={openBranchSwitch} />
+            <NodeRow node={rootNode} depth={0} onBranchAction={openBranchAction} />
           </div>
         )}
       </div>
       {branchTarget && (
-        <BranchSwitchDialog target={branchTarget} onClose={() => setBranchTarget(null)} />
+        <BranchSwitchDialog
+          target={branchTarget}
+          onClose={() => setBranchTarget(null)}
+          onMerge={(b) => useGitStore.getState().runOp('合并', () => api.gitMerge(branchTarget.dir, b))}
+        />
       )}
       <SnapshotHistoryDialog />
     </div>
@@ -288,10 +304,10 @@ function SearchResults({ results, searching, query }: {
   )
 }
 
-const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
+const NodeRow = React.memo(function NodeRow({ node, depth, onBranchAction }: {
   node: TreeNode
   depth: number
-  onSwitchBranch: (dir: string) => void
+  onBranchAction: (dir: string, mode: 'switch' | 'merge') => void
 }) {
   const isFolder = node.kind === 'folder'
   const expanded = useFileStore((s) => !!s.expanded[node.path])
@@ -363,8 +379,8 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
         <div role="group">
           {compactChildren(children ?? []).map((c) =>
             isCompactNode(c)
-              ? <CompactNodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />
-              : <NodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />,
+              ? <CompactNodeRow key={c.path} node={c} depth={depth + 1} onBranchAction={onBranchAction} />
+              : <NodeRow key={c.path} node={c} depth={depth + 1} onBranchAction={onBranchAction} />,
           )}
           {children && children.length === 0 && (
             <div className="tree-empty" style={{ paddingLeft: 8 + (depth + 1) * 14 + 22 }}>
@@ -378,7 +394,7 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
         <ContextMenu
           pos={menuPos}
           onClose={() => setMenuPos(null)}
-          items={buildTreeMenuItems(node, rootPath, onSwitchBranch)}
+          items={buildTreeMenuItems(node, rootPath, onBranchAction)}
         />
       )}
     </>
@@ -386,10 +402,10 @@ const NodeRow = React.memo(function NodeRow({ node, depth, onSwitchBranch }: {
 })
 
 /** 合并目录节点：展开时依次展开整条链，收起时收起整条链 */
-const CompactNodeRow = React.memo(function CompactNodeRow({ node, depth, onSwitchBranch }: {
+const CompactNodeRow = React.memo(function CompactNodeRow({ node, depth, onBranchAction }: {
   node: CompactNode
   depth: number
-  onSwitchBranch: (dir: string) => void
+  onBranchAction: (dir: string, mode: 'switch' | 'merge') => void
 }) {
   const expanded = useFileStore((s) => !!s.expanded[node.path])
   const loading = useFileStore((s) => !!s.loadingDirs[node.path])
@@ -463,8 +479,8 @@ const CompactNodeRow = React.memo(function CompactNodeRow({ node, depth, onSwitc
         <div role="group">
           {compactChildren(children ?? []).map((c) =>
             isCompactNode(c)
-              ? <CompactNodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />
-              : <NodeRow key={c.path} node={c} depth={depth + 1} onSwitchBranch={onSwitchBranch} />,
+              ? <CompactNodeRow key={c.path} node={c} depth={depth + 1} onBranchAction={onBranchAction} />
+              : <NodeRow key={c.path} node={c} depth={depth + 1} onBranchAction={onBranchAction} />,
           )}
           {children && children.length === 0 && (
             <div className="tree-empty" style={{ paddingLeft: 8 + (depth + 1) * 14 + 22 }}>
@@ -478,7 +494,7 @@ const CompactNodeRow = React.memo(function CompactNodeRow({ node, depth, onSwitc
         <ContextMenu
           pos={menuPos}
           onClose={() => setMenuPos(null)}
-          items={buildTreeMenuItems({ name: node.mergedName, path: node.path, kind: 'folder' }, rootPath, onSwitchBranch)}
+          items={buildTreeMenuItems({ name: node.mergedName, path: node.path, kind: 'folder' }, rootPath, onBranchAction)}
         />
       )}
     </>
@@ -491,7 +507,7 @@ const CompactNodeRow = React.memo(function CompactNodeRow({ node, depth, onSwitc
 function buildTreeMenuItems(
   target: TreeNode,
   rootPath: string | null,
-  onSwitchBranch: (dir: string) => void,
+  onBranchAction: (dir: string, mode: 'switch' | 'merge') => void,
 ): ContextMenuItem[] {
   if (!rootPath) return []
   const isRoot = target.path === rootPath
@@ -617,7 +633,8 @@ function buildTreeMenuItems(
                   })
                 })
               }},
-              { label: '切换分支…', icon: <IconBranch size={13} />, run: () => onSwitchBranch(target.path) },
+              { label: '切换分支…', icon: <IconBranch size={13} />, run: () => onBranchAction(target.path, 'switch') },
+              { label: '合并分支…', icon: <IconBranch size={13} />, run: () => onBranchAction(target.path, 'merge') },
               { label: '提交', icon: <IconCheck size={13} />, run: () => focusGitCommit() },
               { label: '推送', icon: <IconSend size={13} />, run: () => void gitSync('push') },
               { label: '拉取', icon: <IconUndo size={13} />, run: () => void gitSync('pull') },
@@ -642,30 +659,50 @@ function buildTreeMenuItems(
   ]
 }
 
-// ---------- 切换分支对话框 ----------
+// ---------- 切换 / 合并分支对话框 ----------
 
-/** 目录级 Git 分支切换：选择分支 → checkout → 刷新文件树 */
-export function BranchSwitchDialog({ target, onClose, onSwitched }: {
+/** 目录级 Git 分支动作：选择分支 → checkout（switch）或 merge 进当前分支（merge）→ 刷新文件树。
+ *  模式取自 target.mode；merge 由调用方注入 onMerge（GitPanel/文件树都走 runOp 反馈通道：
+ *  过场弹窗 + 成功摘要/失败详情，见 GitOpDialog）——merge 流先收选择器再跑操作，避免双层 mask */
+export function BranchSwitchDialog({ target, onClose, onSwitched, onMerge }: {
   target: BranchTarget
   onClose: () => void
   onSwitched?: () => void
+  /** merge 模式的执行通道：缺省直调 gitMerge（错误走 catch 弹窗） */
+  onMerge?: (branch: string) => Promise<void>
 }) {
   const [branch, setBranch] = useState(target.currentBranch ?? target.branches[0] ?? '')
   const [switching, setSwitching] = useState(false)
   const trapRef = useFocusTrap<HTMLDivElement>(true)
+  const isMerge = target.mode === 'merge'
+
+  const refreshTree = async () => {
+    const fs = useFileStore.getState()
+    await fs.loadChildren(target.dir)
+    await fs.refreshExpanded()
+    onSwitched?.()
+  }
 
   const confirm = async () => {
     if (!branch || branch === target.currentBranch) {
       onClose()
       return
     }
+    if (isMerge) {
+      onClose()
+      try {
+        if (onMerge) await onMerge(branch)
+        else await api.gitMerge(target.dir, branch)
+        await refreshTree()
+      } catch (e) {
+        void useAppStore.getState().showAlert('合并分支失败', String(e))
+      }
+      return
+    }
     setSwitching(true)
     try {
       await api.gitCheckout(target.dir, branch)
-      const fs = useFileStore.getState()
-      await fs.loadChildren(target.dir)
-      await fs.refreshExpanded()
-      onSwitched?.()
+      await refreshTree()
       onClose()
     } catch (e) {
       void useAppStore.getState().showAlert('切换分支失败', String(e))
@@ -676,28 +713,34 @@ export function BranchSwitchDialog({ target, onClose, onSwitched }: {
 
   return (
     <div ref={trapRef} className="modal-mask" onMouseDown={(e) => { if (e.target === e.currentTarget && !switching) onClose() }}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label="切换分支">
+      <div className="modal" role="dialog" aria-modal="true" aria-label={isMerge ? '合并分支' : '切换分支'}>
         <div className="modal__head">
-          <span>切换分支 · {target.dir === useFileStore.getState().rootPath ? '项目根目录' : basename(target.dir)}</span>
+          <span>{isMerge ? '合并分支' : '切换分支'} · {target.dir === useFileStore.getState().rootPath ? '项目根目录' : basename(target.dir)}</span>
           <button className="icon-btn" onClick={onClose} aria-label="关闭" disabled={switching}>
             <IconClose size={14} />
           </button>
         </div>
         <label className="field">
-          <span className="field__label">分支{target.currentBranch ? `（当前：${target.currentBranch}）` : '（游离 HEAD）'}</span>
+          <span className="field__label">
+            {isMerge ? '要合并进当前分支的分支' : '分支'}{target.currentBranch ? `（当前：${target.currentBranch}）` : '（游离 HEAD）'}
+          </span>
           <Select
             value={branch}
             onChange={setBranch}
             options={target.branches.map((b) => ({ value: b, label: b }))}
             searchable
-            ariaLabel="选择要切换的分支"
+            ariaLabel={isMerge ? '选择要合并的分支' : '选择要切换的分支'}
           />
-          <span className="field__hint">未提交的修改可能与切换冲突，失败原因会在错误弹窗中展示</span>
+          <span className="field__hint">
+            {isMerge
+              ? '所选分支将合并进当前分支；出现冲突时 Git 会标记冲突文件，需手动解决后提交'
+              : '未提交的修改可能与切换冲突，失败原因会在错误弹窗中展示'}
+          </span>
         </label>
         <div className="modal__actions">
           <button className="btn btn--ghost" onClick={onClose} disabled={switching}>取消</button>
           <button className="btn btn--primary" onClick={() => void confirm()} disabled={!branch || switching || branch === target.currentBranch}>
-            {switching ? '切换中…' : '切换'}
+            {switching ? (isMerge ? '合并中…' : '切换中…') : (isMerge ? '合并' : '切换')}
           </button>
         </div>
       </div>

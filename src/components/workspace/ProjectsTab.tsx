@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
 import { IconClock, IconClose, IconFolder, IconPlus, IconTrash } from '@/components/common/icons'
@@ -16,9 +17,36 @@ export function ProjectsTab() {
   const showConfirm = useAppStore((s) => s.showConfirm)
   const showAlert = useAppStore((s) => s.showAlert)
   const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
-
   // 历史项目 = 最近记录里排除当前已打开（避免与「当前项目」重复）
   const historyOnly = recentProjects.filter((p) => !openProjects.includes(p.path))
+
+  /** 目录已不存在的历史项目路径（检测结果：打「已删除」标签、禁打开、只留删除钮） */
+  const [missingPaths, setMissingPaths] = useState<ReadonlySet<string>>(new Set())
+
+  // 项目目录存在性检测：目录已不存在 → 打标签（不自动删——看到真相再处置，目录恢复也能自愈）。
+  // 键定 recentKey（路径签名）而非挂载一次：boot 是异步落 config 的——组件挂载时列表还空，
+  // 只跑一次会永远放过死目录；列表一变（config 落库/删除/新项目）即重新检测。
+  // 检测失败保守视为存在（不误标）；每次重跑覆盖整套结果，目录恢复后标签自动摘掉
+  const recentKey = recentProjects.map((p) => p.path).join('\n')
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      const targets = useAppStore
+        .getState()
+        .recentProjects.filter((p) => !useAppStore.getState().openProjects.includes(p.path))
+      if (targets.length === 0) {
+        setMissingPaths(new Set())
+        return
+      }
+      const checks = await Promise.all(
+        targets.map(async (p) => ({ p, exists: await api.pathExists(p.path).catch(() => true) })),
+      )
+      if (cancelled) return
+      setMissingPaths(new Set(checks.filter((c) => !c.exists).map((c) => c.p.path)))
+    })()
+    return () => { cancelled = true }
+    // recentKey = 列表签名：落库/增删都会重触发检测
+  }, [recentKey])
 
   const removeFromHistory = async (proj: { path: string; name: string }) => {
     const res = await showConfirm(
@@ -98,6 +126,8 @@ export function ProjectsTab() {
         </button>
       </div>
 
+      {/* 目录已不存在的条目自带「已删除」标签——标签即提示，不再另出 toast */}
+
       {empty ? (
         <div className="history">
           <div className="emptystate">
@@ -151,39 +181,46 @@ export function ProjectsTab() {
               <div className="history__empty">暂无历史项目</div>
             ) : (
               <div className="history__list">
-                {historyOnly.map((proj) => (
-                  <div
-                    key={proj.path}
-                    className="history__item"
-                    onClick={() => void openProject(proj.path)}
-                    role="button"
-                    tabIndex={0}
-                    onKeyDown={(e) => { if (e.key === 'Enter') void openProject(proj.path) }}
-                  >
-                    <div className="history__item-icon"><IconFolder size={15} /></div>
-                    <div className="history__item-info">
-                      <span className="history__item-name">{proj.name}</span>
-                      <span className="history__item-path mono">{proj.path}</span>
+                {historyOnly.map((proj) => {
+                  // 目录已不存在：打「已删除」标签、禁打开（不进 openProject）、只留删除钮
+                  const missing = missingPaths.has(proj.path)
+                  return (
+                    <div
+                      key={proj.path}
+                      className={`history__item${missing ? ' history__item--missing' : ''}`}
+                      onClick={missing ? undefined : () => void openProject(proj.path)}
+                      role={missing ? undefined : 'button'}
+                      tabIndex={missing ? undefined : 0}
+                      onKeyDown={missing ? undefined : (e) => { if (e.key === 'Enter') void openProject(proj.path) }}
+                    >
+                      <div className="history__item-icon"><IconFolder size={15} /></div>
+                      <div className="history__item-info">
+                        <span className="history__item-name">{proj.name}</span>
+                        <span className="history__item-path mono">{proj.path}</span>
+                      </div>
+                      {missing && <span className="history__item-badge">已删除</span>}
+                      <span className="history__item-time">{timeAgo(proj.lastOpened)}</span>
+                      {!missing && (
+                        <button
+                          className="history__item-newwin"
+                          onClick={(e) => { e.stopPropagation(); void api.openInExplorer(proj.path) }}
+                          aria-label={`打开 ${proj.name} 所在目录`}
+                          title="在资源管理器中打开"
+                        >
+                          <IconFolder size={12} />
+                        </button>
+                      )}
+                      <button
+                        className="history__item-delete"
+                        onClick={(e) => { e.stopPropagation(); void removeFromHistory(proj) }}
+                        aria-label={`移除 ${proj.name}`}
+                        title="从历史中移除"
+                      >
+                        <IconTrash size={12} />
+                      </button>
                     </div>
-                    <span className="history__item-time">{timeAgo(proj.lastOpened)}</span>
-                    <button
-                      className="history__item-newwin"
-                      onClick={(e) => { e.stopPropagation(); void api.openInExplorer(proj.path) }}
-                      aria-label={`打开 ${proj.name} 所在目录`}
-                      title="在资源管理器中打开"
-                    >
-                      <IconFolder size={12} />
-                    </button>
-                    <button
-                      className="history__item-delete"
-                      onClick={(e) => { e.stopPropagation(); void removeFromHistory(proj) }}
-                      aria-label={`移除 ${proj.name}`}
-                      title="从历史中移除"
-                    >
-                      <IconTrash size={12} />
-                    </button>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>

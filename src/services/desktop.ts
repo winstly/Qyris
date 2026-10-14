@@ -2,7 +2,7 @@
  * Electron preload 暴露面（window.desktopAPI）的类型化封装层。
  * 前端所有文件操作都经由这里走主进程，绝不在渲染层直接碰文件系统。
  */
-import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, McpServerEntry, MemoryHit, MemoryItem, MemoryStats, PreviewConsoleEntry } from '@/types'
+import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, McpServerEntry, MemoryHit, MemoryItem, MemoryLastTidy, MemoryPatch, MemoryStats, PreviewConsoleEntry } from '@/types'
 import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
 import type { DesktopAPI } from '../../shared/desktop-api'
 import type { McpTestResult } from '../../shared/ipc-types'
@@ -34,6 +34,7 @@ function wrap<T>(fn: (d: DesktopAPI) => Promise<T>): Promise<T> {
 export const api = {
   // 文件系统
   listDir: (projectRoot: string, dir: string) => wrap((d) => d.listDir(projectRoot, dir)),
+  pathExists: (p: string) => wrap((d) => d.pathExists(p)) as Promise<boolean>,
   listDirBatch: (projectRoot: string, dirs: string[]) => wrap((d) => d.listDirBatch(projectRoot, dirs)) as Promise<Record<string, import('@/types').TreeNode[]>>,
   searchFiles: (projectRoot: string, query: string) => wrap((d) => d.searchFiles(projectRoot, query)),
   grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean }) =>
@@ -116,7 +117,7 @@ export const api = {
   aiChatStream: (
     requestId: string, provider: string, baseUrl: string, model: string,
     messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null,
-    opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string },
+    opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string },
   ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot, opts)),
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
     wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode, cliCommand)),
@@ -150,6 +151,7 @@ export const api = {
   gitPull: (dir: string) => wrap((d) => d.gitPull(dir)),
   gitFetch: (dir: string) => wrap((d) => d.gitFetch(dir)),
   gitPush: (dir: string) => wrap((d) => d.gitPush(dir)),
+  gitMerge: (dir: string, branch: string) => wrap((d) => d.gitMerge(dir, branch)),
   gitDiscard: (dir: string, paths: string[]) => wrap((d) => d.gitDiscard(dir, paths)),
   pickParentDir: () => wrap((d) => d.pickParentDir()),
 
@@ -158,14 +160,17 @@ export const api = {
     wrap((d) => d.memoryList(projectRoot, includeArchived)) as Promise<{ items: MemoryItem[] }>,
   memorySearch: (query: string, projectRoot: string | null, topK?: number, includeArchived?: boolean) =>
     wrap((d) => d.memorySearch(query, projectRoot, topK, includeArchived)) as Promise<{ hits: MemoryHit[]; degraded: boolean }>,
-  memoryUpdate: (id: string, patch: { title?: string; content?: string; category?: string; importance?: number }) =>
+  memoryUpdate: (id: string, patch: MemoryPatch) =>
     wrap((d) => d.memoryUpdate(id, patch)) as Promise<MemoryItem>,
+  memoryUnarchive: (id: string) =>
+    wrap((d) => d.memoryUnarchive(id)) as Promise<MemoryItem>,
   memoryDelete: (id: string) => wrap((d) => d.memoryDelete(id)),
   memoryMoveScope: (id: string, target: 'project' | 'user', projectRoot?: string) =>
     wrap((d) => d.memoryMoveScope(id, target, projectRoot)) as Promise<MemoryItem>,
   memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
     wrap((d) => d.memoryClear(scope, projectRoot)),
   memoryStats: () => wrap((d) => d.memoryStats()) as Promise<MemoryStats>,
+  memoryLastTidy: () => wrap((d) => d.memoryLastTidy()) as Promise<MemoryLastTidy | null>,
   // 记忆管线 P2
   memorySessionContext: (projectRoot: string, sessionId: string) =>
     wrap((d) => d.memorySessionContext(projectRoot, sessionId)) as Promise<{ summary: string | null }>,
@@ -174,7 +179,7 @@ export const api = {
   sessionEnded: (projectRoot: string, sessionId: string) =>
     wrap((d) => d.sessionEnded(projectRoot, sessionId)) as Promise<void>,
   memoryRunNow: (projectRoot: string) =>
-    wrap((d) => d.memoryRunNow(projectRoot)) as Promise<{ ok: boolean; error?: string }>,
+    wrap((d) => d.memoryRunNow(projectRoot)) as Promise<{ ok: boolean; error?: string; ops?: number; tidy?: MemoryLastTidy | null }>,
   memoryExtracting: (projectRoot: string) =>
     wrap((d) => d.memoryExtracting(projectRoot)) as Promise<boolean>,
   noteLesson: (projectRoot: string, sessionId: string, lesson: { title: string; content: string }) =>

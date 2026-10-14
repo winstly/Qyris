@@ -41,12 +41,30 @@ export function normalizeMcpName(name: string): string {
 /** 外部工具判别（唯一口径在 proxy.ts：网关 / 连接池 / 注册表共用） */
 export { isExternalToolName }
 
+/**
+ * 一个 server 的连接槽。断连语义对标 claude-code「清 cache 不清表」：连接死了只把 conn
+ * 置空待懒重连，工具表（adapters）永不撤——工具面对模型稳定，断连的下一次调用自动重建。
+ */
+interface ServerSlot {
+  entry: McpServerEntry
+  /** 活连接；null = 断连待懒重连 */
+  conn: McpConnection | null
+  /** 单飞重连（并发调用共享同一个建连 promise，防重连风暴） */
+  reconnecting: Promise<McpConnection> | null
+  /** 最近一次连接失败 / 断开原因（建连成功即清空；externalPoolStatus 消费） */
+  error: string
+}
+
 /** 一个工程域的连接池 */
 interface Pool {
   adapters: Tool[]
   connections: McpConnection[]
+  /** server 名 → 连接槽（doInit 建档；懒重连 / 状态快照按槽操作） */
+  slots: Map<string, ServerSlot>
   /** 域内 init（幂等，可共享）；顶层失败即清空，下次 ensure 重试 */
   init: Promise<void> | null
+  /** init 是否已收敛（pool.init 存活但已完成 ≠ connecting） */
+  initSettled: boolean
   /** init 数据源：'config' = 读配置表；对象 = 测试注入的 server 表（引用一致视为已就绪，不重建） */
   source: 'config' | Record<string, McpServerEntry>
   /** config 源指纹（server 表序列化）：与当前配置不符 = 用户改过表 → 下次 ensure 重建该域池 */
@@ -65,7 +83,16 @@ function poolKey(projectRoot?: string | null): string {
 function getPool(key: string): Pool {
   let p = pools.get(key)
   if (!p) {
-    p = { adapters: [], connections: [], init: null, source: 'config', configFingerprint: null, generation: 0 }
+    p = {
+      adapters: [],
+      connections: [],
+      slots: new Map(),
+      init: null,
+      initSettled: false,
+      source: 'config',
+      configFingerprint: null,
+      generation: 0,
+    }
     pools.set(key, p)
   }
   return p
@@ -154,16 +181,21 @@ export async function ensureExternalTools(
   if (pool.init || pool.connections.length > 0) closePool(pool)
   pool.source = servers ?? 'config'
   const gen = ++pool.generation
-  pool.init = doInit(pool, gen, projectRoot, servers).catch((e: unknown) => {
-    console.warn('[mcp-external] 初始化失败，本轮无外部工具：', e)
-    // 代次不匹配的失败不得清掉新池的 adapters
-    if (gen === pool.generation) {
-      pool.adapters = []
-      // 顶层失败（如 getConfig 暂时读不到）不缓存：下次对话重试，而非锁死空池到切项目/重启
-      pool.init = null
-      pool.configFingerprint = null
-    }
-  })
+  pool.initSettled = false
+  pool.init = doInit(pool, gen, projectRoot, servers)
+    .catch((e: unknown) => {
+      console.warn('[mcp-external] 初始化失败，本轮无外部工具：', e)
+      // 代次不匹配的失败不得清掉新池的 adapters
+      if (gen === pool.generation) {
+        pool.adapters = []
+        // 顶层失败（如 getConfig 暂时读不到）不缓存：下次对话重试，而非锁死空池到切项目/重启
+        pool.init = null
+        pool.configFingerprint = null
+      }
+    })
+    .finally(() => {
+      if (gen === pool.generation) pool.initSettled = true
+    })
   return pool.init
 }
 
@@ -183,27 +215,21 @@ async function doInit(
   const jobs = Object.entries(servers)
     .filter(([, e]) => isMcpEnabled(e) && (e.command?.trim() || e.url?.trim()))
     .map(async ([name, entry]): Promise<Tool[]> => {
-      let conn: McpConnection | null = null
+      const slot: ServerSlot = { entry, conn: null, reconnecting: null, error: '' }
+      if (gen === pool.generation) pool.slots.set(name, slot)
       try {
-        conn = await connectMcpServer(name, entry)
+        const conn = await connectMcpServer(name, entry)
         const tools = await conn.listTools()
         // 代次不匹配 = 本轮已被收割作废：连接不入池，就地收掉
         if (gen !== pool.generation) {
           conn.close()
           return []
         }
-        pool.connections.push(conn)
-        const built = tools.map((t) => wrapTool(name, entry, conn!, t))
-        // 中途断连（子进程崩/被杀）：把该 server 的工具撤出注册表，避免继续进提示词面
-        const serverPrefix = `mcp__${normalizeMcpName(name)}__`
-        conn.onClose = () => {
-          if (gen !== pool.generation) return
-          pool.adapters = pool.adapters.filter((t) => !t.name.startsWith(serverPrefix))
-        }
-        return built
+        attachSlotConn(pool, gen, slot, conn)
+        return tools.map((t) => wrapTool(name, entry, pool, gen, slot, t))
       } catch (e) {
-        // 单 server 失败不影响其他 server；连接就地收割（不进池）
-        try { conn?.close() } catch { /* 进程已不在 */ }
+        // 单 server 失败不影响其他 server：记入槽位错误面（externalPoolStatus 消费），其工具不暴露
+        slot.error = e instanceof Error ? e.message : String(e)
         console.warn(`[mcp-external] server「${name}」连接失败，其工具不暴露：`, e)
         return []
       }
@@ -221,7 +247,57 @@ async function doInit(
   })
 }
 
-function wrapTool(serverName: string, entry: McpServerEntry, conn: McpConnection, remote: McpRemoteTool): Tool {
+/** 活连接入槽：登记断连回调（只标记死连接，不撤工具）并纳入池连接表供收割 */
+function attachSlotConn(pool: Pool, gen: number, slot: ServerSlot, conn: McpConnection): void {
+  slot.conn = conn
+  slot.error = ''
+  if (!pool.connections.includes(conn)) pool.connections.push(conn)
+  conn.onClose = (reason) => {
+    pool.connections = pool.connections.filter((c) => c !== conn)
+    if (gen !== pool.generation) return // 池已被收割：槽位对象随 closePool 丢弃，无需回写
+    if (slot.conn === conn) {
+      slot.conn = null
+      slot.error = reason
+    }
+  }
+}
+
+/**
+ * 取可用连接（必要时懒重连，单飞）：活连接直接返回；死连接共享同一个建连 promise，
+ * 成功后原子换入池连接表，失败把原因记进槽位。代次不匹配（池已被收割）就地收掉新连接。
+ */
+function reconnectSlot(pool: Pool, gen: number, serverName: string, slot: ServerSlot): Promise<McpConnection> {
+  if (slot.conn) return Promise.resolve(slot.conn)
+  if (!slot.reconnecting) {
+    slot.reconnecting = connectMcpServer(serverName, slot.entry)
+      .then((conn) => {
+        if (gen !== pool.generation) {
+          conn.close()
+          throw new Error('MCP 连接池已重建，本次重连作废')
+        }
+        attachSlotConn(pool, gen, slot, conn)
+        return conn
+      })
+      .catch((e: unknown) => {
+        slot.conn = null
+        slot.error = e instanceof Error ? e.message : String(e)
+        throw e instanceof Error ? e : new Error(String(e))
+      })
+      .finally(() => {
+        slot.reconnecting = null
+      })
+  }
+  return slot.reconnecting
+}
+
+function wrapTool(
+  serverName: string,
+  entry: McpServerEntry,
+  pool: Pool,
+  gen: number,
+  slot: ServerSlot,
+  remote: McpRemoteTool,
+): Tool {
   const fullName = `mcp__${normalizeMcpName(serverName)}__${normalizeMcpName(remote.name)}`
   const description =
     remote.description.length > MAX_DESCRIPTION
@@ -237,6 +313,7 @@ function wrapTool(serverName: string, entry: McpServerEntry, conn: McpConnection
     async execute(input: unknown, ctx): Promise<ToolResult> {
       if (ctx.signal?.aborted) return { content: '已取消', isError: true }
       try {
+        const conn = await reconnectSlot(pool, gen, serverName, slot)
         return await conn.callTool(remote.name, input, ctx.signal)
       } catch (e) {
         return { content: `[${fullName}] ${e instanceof Error ? e.message : String(e)}`, isError: true }
@@ -268,9 +345,31 @@ function closePool(pool: Pool): void {
       /* 进程已不在 */
     }
   }
+  pool.slots.clear()
   pool.adapters = []
   pool.init = null
+  pool.initSettled = false
   pool.configFingerprint = null
+}
+
+/** 连接池状态快照（提示词面 / UI 消费）：区分「连接建立中」与「已失败（含原因）」两态 */
+export interface ExternalPoolStatus {
+  /** 该域 init 或任一 server 的懒重连在途 */
+  connecting: boolean
+  /** 各 server 最近一次连接失败 / 断开原因（键 = server 名；建连成功即移除） */
+  errors: Record<string, string>
+}
+
+export function externalPoolStatus(projectRoot?: string | null): ExternalPoolStatus {
+  const pool = pools.get(poolKey(projectRoot))
+  if (!pool) return { connecting: false, errors: {} }
+  const errors: Record<string, string> = {}
+  let connecting = pool.init !== null && !pool.initSettled
+  for (const [name, slot] of pool.slots) {
+    if (slot.reconnecting) connecting = true
+    if (slot.error) errors[name] = slot.error
+  }
+  return { connecting, errors }
 }
 
 /** 测试连接（MCP 面板用）：独立建连 → tools/list → 即刻收割，不进连接池、不影响会话工具面 */

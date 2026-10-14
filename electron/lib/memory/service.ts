@@ -20,15 +20,16 @@ import type { SqliteDb } from '../db'
 import { getDb, projectKey, vecReadyFlag, dataDir } from '../db'
 import { embedTexts, embedReady, isEmbedBusy, EMBED_DIM, DEFAULT_EMBED_MODEL } from './embed'
 import { getConfig } from '../config'
+import { memoryActivation } from '../../../shared/memory-scoring'
 import { emitToAllWindows } from '../emitter'
 
 // ---------- 类型（渲染层契约，camelCase，service 层做行⇄对象映射） ----------
 
 // 记忆载荷类型（唯一定义在 shared/ipc-types.ts，此处再导出供主进程/preload 消费）
 import type {
-  MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, MemoryTier,
+  MemoryArchivedBy, MemoryCategory, MemoryHit, MemoryItem, MemoryLastTidy, MemoryOrigin, MemoryPatch, MemoryStats, MemoryTier,
 } from '../../../shared/ipc-types'
-export type { MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, MemoryTier }
+export type { MemoryArchivedBy, MemoryCategory, MemoryHit, MemoryItem, MemoryLastTidy, MemoryOrigin, MemoryPatch, MemoryStats, MemoryTier }
 export interface MemorySearchResult {
   hits: MemoryHit[]
   /** true = 向量路不可用（sqlite-vec 缺席 / 模型未就绪或降级 / 本次推理失败），本次仅关键词路 */
@@ -88,6 +89,26 @@ interface MemoryCreateInput {
   content: string
   sourceJson?: string | null
   importance?: number
+  /** 来源契约（写入侧打标，模型不可自填）；缺省 agent_suggest */
+  origin?: MemoryOrigin
+}
+
+/** 显式条目重要度下限：「你亲口说的，不会被往后排」（衰减/覆写都不许打穿） */
+const EXPLICIT_IMPORTANCE_FLOOR = 0.6
+
+function effectiveImportance(raw: number | undefined, origin: MemoryOrigin | undefined): number {
+  const base = clampImportance(raw ?? 0.5)
+  return origin === 'user_explicit' ? Math.max(base, EXPLICIT_IMPORTANCE_FLOOR) : base
+}
+
+/** 信息量门控（mem0 式 UPDATE-with-gate）：新正文是旧正文的大幅子串 = 退化覆写，拒绝。
+ *  纯启发式：真重写几乎不会是旧文的严格子串；合法精简（提炼）与改写都放行 */
+function assertNotDegraded(oldContent: string, newContent: string): void {
+  const oldC = oldContent.trim()
+  const newC = newContent.trim()
+  if (oldC && newC && oldC.includes(newC) && newC.length < oldC.length * 0.5) {
+    throw new Error('疑似信息退化（新正文只是旧正文的片段）：请保留完整信息后再更新')
+  }
 }
 
 // ---------- 嵌入模型指纹（meta 表 embed_model_fingerprint，不符停向量路；全量重嵌 P3） ----------
@@ -129,17 +150,22 @@ function callEmbed(texts: string[]): Promise<Float32Array[]> {
   return embedOverride ? embedOverride(texts) : embedTexts(texts)
 }
 
-// ---------- 检索加权参数（封顶可调） ----------
+// ---------- 双轨检索打分（importance=语义价值静态字段 / activation=使用热度检索时纯函数） ----------
 
 /** RRF 融合常数（论文默认 60） */
 const RRF_K = 60
-/** importance 线性加权系数 */
-const IMPORTANCE_WEIGHT = 0.05
-/** 新近加权封顶（updated_at 距今 0 天拿满） */
-const RECENCY_BONUS_MAX = 0.1
-/** 新近加权衰减速率（每整天） */
-const RECENCY_DECAY_PER_DAY = 0.02
+/** 打分权重（Σ=1，三者同量纲 [0,1] 后权重即贡献占比）：语义相关性主轴，先验只做平移 */
+const W_RRF = 0.55
+const W_IMPORTANCE = 0.2
+const W_ACTIVATION = 0.25
 const DAY_MS = 86_400_000
+
+/** 使用热度激活度（检索时纯函数，零写库——「衰减」永不产生 UPDATE churn）：
+ *  Δt 基准 last_accessed_at（被使用就强化——不是 updated_at，折叠刷新不白拿热度），从未访问退化为 created_at。
+ *  半衰期表/饱和函数单一真源在 shared/memory-scoring.ts（渲染层「重要度」展示同源）。 */
+function activationOf(row: MemRow, now: number): number {
+  return memoryActivation(row.access_count, row.last_accessed_at, row.created_at, row.category, now)
+}
 /** 向量召回距离封顶（vec0 默认 L2；bge 输出已归一化，L2²=2-2cos，1.0 ≈ cos>0.5 的粗筛）。
  *  不设门槛时 KNN 在小语料下会把所有条目当"最近邻"灌进融合，污染检索结果。 */
 const VEC_DISTANCE_CAP = 1.0
@@ -212,23 +238,25 @@ export async function memorySearch(
     }
   }
 
-  // RRF 融合：score = Σ 1/(60+rank)，叠加 importance 与新近度轻加权
+  // 双轨打分：RRF（语义似然）为排序主轴 + importance（语义价值）/ activation（使用热度）先验。
+  // rrf_norm = rrf × 61/n_paths 归一到 [0,1]（单路 rank1 与双路 rank1 同映射满分），
+  // 三者同量纲后权重即贡献占比
   const now = Date.now()
-  const scores = new Map<string, { row: MemRow; score: number }>()
+  const nPaths = (kwRows.length > 0 ? 1 : 0) + (vecRows.length > 0 ? 1 : 0)
+  const rrfScale = (RRF_K + 1) / Math.max(1, nPaths)
+  const scores = new Map<string, { row: MemRow; rrf: number }>()
   const add = (row: MemRow, rank: number): void => {
     const cur = scores.get(row.id)
-    const base = (cur?.score ?? 0) + 1 / (RRF_K + rank)
-    scores.set(row.id, { row, score: base })
+    scores.set(row.id, { row, rrf: (cur?.rrf ?? 0) + 1 / (RRF_K + rank) })
   }
   kwRows.forEach((row, i) => add(row, i + 1))
   vecRows.forEach(({ row }, i) => add(row, i + 1))
   const hits: MemoryHit[] = [...scores.values()]
-    .map(({ row, score }) => {
-      const days = Math.max(0, (now - row.updated_at) / DAY_MS)
-      const recency = Math.max(0, RECENCY_BONUS_MAX - days * RECENCY_DECAY_PER_DAY)
-      return { ...rowToItem(row), score: score + row.importance * IMPORTANCE_WEIGHT + recency }
-    })
-    .sort((a, b) => b.score - a.score || b.updatedAt - a.updatedAt)
+    .map(({ row, rrf }) => ({
+      ...rowToItem(row),
+      score: W_RRF * rrf * rrfScale + W_IMPORTANCE * row.importance + W_ACTIVATION * activationOf(row, now),
+    }))
+    .sort((a, b) => b.score - a.score || (b.lastAccessedAt ?? b.createdAt) - (a.lastAccessedAt ?? a.createdAt))
     .slice(0, limit)
 
   // 回写访问计数：defer 到下一轮事件循环，不阻塞 IPC 响应。
@@ -249,16 +277,32 @@ export async function memorySearch(
 /** 更新：title/content 变化时重嵌（read→embed→write 收口为「embed 在事务外、写在一个同步事务」；
  *  embed 失败整体 no-op 返回原条目）。显式字段的并发写为 last-write-wins（正确语义）；
  *  embed 期间条目被并发删除时 UPDATE 影响 0 行 → 向量一并放弃，不留孤儿。 */
-export async function memoryUpdate(id: string, patch: MemoryPatch): Promise<MemoryItem> {
+export async function memoryUpdate(id: string, patch: MemoryPatch, opts?: { by?: MemoryArchivedBy }): Promise<MemoryItem> {
   const db = await getDb()
   const row = await getRow(db, id)
   if (!row) throw new Error(`记忆不存在：${id}`)
+  // status='active' = 恢复语义（un-archive：清归档痕迹 + 重新计活）
+  if (patch.status === 'active') return memoryUnarchive(id)
+  // status='archived' 不在此受理（归档要带理由与操作者审计，走 memory_archive）——
+  // 类型面允许但静默吞掉会让调用方以为归档成功
+  if (patch.status === 'archived') {
+    throw new Error('归档请走 memory_archive（需要理由与操作者审计）；memory_update 不支持 status=archived')
+  }
+  const origin = toOrigin(row.origin)
   const nextTitle = typeof patch.title === 'string' ? patch.title : row.title
   const nextContent = typeof patch.content === 'string' ? patch.content : row.content
   const nextCategory = typeof patch.category === 'string' ? patch.category : row.category
-  const nextImportance = typeof patch.importance === 'number' ? clampImportance(patch.importance) : row.importance
+  const nextImportance = typeof patch.importance === 'number'
+    ? effectiveImportance(patch.importance, origin) // 显式条目下限 0.6，衰减/覆写不许打穿
+    : row.importance
   const textChanged = nextTitle !== row.title || nextContent !== row.content
-  if (!textChanged && nextCategory === row.category && nextImportance === row.importance) return rowToItem(row)
+  const metaChanged = nextCategory !== row.category || nextImportance !== row.importance
+  // 语义推翻：本条取代 target——target 归档留痕并回链（新版本 = 当前更新的这条）
+  const supersedesId = typeof patch.supersedes === 'string' && patch.supersedes.trim() && patch.supersedes.trim() !== id
+    ? patch.supersedes.trim()
+    : null
+  if (!textChanged && !metaChanged && !supersedesId) return rowToItem(row)
+  if (textChanged) assertNotDegraded(row.content, nextContent) // 信息量门控：拦退化覆写（副作用前）
 
   // 嵌入在事务外（纯函数不读库）：失败（空结果/超维/抛错）即整体 no-op——条目与向量保持一致旧态
   let vector: Float32Array | null = null
@@ -269,17 +313,34 @@ export async function memoryUpdate(id: string, patch: MemoryPatch): Promise<Memo
       return rowToItem(row)
     }
   }
-  // vec 不可用时只更新文本：向量表不可达（vecReady 把关），FTS 由触发器自同步
+
+  // 取代归档：校验与重嵌都通过后才动 target（先归档后失败会留下「已取代但新版本没写上」的半程状态）。
+  // 目标不存在 → 只告警不阻断本条更新；目标是显式条目 → memoryArchive 按保护契约抛错（不自动放行）
+  if (supersedesId) {
+    const target = await getRow(db, supersedesId)
+    if (!target) {
+      console.warn(`[memory] supersedes 目标不存在：${supersedesId}`)
+    } else {
+      const ok = await memoryArchive(supersedesId, {
+        by: opts?.by ?? 'distill', reason: '被新版本取代', supersedes: id,
+      })
+      if (!ok) console.warn(`[memory] supersedes 目标已归档：${supersedesId}`)
+    }
+  }
+  // vec 不可用时只更新文本：向量表不可达（vecReady 把关），FTS 由触发器自同步。
+  // 文本变更 → 热钟归零（内容刷新即一次「被用」，但不虚增 access_count）；纯元数据变更不动热钟
+  const nowTs = Date.now()
+  const heatTs = textChanged ? nowTs : null
   if (vector) {
     await db.transaction([
-      { sql: 'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, updated_at = ? WHERE id = ?', params: [nextTitle, nextContent, nextCategory, nextImportance, Date.now(), id] },
+      { sql: 'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, last_accessed_at = COALESCE(?, last_accessed_at), updated_at = ? WHERE id = ?', params: [nextTitle, nextContent, nextCategory, nextImportance, heatTs, nowTs, id] },
       { sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [id] },
       { sql: 'INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)', params: [id, vector] },
     ])
   } else {
     await db.prepare(
-      'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, updated_at = ? WHERE id = ?',
-    ).run(nextTitle, nextContent, nextCategory, nextImportance, Date.now(), id)
+      'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, last_accessed_at = COALESCE(?, last_accessed_at), updated_at = ? WHERE id = ?',
+    ).run(nextTitle, nextContent, nextCategory, nextImportance, heatTs, nowTs, id)
   }
   emitMemoryChanged([row.project_key])
   const updated = await getRow(db, id)
@@ -352,10 +413,12 @@ export async function memoryClear(scope: 'project' | 'global' | 'all', projectRo
   )
 }
 
-/** 统计：面板概览用 */
+/** 统计：面板概览用（active/archived 分账——「共 N 条」与列表对不上是信任杀手） */
 export async function memoryStats(): Promise<MemoryStats> {
   const db = await getDb()
   const total = ((await db.prepare('SELECT COUNT(*) AS n FROM mem_items').get()) as { n: number }).n
+  const activeCount = Number(((await db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE status = 'active'").get()) as { n: number }).n)
+  const archivedCount = Number(((await db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE status = 'archived'").get()) as { n: number }).n)
   const byTier: Record<string, number> = {}
   for (const r of await db.prepare('SELECT tier AS k, COUNT(*) AS n FROM mem_items GROUP BY tier').all() as { k: string; n: number }[]) {
     byTier[r.k] = r.n
@@ -372,6 +435,8 @@ export async function memoryStats(): Promise<MemoryStats> {
   }
   return {
     total,
+    activeCount,
+    archivedCount,
     byTier,
     byCategory,
     embedReady: embedReady(),
@@ -404,11 +469,12 @@ async function insertItemTx(db: SqliteDb, item: MemoryItem): Promise<void> {
   await db.prepare(
     `INSERT INTO mem_items
        (id, project_key, session_id, tier, category, title, content, source_json, importance,
-        access_count, last_accessed_at, status, superseded_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, ?)`,
+        access_count, last_accessed_at, status, superseded_by, origin, archived_at, archived_by, archived_reason,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, NULL, NULL, NULL, ?, ?)`,
   ).run(
     item.id, item.projectKey, item.sessionId, item.tier, item.category, item.title, item.content,
-    item.sourceJson, item.importance, item.createdAt, item.updatedAt,
+    item.sourceJson, item.importance, item.origin, item.createdAt, item.updatedAt,
   )
 }
 
@@ -432,29 +498,82 @@ async function embedOne(db: SqliteDb, title: string, content: string): Promise<F
 
 /** 原子「新建或折叠」（mem agent create 唯一入口）：查重与写入收进同一同步事务——
  *  双工程并发蒸馏不再产生重复行（应用层不变量 + 唯一索引双保险）。
- *  折叠语义：content 覆写、importance 取 MAX（只升不降）；返回 folded 让调用方计数。 */
+ *  折叠语义分两路：
+ *   · 目标是显式条目（origin=user_explicit）→ 不覆写内容，改走 supersede：新建承接契约
+ *     （origin 继承 user_explicit、importance 取 MAX），旧行归档留痕并回链——显式记忆绝不无痕改写；
+ *   · 普通条目 → content 覆写、importance 取 MAX（只升不降）；caller 是显式时契约升级到目标行。
+ *  信息量门控：新正文是旧正文大幅子串 → 拒绝退化覆写（mem0 式 UPDATE-with-gate）。
+ *  UPDATE 带 status='active' 守卫：SELECT→UPDATE 间隙被衰减作业归档时不落进归档行，转插入。 */
 export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ folded: boolean; id: string }> {
   const db = await getDb()
   const key = input.global ? 'global' : projectKey(String(input.projectRoot ?? ''))
   if (!input.global && !input.projectRoot) throw new Error('memory_create 需要 projectRoot 或 global=true')
   const now = Date.now()
-  const importance = clampImportance(input.importance ?? 0.5)
+  const origin: MemoryOrigin = input.origin ?? 'agent_suggest'
+  const importance = effectiveImportance(input.importance, origin)
   // 查重 → 折叠 / 插入（SELECT 在事务外，条件分支分别执行）
   const dup = await db
     .prepare(
-      `SELECT id FROM mem_items
+      `SELECT id, importance, origin, content FROM mem_items
        WHERE project_key = ? AND category = ? AND title = ? AND status = 'active'
        ORDER BY updated_at DESC LIMIT 1`,
     )
-    .get(key, input.category, input.title) as { id: string } | undefined
-  if (dup) {
-    await db.prepare(
-      'UPDATE mem_items SET content = ?, importance = MAX(importance, ?), updated_at = ? WHERE id = ?',
-    ).run(input.content, importance, now, dup.id)
-    // content 覆写 → 向量必须重嵌（否则语义检索永久陈旧）；回写带存在性检查（embed 期间被删不留孤儿）
-    await writeVecGuarded(db, dup.id, await embedOne(db, input.title, input.content))
+    .get(key, input.category, input.title) as { id: string; importance: number; origin: string | null; content: string } | undefined
+
+  if (dup && toOrigin(dup.origin) === 'user_explicit') {
+    // 显式条目：supersede 不覆写——新行承接契约（origin 继承 user_explicit、importance 取 MAX），
+    // 旧行归档留痕回链。显式记忆绝不无痕改写（产品信任红线）；信息量门控同拦退化覆写
+    assertNotDegraded(dup.content, input.content)
+    const item: MemoryItem = {
+      id: `mem_${randomUUID()}`,
+      projectKey: key,
+      sessionId: input.sessionId ?? null,
+      tier: input.tier,
+      category: toCategory(input.category),
+      title: input.title,
+      content: input.content,
+      sourceJson: input.sourceJson ?? null,
+      importance: Math.max(dup.importance, importance),
+      accessCount: 0,
+      lastAccessedAt: null,
+      status: 'active',
+      supersededBy: null,
+      origin: 'user_explicit',
+      archivedAt: null,
+      archivedBy: null,
+      archivedReason: null,
+      createdAt: now,
+      updatedAt: now,
+    }
+    await db.transaction([
+      {
+        sql: "UPDATE mem_items SET status = 'archived', superseded_by = ?, archived_at = ?, archived_by = ?, archived_reason = '被新版本取代', updated_at = ? WHERE id = ? AND status = 'active'",
+        params: [item.id, now, archivedByOf(origin), now, dup.id],
+      },
+      {
+        sql: `INSERT INTO mem_items (id, project_key, session_id, tier, category, title, content, source_json, importance, access_count, last_accessed_at, status, superseded_by, origin, archived_at, archived_by, archived_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, NULL, NULL, NULL, ?, ?)`,
+        params: [item.id, item.projectKey, item.sessionId, item.tier, item.category, item.title, item.content, item.sourceJson, item.importance, item.origin, item.createdAt, item.updatedAt],
+      },
+    ])
+    await writeVecGuarded(db, item.id, await embedOne(db, item.title, item.content))
     emitMemoryChanged([key])
-    return { folded: true, id: dup.id }
+    return { folded: true, id: item.id }
+  }
+
+  if (dup) {
+    // 普通折叠：信息量门控拦退化覆写；status='active' 守卫防「写进已归档行」（decay 归档落在
+    // SELECT→UPDATE 间隙的竞态）；caller 是显式时契约升级到目标行（保护传递）；内容刷新 → 热钟归零
+    assertNotDegraded(dup.content, input.content)
+    const upgradedOrigin = origin === 'user_explicit' ? 'user_explicit' : toOrigin(dup.origin)
+    const r = await db.prepare(
+      "UPDATE mem_items SET content = ?, importance = MAX(importance, ?), origin = ?, last_accessed_at = ?, updated_at = ? WHERE id = ? AND status = 'active'",
+    ).run(input.content, importance, upgradedOrigin, now, now, dup.id)
+    if (Number(r.changes) > 0) {
+      await writeVecGuarded(db, dup.id, await embedOne(db, input.title, input.content))
+      emitMemoryChanged([key])
+      return { folded: true, id: dup.id }
+    }
+    // 守卫失败（间隙内被归档）：走插入，唯一索引此时不冲突（旧行已 archived）
   }
   const item: MemoryItem = {
     id: `mem_${randomUUID()}`,
@@ -470,6 +589,10 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
     lastAccessedAt: null,
     status: 'active',
     supersededBy: null,
+    origin,
+    archivedAt: null,
+    archivedBy: null,
+    archivedReason: null,
     createdAt: now,
     updatedAt: now,
   }
@@ -488,6 +611,7 @@ export async function memoryCreate(input: MemoryCreateInput): Promise<MemoryItem
   const key = input.global ? 'global' : projectKey(String(input.projectRoot ?? ''))
   if (!input.global && !input.projectRoot) throw new Error('memory_create 需要 projectRoot 或 global=true')
   const now = Date.now()
+  const origin: MemoryOrigin = input.origin ?? 'agent_suggest'
   const item: MemoryItem = {
     id: `mem_${randomUUID()}`,
     projectKey: key,
@@ -497,11 +621,15 @@ export async function memoryCreate(input: MemoryCreateInput): Promise<MemoryItem
     title: input.title,
     content: input.content,
     sourceJson: input.sourceJson ?? null,
-    importance: clampImportance(input.importance ?? 0.5),
+    importance: effectiveImportance(input.importance, origin),
     accessCount: 0,
     lastAccessedAt: null,
     status: 'active',
     supersededBy: null,
+    origin,
+    archivedAt: null,
+    archivedBy: null,
+    archivedReason: null,
     createdAt: now,
     updatedAt: now,
   }
@@ -548,6 +676,10 @@ export async function saveSessionSummary(projectRoot: string, sessionId: string,
     lastAccessedAt: null,
     status: 'active',
     supersededBy: null,
+    origin: 'distill',
+    archivedAt: null,
+    archivedBy: null,
+    archivedReason: null,
     createdAt: now,
     updatedAt: now,
   }
@@ -555,23 +687,66 @@ export async function saveSessionSummary(projectRoot: string, sessionId: string,
     `SELECT id FROM mem_items
      WHERE project_key = ? AND session_id = ? AND tier = 'short' AND category = 'summary' AND status = 'active'`,
   ).all(key, sessionId) as { id: string }[]
+  // 旧摘要换代也留痕（summary 是系统自用内容，reason 用固定模板）
   const stmts: { sql: string; params?: unknown[] }[] = olds.map((old) => ({
-    sql: "UPDATE mem_items SET status = 'archived', updated_at = ? WHERE id = ?", params: [now, old.id],
+    sql: "UPDATE mem_items SET status = 'archived', archived_at = ?, archived_by = 'distill', archived_reason = '摘要换代', updated_at = ? WHERE id = ?",
+    params: [now, now, old.id],
   }))
   stmts.push({
-    sql: `INSERT INTO mem_items (id, project_key, session_id, tier, category, title, content, source_json, importance, access_count, last_accessed_at, status, superseded_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, ?)`,
-    params: [item.id, item.projectKey, item.sessionId, item.tier, item.category, item.title, item.content, item.sourceJson, item.importance, item.createdAt, item.updatedAt],
+    sql: `INSERT INTO mem_items (id, project_key, session_id, tier, category, title, content, source_json, importance, access_count, last_accessed_at, status, superseded_by, origin, archived_at, archived_by, archived_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, NULL, NULL, NULL, ?, ?)`,
+    params: [item.id, item.projectKey, item.sessionId, item.tier, item.category, item.title, item.content, item.sourceJson, item.importance, item.origin, item.createdAt, item.updatedAt],
   })
   await db.transaction(stmts)
   await writeVecGuarded(db, item.id, await embedOne(db, item.title, content))
   emitMemoryChanged([key])
 }
 
-/** 归档（文本不变，不重嵌）；目标不存在回 false（mem agent 的 archive op 据此计数跳过） */
-export async function memoryArchive(id: string): Promise<boolean> {
+/** 归档（文本不变，不重嵌）：写归档痕迹三列 + 可选 supersede 回链 + 变更广播——
+ *  自动归档必须可解释、可恢复（产品信任红线）。
+ *  显式条目保护：origin=user_explicit 的条目默认拒绝归档（allowArchiveExplicit 显式放行才可）。
+ *  返回：true=本次归档；false=已是归档态（幂等无操作）；目标不存在抛错。 */
+export async function memoryArchive(
+  id: string,
+  opts?: { reason?: string; by?: MemoryArchivedBy; supersedes?: string; allowArchiveExplicit?: boolean },
+): Promise<boolean> {
   const db = await getDb()
-  const result = await db.prepare("UPDATE mem_items SET status = 'archived', updated_at = ? WHERE id = ?").run(Date.now(), id)
-  return Number(result.changes) > 0
+  const row = await getRow(db, id)
+  if (!row) throw new Error(`记忆不存在：${id}`)
+  if (row.status !== 'active') return false
+  if (toOrigin(row.origin) === 'user_explicit' && opts?.allowArchiveExplicit !== true) {
+    throw new Error(`「${row.title}」是用户显式保存的记忆，不许自动归档（确有必要请显式放行）`)
+  }
+  const now = Date.now()
+  const by = opts?.by ?? 'user'
+  const reason = opts?.reason?.trim() || (by === 'decay' ? '长期未使用，自动收起' : '手动归档')
+  const result = await db.prepare(
+    `UPDATE mem_items SET status = 'archived', archived_at = ?, archived_by = ?, archived_reason = ?,
+       superseded_by = COALESCE(?, superseded_by), updated_at = ?
+     WHERE id = ? AND status = 'active'`,
+  ).run(now, by, reason, opts?.supersedes ?? null, now, id)
+  if (Number(result.changes) === 0) return false
+  emitMemoryChanged([row.project_key])
+  return true
+}
+
+/** 恢复（un-archive）：清归档痕迹、恢复检索；「恢复即重新计活」防归档-恢复乒乓。
+ *  同题已有活跃条目时撞唯一索引 → 报错让调用方决定，不静默跳过（假恢复比不恢复更糟）。 */
+export async function memoryUnarchive(id: string): Promise<MemoryItem> {
+  const db = await getDb()
+  const row = await getRow(db, id)
+  if (!row) throw new Error(`记忆不存在：${id}`)
+  if (row.status === 'active') return rowToItem(row)
+  const now = Date.now()
+  try {
+    await db.prepare(
+      `UPDATE mem_items SET status = 'active', archived_at = NULL, archived_by = NULL, archived_reason = NULL,
+         last_accessed_at = ?, updated_at = ? WHERE id = ?`,
+    ).run(now, now, id)
+  } catch (e) {
+    throw new Error(`恢复失败（同题已有活跃条目，请先处理重复项）：${String(e)}`)
+  }
+  emitMemoryChanged([row.project_key])
+  return rowToItem({ ...row, status: 'active', archived_at: null, archived_by: null, archived_reason: null, last_accessed_at: now, updated_at: now })
 }
 
 /** note_lesson 通道：创建 short lesson；同工程已有 active 且同 title 的 lesson
@@ -594,16 +769,19 @@ export async function noteLesson(
     )
     .get(key, title) as { id: string } | undefined
   if (dup) {
-    await db.prepare(
-      'UPDATE mem_items SET content = ?, importance = MIN(1.0, importance + 0.1), updated_at = ? WHERE id = ?',
-    ).run(content, now, dup.id)
-    return
+    // 重复踩坑 = 强化信号：importance+0.1（永久，静态语义下不再被时间打回）+ 热钟归零 + 计一次使用
+    const r = await db.prepare(
+      "UPDATE mem_items SET content = ?, importance = MIN(1.0, importance + 0.1), access_count = access_count + 1, last_accessed_at = ?, updated_at = ? WHERE id = ? AND status = 'active'",
+    ).run(content, now, now, dup.id)
+    // 守卫失败（间隙内被归档）：走插入，不许静默丢掉这条教训
+    if (Number(r.changes) > 0) return
   }
   const item: MemoryItem = {
     id: `mem_${randomUUID()}`,
     projectKey: key,
     sessionId,
-    tier: 'short',
+    // tier 恒 long：教训是跨会话资产，不随 short 的自动归档窗口收起
+    tier: 'long',
     category: 'lesson',
     title,
     content,
@@ -613,6 +791,10 @@ export async function noteLesson(
     lastAccessedAt: null,
     status: 'active',
     supersededBy: null,
+    origin: 'agent_suggest',
+    archivedAt: null,
+    archivedBy: null,
+    archivedReason: null,
     createdAt: now,
     updatedAt: now,
   }
@@ -645,51 +827,185 @@ export async function listContextTitles(
 // ---------- P3：衰减/归档作业（纯 SQL/JS，零 LLM） ----------
 
 interface DecayStats {
-  /** importance 被衰减的 long 条目数 */
+  /** importance 被衰减的 long 条目数（双轨静态化后恒 0，保留字段兼容监控口径） */
   decayed: number
-  /** 被归档的 short 条目数 */
+  /** 被归档的条目数 */
   archived: number
+  /** 被物理清理的归档条目数（v2：supersede 链尾 365d / event 归档 180d，仅非显式来源） */
+  purged: number
 }
 
 /** 衰减作业周期 */
 const DECAY_INTERVAL_MS = 6 * 60 * 60_000
 /** boot 后首跑延迟 */
 const DECAY_BOOT_DELAY_MS = 30_000
-/** long 层衰减基线：距上次访问超 14d 视为陈旧 */
-const DECAY_LONG_STALE_MS = 14 * DAY_MS
-/** 每轮衰减步长与下限 */
-const DECAY_IMPORTANCE_STEP = 0.05
+/** importance 静态下限（语义价值地板；fact 低值陈旧行的归档判据之一） */
 const DECAY_IMPORTANCE_FLOOR = 0.1
-/** short 层归档基线：创建超 30d 且几乎未被检索（access_count ≤ 1） */
+/** short 层归档基线：最后使用超 30d 且几乎未被检索（access_count ≤ 1） */
 const ARCHIVE_SHORT_STALE_MS = 30 * DAY_MS
 const ARCHIVE_SHORT_MAX_ACCESS = 1
+/** event 层归档：60 天未更新即收起（事件是历史——排序先沉（h=7d 半衰期），归档后收） */
+const ARCHIVE_EVENT_STALE_MS = 60 * DAY_MS
+/** fact 层归档：importance 触底(≤0.1) 且 180d 未访问（显式写低值的陈旧事实） */
+const ARCHIVE_FACT_STALE_MS = 180 * DAY_MS
 
-/** 衰减/归档一轮（幂等，可手动调用；boot 由 startDecayJob 每 6h 调度）：
- *  - long 层 active：陈旧 → importance −0.05（下限 0.1），永不自动归档；
- *    从未被访问的条目以 created_at 为陈旧基线（否则永久免疫衰减）
- *  - short 层 active：创建超 30d 且 access_count ≤1 → status='archived'（superseded_by 留空）
- *  - mem_vec 不动：归档后默认检索查不到即可，向量保留给 includeArchived 场景
- *  - 只动 importance/status 列：FTS 触发器 WHEN 子句判定文本未变，不触发无谓的倒排重建；
- *    updated_at 刻意不动（衰减不该刷新检索新近度权重） */
-async function runDecayJob(): Promise<DecayStats> {
+/** 衰减/归档一轮（幂等；boot 由 startDecayJob 每 6h 调度；now 可注入供 smoke 测边界）。
+ *  importance 是静态语义价值（双轨制：热度归 activation 检索时计算）——本作业**不写 importance**，
+ *  只做归档（时间过时的三级退场），每类规则不同：
+ *   - short：最后使用超 30d 且 access_count ≤1 → 归档（会话级短命）
+ *   - event：updated_at 超 60d 未更新 → 归档（事件是历史，快进慢出：排序先沉、归档后收）
+ *   - fact：importance 已触底(≤0.1) 且 180d 未访问 → 归档（显式写低值的陈旧事实）
+ *   - preference / lesson / skill：永不自动归档（偏好/学费/技能不因冷置贬值——排序下沉即遗忘）
+ *  显式条目（origin=user_explicit）一律豁免；归档写痕迹三列 + 审计锚点（meta 存 archivedIds，
+ *  误归档批量恢复的唯一依据）+ 变更广播；设置开关 memAutoArchive=false 时全部归档规则停用。
+ *  时钟守卫：now 回拨超 60s 跳过本轮（防审计时间线错乱；前跳场景靠审计+恢复通道兜底）。
+ *  mem_vec 不动：归档后默认检索查不到即可，向量保留给 includeArchived 场景；updated_at 不动。 */
+export async function runDecayJob(now: number = Date.now()): Promise<DecayStats> {
+  if (decayInFlight) return { decayed: 0, archived: 0, purged: 0 } // in-flight 守卫：重叠两轮会双重归档
+  decayInFlight = true
+  try {
+    const db = await getDb()
+    // 时钟回拨守卫：now 比上次运行时间还早 60s 以上 = 时钟被拨回，跳过本轮
+    const { ts: lastRun } = await readDecayAudit(db)
+    if (lastRun > 0 && now < lastRun - 60_000) {
+      console.warn(`[memory] 衰减作业跳过：时钟回拨（now=${now} < 上次 ${lastRun}）`)
+      return { decayed: 0, archived: 0, purged: 0 }
+    }
+    const t0 = Date.now()
+    // 归档规则受设置开关管（缺省开）：关掉 = 只调排序不动库（长期记忆永不自动清除）
+    const autoArchive = await getConfig().then((c) => c.memAutoArchive !== false).catch(() => true)
+    if (!autoArchive) {
+      console.info('[memory] 衰减作业：归档 0（自动归档已关闭，排序衰减仍生效）')
+      return { decayed: 0, archived: 0, purged: 0 }
+    }
+    // 归档三规则（先取 id 再按谓词更新——审计锚点需要 id 清单）：显式条目一律豁免
+    const shortIds = (await db.prepare(
+      `SELECT id FROM mem_items
+       WHERE tier = 'short' AND status = 'active' AND origin != 'user_explicit'
+         AND COALESCE(last_accessed_at, created_at) < ? AND access_count <= ?`,
+    ).all(now - ARCHIVE_SHORT_STALE_MS, ARCHIVE_SHORT_MAX_ACCESS) as { id: string }[]).map((r) => r.id)
+    const eventIds = (await db.prepare(
+      `SELECT id FROM mem_items
+       WHERE category = 'event' AND status = 'active' AND origin != 'user_explicit' AND updated_at < ?`,
+    ).all(now - ARCHIVE_EVENT_STALE_MS) as { id: string }[]).map((r) => r.id)
+    const factIds = (await db.prepare(
+      `SELECT id FROM mem_items
+       WHERE category = 'fact' AND status = 'active' AND origin != 'user_explicit'
+         AND importance <= ? AND COALESCE(last_accessed_at, created_at) < ?`,
+    ).all(DECAY_IMPORTANCE_FLOOR + 1e-9, now - ARCHIVE_FACT_STALE_MS) as { id: string }[]).map((r) => r.id)
+    const archivedIds = [...shortIds, ...eventIds, ...factIds]
+    let archivedCount = 0
+    if (archivedIds.length > 0) {
+      const batchDate = new Date(now)
+      const localDay = `${batchDate.getFullYear()}-${String(batchDate.getMonth() + 1).padStart(2, '0')}-${String(batchDate.getDate()).padStart(2, '0')}`
+      const reason = `长期未使用，自动收起（${localDay} 批次）`
+      for (const id of archivedIds) {
+        const r = await db.prepare(
+          `UPDATE mem_items SET status = 'archived', archived_at = ?, archived_by = 'decay', archived_reason = ?
+           WHERE id = ? AND status = 'active'`,
+        ).run(now, reason, id)
+        archivedCount += Number(r.changes)
+      }
+      emitMemoryChanged('all')
+    }
+
+    // v2 物理清理（仅 distill/agent 来源——显式条目永不物理删除）：
+    //   ① supersede 链尾：被取代且归档超 365d（链已留痕，链尾无考古价值）
+    //   ② event：归档超 180d（事件无审计刚需）
+    // 旧迁移行 archived_at 为 NULL → 谓词不命中，保守不清理。mem_vec/FTS 随行清理（触发器自同步）。
+    const purgeIds = (await db.prepare(
+      `SELECT id FROM mem_items
+       WHERE status = 'archived' AND origin != 'user_explicit' AND archived_at IS NOT NULL
+         AND (
+           (superseded_by IS NOT NULL AND archived_at < ?)
+           OR (category = 'event' AND archived_at < ?)
+         )`,
+    ).all(now - 365 * DAY_MS, now - 180 * DAY_MS) as { id: string }[]).map((r) => r.id)
+    let purged = 0
+    if (purgeIds.length > 0) {
+      const placeholders = purgeIds.map(() => '?').join(',')
+      await db.transaction([
+        { sql: `DELETE FROM mem_items WHERE id IN (${placeholders})`, params: purgeIds },
+        { sql: `DELETE FROM mem_vec WHERE item_id IN (${placeholders})`, params: purgeIds },
+      ])
+      purged = purgeIds.length
+      emitMemoryChanged('all')
+    }
+
+    const stats: DecayStats = { decayed: 0, archived: archivedCount, purged }
+    // 审计锚点：误归档按批次恢复的唯一依据——保留近 5 轮非空批次（空跑不占窗口，
+    // 否则连续空跑会把带 id 的真实批次挤掉，归档行还在但恢复依据已消失）
+    const prior = await readDecayAudit(db)
+    const runs = archivedIds.length > 0
+      ? [{ ts: now, archivedIds }, ...prior.runs].slice(0, 5)
+      : prior.runs
+    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(DECAY_AUDIT_KEY, JSON.stringify({ runs }))
+    console.info(`[memory] 衰减作业：archive ${stats.archived} / purge ${stats.purged}（${Date.now() - t0}ms）`)
+    return stats
+  } finally {
+    decayInFlight = false
+  }
+}
+
+/** 衰减审计内读（runDecayJob 时钟守卫与写入共用） */
+async function readDecayAudit(db: SqliteDb): Promise<{ ts: number; runs: { ts: number; archivedIds: string[] }[] }> {
+  const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get(DECAY_AUDIT_KEY) as { value: string } | undefined
+  if (!row?.value) return { ts: 0, runs: [] }
+  try {
+    const parsed = JSON.parse(row.value) as { ts?: number; runs?: { ts: number; archivedIds: string[] }[]; archivedIds?: string[] }
+    // 兼容旧单轮格式 { ts, archivedIds }
+    const runs = Array.isArray(parsed.runs) ? parsed.runs : parsed.archivedIds ? [{ ts: parsed.ts ?? 0, archivedIds: parsed.archivedIds }] : []
+    return { ts: runs[0]?.ts ?? 0, runs }
+  } catch {
+    return { ts: 0, runs: [] }
+  }
+}
+
+let decayInFlight = false
+const DECAY_AUDIT_KEY = 'decay_last_run'
+
+/** 读衰减审计（运维/恢复用）：近 5 轮归档 id 并集（误归档批量恢复依据） */
+export async function memoryDecayAudit(): Promise<{ ts: number; archivedIds: string[] } | null> {
   const db = await getDb()
-  const now = Date.now()
-  const decayed = await db
-    .prepare(
-      `UPDATE mem_items SET importance = MAX(importance - ?, ?)
-       WHERE tier = 'long' AND status = 'active'
-         AND COALESCE(last_accessed_at, created_at) < ?`,
-    )
-    .run(DECAY_IMPORTANCE_STEP, DECAY_IMPORTANCE_FLOOR, now - DECAY_LONG_STALE_MS)
-  const archived = await db
-    .prepare(
-      `UPDATE mem_items SET status = 'archived'
-       WHERE tier = 'short' AND status = 'active' AND created_at < ? AND access_count <= ?`,
-    )
-    .run(now - ARCHIVE_SHORT_STALE_MS, ARCHIVE_SHORT_MAX_ACCESS)
-  const stats: DecayStats = { decayed: Number(decayed.changes), archived: Number(archived.changes) }
-  console.info(`[memory] 衰减作业：decay ${stats.decayed} / archive ${stats.archived}`)
-  return stats
+  const { ts, runs } = await readDecayAudit(db)
+  if (runs.length === 0) return null
+  return { ts, archivedIds: [...new Set(runs.flatMap((r) => r.archivedIds))] }
+}
+
+// ---------- 「上次整理」快照（面板摘要条数据源；蒸馏完成时落，读侧按 ts 判新旧） ----------
+
+export type LastTidySnapshot = MemoryLastTidy
+
+export async function saveLastTidy(s: LastTidySnapshot): Promise<void> {
+  try {
+    const db = await getDb()
+    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('mem_last_tidy', JSON.stringify(s))
+  } catch { /* 摘要条是辅助面，失败不阻断 */ }
+}
+
+export async function lastTidy(): Promise<LastTidySnapshot | null> {
+  try {
+    const db = await getDb()
+    const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get('mem_last_tidy') as { value: string } | undefined
+    return row?.value ? (JSON.parse(row.value) as LastTidySnapshot) : null
+  } catch {
+    return null
+  }
+}
+
+/** 按审计批量恢复（误归档兜底）：逐条恢复，撞唯一索引的计入 failed 不静默跳过 */
+export async function memoryRestoreMany(ids: readonly string[]): Promise<{ restored: number; failed: string[] }> {
+  let restored = 0
+  const failed: string[] = []
+  for (const id of ids) {
+    try {
+      await memoryUnarchive(id)
+      restored++
+    } catch {
+      failed.push(id)
+    }
+  }
+  return { restored, failed }
 }
 
 let decayTimer: ReturnType<typeof setInterval> | null = null
@@ -878,8 +1194,9 @@ export async function memoryImportData(raw: string): Promise<{ imported: number;
   const insert = db.prepare(
     `INSERT INTO mem_items
        (id, project_key, session_id, tier, category, title, content, source_json, importance,
-        access_count, last_accessed_at, status, superseded_by, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        access_count, last_accessed_at, status, superseded_by, origin, archived_at, archived_by, archived_reason,
+        created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   )
   const now = Date.now()
   const fresh: MemoryItem[] = []
@@ -911,9 +1228,21 @@ export async function memoryImportData(raw: string): Promise<{ imported: number;
       "SELECT 1 FROM mem_items WHERE project_key = ? AND category = ? AND title = ? AND status = 'active'",
     ).get(key, it.category, it.title)
     if (titleDup) { skipped++; continue }
-    await insert.run(it.id, key, sid, it.tier, it.category, it.title, it.content, sj, imp, ac, lat, st, sb, now, now)
+    // 备份里带来源/归档痕迹/时间戳就还原（roundtrip 审计连续）；旧格式（v1 无这些字段）按
+    // 用户主动恢复备份 → user_explicit，归档态补导入痕迹
+    const origin: MemoryOrigin = it.origin === 'user_explicit' || it.origin === 'agent_suggest' || it.origin === 'distill'
+      ? it.origin
+      : 'user_explicit'
+    const archAt = st === 'archived' ? (typeof it.archivedAt === 'number' ? it.archivedAt : now) : null
+    const archBy = st === 'archived' ? (toArchivedBy(it.archivedBy) ?? 'import') : null
+    const archReason = st === 'archived'
+      ? (typeof it.archivedReason === 'string' && it.archivedReason ? it.archivedReason : '导入自备份')
+      : null
+    const createdAt = typeof it.createdAt === 'number' ? it.createdAt : now
+    const updatedAt = typeof it.updatedAt === 'number' ? it.updatedAt : now
+    await insert.run(it.id, key, sid, it.tier, it.category, it.title, it.content, sj, imp, ac, lat, st, sb, origin, archAt, archBy, archReason, createdAt, updatedAt)
     touchedKeys.add(key)
-    fresh.push({ id: it.id, projectKey: key, sessionId: sid, tier: it.tier, category: it.category, title: it.title, content: it.content, sourceJson: sj, importance: imp, accessCount: 0, lastAccessedAt: null, status: st, supersededBy: sb, createdAt: now, updatedAt: now })
+    fresh.push({ id: it.id, projectKey: key, sessionId: sid, tier: it.tier, category: it.category, title: it.title, content: it.content, sourceJson: sj, importance: imp, accessCount: ac, lastAccessedAt: lat, status: st, supersededBy: sb, origin, archivedAt: archAt, archivedBy: archBy, archivedReason: archReason, createdAt, updatedAt })
   }
   if (fresh.length > 0) {
     const canVec = vecReadyFlag() && (await checkEmbedFingerprint(db)) && embedReady()
@@ -978,8 +1307,25 @@ interface MemRow {
   last_accessed_at: number | null
   status: string
   superseded_by: string | null
+  origin: string | null
+  archived_at: number | null
+  archived_by: string | null
+  archived_reason: string | null
   created_at: number
   updated_at: number
+}
+
+const ORIGINS: ReadonlySet<string> = new Set<MemoryOrigin>(['user_explicit', 'agent_suggest', 'distill'])
+function toOrigin(raw: string | null | undefined): MemoryOrigin {
+  return raw && ORIGINS.has(raw) ? (raw as MemoryOrigin) : 'distill'
+}
+function toArchivedBy(raw: string | null | undefined): MemoryArchivedBy | null {
+  return raw === 'user' || raw === 'agent' || raw === 'distill' || raw === 'decay' || raw === 'import' ? raw : null
+}
+
+/** 记忆写入来源 → 归档操作者（审计口径：agent 主动沉淀不冒充用户操作） */
+export function archivedByOf(origin: MemoryOrigin): MemoryArchivedBy {
+  return origin === 'distill' ? 'distill' : origin === 'user_explicit' ? 'user' : 'agent'
 }
 
 function rowToItem(row: MemRow): MemoryItem {
@@ -997,6 +1343,10 @@ function rowToItem(row: MemRow): MemoryItem {
     lastAccessedAt: row.last_accessed_at,
     status: row.status === 'merged' ? 'merged' : row.status === 'archived' ? 'archived' : 'active',
     supersededBy: row.superseded_by,
+    origin: toOrigin(row.origin),
+    archivedAt: row.archived_at,
+    archivedBy: toArchivedBy(row.archived_by),
+    archivedReason: row.archived_reason,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }

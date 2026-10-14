@@ -10,6 +10,8 @@ import type { MemoryCategory, MemoryHit, MemoryItem, MemoryPatch, MemoryStats, M
 
 export type MemoryTierFilter = 'all' | MemoryTier
 export type MemoryCategoryFilter = 'all' | MemoryCategory
+/** 状态分段（进行中 | 已归档）：列表按此过滤；数据面恒拉含归档全量，切换零往返 */
+export type MemoryStatusFilter = 'active' | 'archived'
 
 /** 字段更新载荷（唯一定义在 shared/ipc-types 的 MemoryPatch，此为历史名别名） */
 export type MemoryUpdatePatch = MemoryPatch
@@ -19,10 +21,13 @@ interface MemoryState {
   items: MemoryItem[]
   /** 检索命中（非 null = 搜索态，列表以它为准） */
   hits: MemoryHit[] | null
+  /** 搜索零命中时的归档相近条目（「想起」而非「丢失」——归档召回） */
+  archivedSuggest: MemoryHit[]
   /** 已提交的搜索词（'' = 非搜索态） */
   query: string
   tierFilter: MemoryTierFilter
   categoryFilter: MemoryCategoryFilter
+  statusFilter: MemoryStatusFilter
   loading: boolean
   /** embedding 不可用，检索降级为仅关键词（随最近一次 search 结果刷新） */
   degraded: boolean
@@ -43,10 +48,13 @@ interface MemoryState {
   setQuery: (q: string) => void
   setTierFilter: (t: MemoryTierFilter) => void
   setCategoryFilter: (c: MemoryCategoryFilter) => void
+  setStatusFilter: (s: MemoryStatusFilter) => void
   /** 行内编辑保存（失败抛给调用方展示） */
   update: (id: string, patch: MemoryUpdatePatch) => Promise<void>
   /** 删除单条（confirm 由调用方负责） */
   remove: (id: string) => Promise<void>
+  /** 恢复归档条目（un-archive：清归档痕迹回活跃面，失败抛给调用方展示） */
+  restore: (id: string) => Promise<void>
   /** scope 转换（项目↔用户）：成功后从当前列表移除，另一列表下次加载可见 */
   moveScope: (id: string, target: 'project' | 'user', projectRoot: string | null) => Promise<void>
   /** 清空（危险操作，confirm 由调用方负责），完成后重载当前范围 */
@@ -60,9 +68,11 @@ let reqSeq = 0
 export const useMemoryStore = create<MemoryState>()((set, get) => ({
   items: [],
   hits: null,
+  archivedSuggest: [],
   query: '',
   tierFilter: 'all',
   categoryFilter: 'all',
+  statusFilter: 'active',
   loading: false,
   degraded: false,
   error: null,
@@ -74,9 +84,9 @@ export const useMemoryStore = create<MemoryState>()((set, get) => ({
     const seq = ++reqSeq
     set({ loading: true, error: null, degraded: false })
     try {
-      const { items } = await api.memoryList(projectRoot)
+      const { items } = await api.memoryList(projectRoot, true) // 含归档：状态分段本地过滤，切换零往返
       if (seq !== reqSeq) return
-      set({ items, hits: null, query: '', scopeRoot: projectRoot })
+      set({ items, hits: null, query: '', archivedSuggest: [], scopeRoot: projectRoot })
     } catch (e) {
       if (seq !== reqSeq) return
       set({ items: [], hits: null, scopeRoot: projectRoot, error: String(e) })
@@ -95,12 +105,21 @@ export const useMemoryStore = create<MemoryState>()((set, get) => ({
     const seq = ++reqSeq
     set({ loading: true, error: null })
     try {
-      const { hits, degraded } = await api.memorySearch(q, projectRoot)
+      // 归档档直搜归档面（includeArchived）：只搜活跃面再按状态过滤会让归档搜索恒空
+      const searchingArchived = get().statusFilter !== 'active'
+      const { hits, degraded } = await api.memorySearch(q, projectRoot, undefined, searchingArchived)
       if (seq !== reqSeq) return
-      set({ hits, query: q, degraded, scopeRoot: projectRoot })
+      // 零命中 → 归档召回（仅活跃档）：「想起以前记过、被收起来了」比「没有」更接近用户期望
+      let archivedSuggest: MemoryHit[] = []
+      if (hits.length === 0 && !searchingArchived) {
+        const r2 = await api.memorySearch(q, projectRoot, 3, true).catch(() => ({ hits: [] as MemoryHit[], degraded: false }))
+        archivedSuggest = r2.hits.filter((h) => h.status === 'archived').slice(0, 3)
+      }
+      if (seq !== reqSeq) return
+      set({ hits, query: q, degraded, archivedSuggest, scopeRoot: projectRoot })
     } catch (e) {
       if (seq !== reqSeq) return
-      set({ hits: [], degraded: false, error: String(e) })
+      set({ hits: [], degraded: false, archivedSuggest: [], error: String(e) })
     } finally {
       if (seq === reqSeq) set({ loading: false })
     }
@@ -109,6 +128,12 @@ export const useMemoryStore = create<MemoryState>()((set, get) => ({
   setQuery: (q) => set({ query: q }),
   setTierFilter: (tierFilter) => set({ tierFilter }),
   setCategoryFilter: (categoryFilter) => set({ categoryFilter }),
+  setStatusFilter: (statusFilter) => {
+    set({ statusFilter })
+    // 搜索态切换状态分段：命中面随分段变（归档档要搜归档面），否则旧命中被过滤成空列表
+    const { query, scopeRoot, search } = get()
+    if (query.trim() && scopeRoot) void search(query, scopeRoot)
+  },
 
   update: async (id, patch) => {
     const updated = await api.memoryUpdate(id, patch)
@@ -124,6 +149,17 @@ export const useMemoryStore = create<MemoryState>()((set, get) => ({
     set((s) => ({
       items: s.items.filter((it) => it.id !== id),
       hits: s.hits ? s.hits.filter((h) => h.id !== id) : null,
+    }))
+    void get().refreshStats()
+  },
+
+  restore: async (id) => {
+    const restored = await api.memoryUnarchive(id)
+    set((s) => ({
+      items: s.items.map((it) => (it.id === restored.id ? restored : it)),
+      hits: s.hits ? s.hits.map((h) => (h.id === restored.id ? { ...h, ...restored } : h)) : null,
+      // 归档召回行随恢复消失（已回活跃面，不许留着「恢复」按钮）
+      archivedSuggest: s.archivedSuggest.filter((h) => h.id !== restored.id),
     }))
     void get().refreshStats()
   },

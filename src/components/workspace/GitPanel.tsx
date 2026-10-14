@@ -12,7 +12,7 @@ import { useGitStore } from '@/store/useGitStore'
 import type { GitFileEntry, GitStatus } from '@/types'
 import { basename, relativePath } from '@/utils/path'
 import { Select } from '@/components/common/Select'
-import { BranchSwitchDialog } from './FileTree'
+import { BranchSwitchDialog, prepareBranchTarget, type BranchTarget } from './FileTree'
 import { IconChevron, IconCheck, IconPlus, IconTrash, IconRefresh } from '@/components/common/icons'
 
 const STATUS_LABEL: Record<GitFileEntry['status'], string> = {
@@ -64,8 +64,8 @@ export function GitPanel() {
   }, [open])
   const diffPath = useGitStore((s) => s.diff?.path ?? null)
   const gitPanelRatio = useAppStore((s) => s.gitPanelRatio)
-  // 分支切换对话框（复用文件树的 BranchSwitchDialog）
-  const [branchTarget, setBranchTarget] = useState<{ dir: string; currentBranch: string | null; branches: string[] } | null>(null)
+  // 分支切换/合并对话框（复用文件树的 BranchSwitchDialog，mode 分派动作）
+  const [branchTarget, setBranchTarget] = useState<BranchTarget | null>(null)
 
   /** 顶部 grip 拖拽调高：实时写 store（localStorage 持久化），钳制在 useAppStore 里 */
   const onGripDown = (e: React.MouseEvent) => {
@@ -190,19 +190,11 @@ export function GitPanel() {
     void useGitStore.getState().open(selectedRef.current!, entry.path, stagedOnly)
   }, [])
 
-  /** 打开分支切换对话框（针对当前选中仓库） */
-  const openBranchSwitch = async () => {
+  /** 打开分支切换/合并对话框（针对当前选中仓库） */
+  const openBranchSwitch = async (mode: 'switch' | 'merge' = 'switch') => {
     if (!selected) return
-    try {
-      const info = await api.gitRepoInfo(selected)
-      if (!info.isRepo) {
-        void useAppStore.getState().showAlert('切换分支', '该目录不是 Git 仓库（未找到 .git）。')
-        return
-      }
-      setBranchTarget({ dir: selected, currentBranch: info.currentBranch, branches: info.branches })
-    } catch (e) {
-      void useAppStore.getState().showAlert('切换分支', String(e))
-    }
+    const target = await prepareBranchTarget(selected, mode)
+    if (target) setBranchTarget(target)
   }
 
   if (!rootPath || hidden) return null
@@ -241,7 +233,7 @@ export function GitPanel() {
       >
         <IconChevron size={11} className={`gitpanel__chevron ${open ? 'gitpanel__chevron--open' : ''}`} />
         <span className="gitpanel__title">Git</span>
-        {status?.branch && <span className="gitpanel__branch mono">{status.branch}</span>}
+        {status?.branch && <span className="gitpanel__branch mono" title={status.branch}>{status.branch}</span>}
         {status && status.ahead > 0 && <span className="gitpanel__ab" title="领先远端">↑{status.ahead}</span>}
         {status && status.behind > 0 && <span className="gitpanel__ab" title="落后远端">↓{status.behind}</span>}
         <span className={`gitpanel__count ${dirtyCount > 0 ? 'gitpanel__count--dirty' : ''}`}>
@@ -267,8 +259,11 @@ export function GitPanel() {
 
           {/* 同步操作条 */}
           <div className="gitpanel__sync">
-            <button className="btn btn--ghost btn--sm" disabled={busy || !selected} onClick={() => void openBranchSwitch()} title="切换当前仓库分支">
+            <button className="btn btn--ghost btn--sm" disabled={busy || !selected} onClick={() => void openBranchSwitch('switch')} title="切换当前仓库分支">
               分支
+            </button>
+            <button className="btn btn--ghost btn--sm" disabled={busy || !selected} onClick={() => void openBranchSwitch('merge')} title="将其他分支合并进当前分支（git merge）">
+              合并
             </button>
             <button className="btn btn--ghost btn--sm" disabled={busy || !selected} onClick={() => void runOp('拉取', () => api.gitPull(selected!))} title="git pull --no-edit">
               {runningOp === '拉取' ? '拉取中…' : '拉取'}
@@ -362,6 +357,7 @@ export function GitPanel() {
             void loadStatus(selectedRef.current)
             useGitStore.getState().close()
           }}
+          onMerge={(b) => runOp('合并', () => api.gitMerge(branchTarget.dir, b))}
         />
       )}
     </div>

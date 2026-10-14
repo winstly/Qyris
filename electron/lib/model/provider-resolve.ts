@@ -58,6 +58,10 @@ interface ResolveChatProviderOptions {
   hostProxy: HostToolProxyTarget | null
   /** MCP 面额外剔除的工具名（子 session 禁嵌套派发时传 ['dispatch_subtasks']） */
   excludeTools?: readonly string[]
+  /** MCP 面正向白名单：非空时只暴露名单内工具（记忆蒸馏等窄面场景） */
+  includeTools?: readonly string[]
+  /** 工具调用来源（记忆写入打标，CLI 档经 --origin 透传 MCP 子进程）；缺省 agent_suggest */
+  toolOrigin?: 'user_explicit' | 'agent_suggest' | 'distill'
   /** 工具循环轮数上限覆盖（CLI 落为 --max-turns）：子 agent 传 aiSubagentMaxTurns；
    *  不传则用 cfg.aiMaxTurns。getConfig 已归一，这里不再钳制 */
   maxTurns?: number | null
@@ -68,7 +72,7 @@ interface ResolveChatProviderOptions {
 export async function resolveChatProvider(opts: ResolveChatProviderOptions): Promise<ModelProvider> {
   const {
     dispatchMode, provider, baseUrl, model, projectRoot, cfg,
-    permission, wantTools, hostProxy, excludeTools = [], maxTurns: maxTurnsOverride,
+    permission, wantTools, hostProxy, excludeTools = [], includeTools = [], maxTurns: maxTurnsOverride,
   } = opts
   if (dispatchMode === 'claude-cli') {
     const cliCommand = (cfg?.aiCliCommand || 'claude').trim() || 'claude'
@@ -95,6 +99,8 @@ export async function resolveChatProvider(opts: ResolveChatProviderOptions): Pro
               sshCredentials: await sshCredentialEnv(permission, projectRoot),
               hostProxy,
               ...(excludeTools.length > 0 ? { excludeTools } : {}),
+              ...(includeTools.length > 0 ? { includeTools } : {}),
+              ...(opts.toolOrigin ? { origin: opts.toolOrigin } : {}),
               // 外部 MCP 工具元数据（连接池在主进程；子进程暴露面靠它，执行代行回主进程）
               externalTools: externalToolStubs(projectRoot),
             },

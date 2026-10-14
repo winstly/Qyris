@@ -13,6 +13,7 @@ import { connectMcpServer } from '../electron/lib/mcp/client'
 import {
   closeExternalTools,
   ensureExternalTools,
+  externalPoolStatus,
   externalTools,
   isExternalToolName,
   normalizeMcpName,
@@ -76,10 +77,53 @@ process.stdin.on('data', function (d) {
 process.stdin.on('end', function () { process.exit(0) })
 `
 
+/** 懒重连靶 server（echo + die：调 die 即自毁进程，专测断连后工具不蒸发、调用时自动重建） */
+const FIXTURE_DIE = `
+let buf = ''
+process.stdin.setEncoding('utf8')
+function send(obj) { process.stdout.write(JSON.stringify(obj) + '\\r\\n') }
+process.stdin.on('data', function (d) {
+  buf += d
+  let nl
+  while ((nl = buf.indexOf('\\n')) >= 0) {
+    const line = buf.slice(0, nl).replace(/\\r$/, '')
+    buf = buf.slice(nl + 1)
+    if (!line.trim()) continue
+    let msg
+    try { msg = JSON.parse(line) } catch (e) { continue }
+    const id = msg.id
+    if (id === undefined) continue
+    const method = msg.method
+    const params = msg.params || {}
+    if (method === 'initialize') {
+      send({ jsonrpc: '2.0', id: id, result: { protocolVersion: params.protocolVersion || '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'fake-die', version: '0.0.1' } } })
+    } else if (method === 'tools/list') {
+      send({ jsonrpc: '2.0', id: id, result: { tools: [
+        { name: 'echo', description: '回显入参', inputSchema: { type: 'object', properties: { text: { type: 'string' } } } },
+        { name: 'die', description: '自毁（进程退出）', inputSchema: { type: 'object', properties: {} } }
+      ] } })
+    } else if (method === 'tools/call') {
+      if (params.name === 'echo') {
+        send({ jsonrpc: '2.0', id: id, result: { content: [{ type: 'text', text: 'echo:' + JSON.stringify(params.arguments || {}) }] } })
+      } else {
+        process.exit(1)
+      }
+    } else if (method === 'ping') {
+      send({ jsonrpc: '2.0', id: id, result: {} })
+    } else {
+      send({ jsonrpc: '2.0', id: id, error: { code: -32601, message: 'Method not found' } })
+    }
+  }
+})
+process.stdin.on('end', function () { process.exit(0) })
+`
+
 async function main(): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), 'qyris-mcp-'))
   const fixturePath = join(dir, 'fake-mcp-server.cjs')
   writeFileSync(fixturePath, FIXTURE, 'utf8')
+  const dieFixturePath = join(dir, 'fake-die-server.cjs')
+  writeFileSync(dieFixturePath, FIXTURE_DIE, 'utf8')
 
   console.log('连接与动态注册（含失败/禁用 server 容错）：')
   await ensureExternalTools(null, {
@@ -151,6 +195,47 @@ async function main(): Promise<void> {
     assert(
       externalTools().some((t) => t.name === 'mcp__echo2__echo') && !externalTools().some((t) => t.name === 'mcp__fake__echo'),
       '数据源变更就地重建（旧池收割、新表生效，无需重启）',
+    )
+    closeExternalTools()
+  }
+
+  console.log('连接池状态两态（connecting 在途 / errors 失败面）：')
+  {
+    // 注入新表触发重建：ensure 未 await 时 init 在途 → connecting=true
+    const pInit = ensureExternalTools(null, {
+      fake: { command: process.execPath, args: [fixturePath], permission: 'readonly' as const },
+      bad: { command: '__qyris_no_such_command__' },
+    })
+    assert(externalPoolStatus(null).connecting === true, 'init 在途 → connecting=true')
+    await pInit
+    const st = externalPoolStatus(null)
+    assert(st.connecting === false, 'init 收敛 → connecting=false')
+    assert(typeof st.errors['bad'] === 'string' && st.errors['bad'].length > 0, '连接失败 server 进 errors（带原因）')
+    assert(st.errors['fake'] === undefined, '连接成功 server 不进 errors')
+    closeExternalTools()
+  }
+
+  console.log('懒重连（断连只标记不清表，调用时自动重建——工具永不蒸发）：')
+  {
+    const mapR = { die: { command: process.execPath, args: [dieFixturePath], permission: 'readonly' as const } }
+    await ensureExternalTools(null, mapR)
+    assert(externalTools().some((t) => t.name === 'mcp__die__echo'), '重连靶 server 就绪（2 工具）')
+    const ctxR = { projectRoot: null, permission: 'readonly' as const }
+    // 调 die → server 自毁 → 本次调用失败收敛 isError（连接级错误）
+    const killed = await getTool('mcp__die__die')!.execute({}, ctxR)
+    assert(killed.isError === true, 'server 自毁导致本次调用失败收敛 isError')
+    await new Promise((r) => setTimeout(r, 120)) // 断开回调异步到达
+    assert(externalTools().some((t) => t.name === 'mcp__die__echo'), '断连后工具表不蒸发（清 cache 不清表）')
+    const stDead = externalPoolStatus(null)
+    assert(stDead.connecting === false && typeof stDead.errors['die'] === 'string', '死连接态：errors 记录断开原因')
+    // 下一次调用触发懒重连（单飞）并成功
+    const revived = await getTool('mcp__die__echo')!.execute({ text: 'back' }, ctxR)
+    assert(revived.isError !== true && revived.content.includes('back'), '调用时懒重连成功')
+    const stAlive = externalPoolStatus(null)
+    assert(stAlive.connecting === false && stAlive.errors['die'] === undefined, '重连成功后 error 清空')
+    assert(
+      externalTools().map((t) => t.name).join(',').includes('mcp__die__echo'),
+      '重连后工具面保持稳定（无增减）',
     )
     closeExternalTools()
   }

@@ -12,12 +12,6 @@ export function skillLoadInstruction(ids: string[]): string {
     : `请先用 load_skill 加载 Skill「${joined}」，再执行。`
 }
 
-/** CLI 模式下一轮附带 Skill 的正文标记（useChatStore 拼进首条 user 历史，ai-cli 反解） */
-export function skillAttachMark(ids: readonly string[]): string {
-  return `[附带 Skill：${ids.join(', ')}]`
-}
-
-/** 历史消息反解正则（与上方生成器/标记一一对应） */
+/** 历史消息反解正则（与上方生成器一一对应） */
 export const SKILL_MULTI_RE = /请先用 load_skill 依次加载以下 \d+ 个 Skill，全部加载后再执行：([^\n]+)/g
 export const SKILL_SINGLE_RE = /请先用 load_skill 加载 Skill「([^」]+)」/g
-export const SKILL_ATTACH_RE = /\[附带 Skill：([^\]\n]+)\]/g

@@ -4,7 +4,7 @@
  */
 import type {
   AiCompletion, AiDeltaPayload, AiReasoningPayload, ChatMessage, CliAgentEventPayload, McpTestResult,
-  CliToolEventPayload, CliToolResultPayload, FileContent, GitStatus, MemoryHit, MemoryItem,
+  CliToolEventPayload, CliToolResultPayload, FileContent, GitStatus, MemoryHit, MemoryItem, MemoryLastTidy, MemoryPatch,
   MemoryStats, MessageMeta, PreviewConsoleEntry, SkillMeta, ToolCall, ToolResultEntry, TreeNode,
 } from './ipc-types'
 import type { AppConfig, DeployServer } from './app-config'
@@ -16,6 +16,8 @@ export type DesktopEventSub<T> = (cb: (payload: T) => void) => () => void
 export interface DesktopAPI {
   // 文件系统
   listDir: (projectRoot: string, dir: string) => Promise<TreeNode[]>
+  /** 绝对路径存在性检查（项目列表清理用）：目录存在回 true */
+  pathExists: (path: string) => Promise<boolean>
   /** 批量目录列表：一次 IPC 取多个目录内容（主进程并发 fs.readdir） */
   listDirBatch: (projectRoot: string, dirs: string[]) => Promise<Record<string, TreeNode[]>>
   searchFiles: (projectRoot: string, query: string) => Promise<{ files: string[]; truncated: boolean }>
@@ -117,22 +119,26 @@ export interface DesktopAPI {
   gitPull: (dir: string) => Promise<string>
   gitFetch: (dir: string) => Promise<string>
   gitPush: (dir: string) => Promise<string>
+  /** 合并分支到当前分支（git merge --no-edit）：返回合并结果摘要 */
+  gitMerge: (dir: string, branch: string) => Promise<string>
   gitDiscard: (dir: string, paths: string[]) => Promise<void>
   pickParentDir: () => Promise<string | null>
 
   // AI
-  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string }) => Promise<AiCompletion>
+  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string }) => Promise<AiCompletion>
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) => Promise<string>
   aiCancel: (requestId: string) => Promise<void>
 
   // 记忆（分层记忆系统 P1；projectRoot=null 表示仅全局）
   memoryList: (projectRoot: string | null, includeArchived?: boolean) => Promise<{ items: MemoryItem[] }>
   memorySearch: (query: string, projectRoot: string | null, topK?: number, includeArchived?: boolean) => Promise<{ hits: MemoryHit[]; degraded: boolean }>
-  memoryUpdate: (id: string, patch: { title?: string; content?: string; category?: string; importance?: number }) => Promise<MemoryItem>
+  memoryUpdate: (id: string, patch: MemoryPatch) => Promise<MemoryItem>
+  memoryUnarchive: (id: string) => Promise<MemoryItem>
   memoryDelete: (id: string) => Promise<void>
   memoryMoveScope: (id: string, target: 'project' | 'user', projectRoot?: string) => Promise<MemoryItem>
   memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) => Promise<void>
   memoryStats: () => Promise<MemoryStats>
+  memoryLastTidy: () => Promise<MemoryLastTidy | null>
   // 记忆管线 P2（渲染层消费面；electron 侧由 memory 管线提供）
   /** 工作记忆会话滚动摘要（category='summary' 的 active 条目；无则 null） */
   memorySessionContext: (projectRoot: string, sessionId: string) => Promise<{ summary: string | null }>
@@ -141,7 +147,7 @@ export interface DesktopAPI {
   /** 会话收尾提取 + 短期记忆晋升判断（clear/关工程前调用，旧 sessionId 还在手时） */
   sessionEnded: (projectRoot: string, sessionId: string) => Promise<void>
   /** 手动触发一次 mem agent 整理（记忆面板「立即整理」） */
-  memoryRunNow: (projectRoot: string) => Promise<{ ok: boolean; error?: string; ops?: number }>
+  memoryRunNow: (projectRoot: string) => Promise<{ ok: boolean; error?: string; ops?: number; tidy?: MemoryLastTidy | null }>
   /** 该工程是否正在整理记忆（主进程排队/执行中） */
   memoryExtracting: (projectRoot: string) => Promise<boolean>
   /** 教训采集：命令失败 / 服务启动失败（fire-and-forget，同会话重复由主进程去重） */

@@ -51,7 +51,7 @@ export interface McpServerOptions {
   sessionMode?: string
   /** http：单请求超时毫秒（缺省 30000） */
   timeoutMs?: number
-  /** http：幂等请求（initialize/tools/list）断连重试一次；tools/call 非幂等不重试 */
+  /** 幂等请求（initialize / tools/list）失败重试一次；tools/call 非幂等不重试 */
   retryOnDisconnect?: boolean
   maxSseReconnectAttempts?: number
   sseHeartbeatIntervalMs?: number

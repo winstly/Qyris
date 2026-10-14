@@ -211,6 +211,13 @@ export async function gitPush(dir: string): Promise<string> {
   }
 }
 
+/** 合并分支到当前分支（git merge --no-edit，纯本地 60s）：返回合并结果摘要
+ *  （"Fast-forward" / "Merge made by…" / "Already up to date."）；冲突/脏工作区经 translateGitError 转译 */
+export async function gitMerge(dir: string, branch: string): Promise<string> {
+  if (!branch || branch.startsWith('-')) throw new Error(`分支名不合法：${branch}`)
+  return (await runGitOrThrow(['-C', dir, 'merge', '--no-edit', branch], 60_000, '合并分支')).trim()
+}
+
 /** 丢弃指定文件的全部改动（暂存区 + 工作区都还原到 HEAD）：git restore --staged --worktree。
  *  只对已跟踪文件有效；untracked 文件不属于「丢弃改动」范畴（删除走文件树的删除） */
 export async function gitDiscard(dir: string, paths: string[]): Promise<void> {

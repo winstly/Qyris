@@ -8,14 +8,15 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, onMemoryChanged, onMemoryExtractState } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { useMemoryStore, type MemoryCategoryFilter, type MemoryTierFilter } from '@/store/useMemoryStore'
-import { MemoryItemRow, MEMORY_CATEGORY_LABELS, memoryDetailRows } from './MemoryItemRow'
+import { MemoryItemRow, MEMORY_CATEGORY_LABELS, memoryDetailRows, archivedText } from './MemoryItemRow'
 import { DetailDialog } from '@/components/common/DetailDialog'
 import { MemoryEditModal } from './MemoryEditModal'
 import { EmptyState } from '@/components/common/EmptyState'
 import { Notice, useNotice } from '@/components/common/Notice'
 import { Select } from '@/components/common/Select'
 import { IconAlert, IconClose, IconLayers, IconSearch } from '@/components/common/icons'
-import type { MemoryItem } from '@/types'
+import { timeAgo } from '@/utils/time'
+import type { MemoryItem, MemoryLastTidy } from '@/types'
 import type { MemoryUpdatePatch } from '@/store/useMemoryStore'
 
 export function MemoryPanel() {
@@ -27,8 +28,10 @@ export function MemoryPanel() {
 
   const items = useMemoryStore((s) => s.items)
   const hits = useMemoryStore((s) => s.hits)
+  const archivedSuggest = useMemoryStore((s) => s.archivedSuggest)
   const tierFilter = useMemoryStore((s) => s.tierFilter)
   const categoryFilter = useMemoryStore((s) => s.categoryFilter)
+  const statusFilter = useMemoryStore((s) => s.statusFilter)
   const loading = useMemoryStore((s) => s.loading)
   const degraded = useMemoryStore((s) => s.degraded)
   const error = useMemoryStore((s) => s.error)
@@ -38,8 +41,10 @@ export function MemoryPanel() {
   const setQuery = useMemoryStore((s) => s.setQuery)
   const setTierFilter = useMemoryStore((s) => s.setTierFilter)
   const setCategoryFilter = useMemoryStore((s) => s.setCategoryFilter)
+  const setStatusFilter = useMemoryStore((s) => s.setStatusFilter)
   const update = useMemoryStore((s) => s.update)
   const remove = useMemoryStore((s) => s.remove)
+  const restore = useMemoryStore((s) => s.restore)
   const moveScope = useMemoryStore((s) => s.moveScope)
   const clear = useMemoryStore((s) => s.clear)
   const extractingProjects = useMemoryStore((s) => s.extractingProjects)
@@ -53,6 +58,16 @@ export function MemoryPanel() {
   /** 「立即整理」运行态与结果提示（ok/err，6s 自清） */
   const [tidying, setTidying] = useState(false)
   const [runNotice, setRunNotice] = useNotice()
+  /** 「上次整理」摘要条（有变化才出现；点「知道了」后同批不再出现——已读游标落 localStorage）。
+   *  localStorage 读写带守卫：非浏览器环境（测试渲染）无此全局 */
+  const [tidy, setTidy] = useState<MemoryLastTidy | null>(null)
+  const [tidyDismissedTs, setTidyDismissedTs] = useState(() => {
+    try {
+      return Number(globalThis.localStorage?.getItem('mem_tidy_dismissed_ts') ?? 0)
+    } catch {
+      return 0
+    }
+  })
   /** 导出/导入运行态（导入含嵌入可能秒级；二者互斥防并发弹框） */
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -82,6 +97,11 @@ export function MemoryPanel() {
       setExtracting(projectRoot, on)
     })
   }, [setExtracting])
+
+  // 「上次整理」快照：挂载/切工程拉一次（摘要条数据源）
+  useEffect(() => {
+    void api.memoryLastTidy().then(setTidy).catch(() => {})
+  }, [projectPath])
 
   // 订阅记忆数据变更广播（R6）：任意工程/窗口写完记忆后重放当前视图入口（与刷新按钮同路，
   // store 内 reqSeq 防串工程）。500ms 防抖合并突发；搜索输入非空时跳过，不打掉检索时点结果。
@@ -116,16 +136,27 @@ export function MemoryPanel() {
   }, [activeTab, load, search, setExtracting])
 
   // 搜索态（hits 非 null）以命中为准，筛选仍在渲染层叠加
-  // 项目记忆 Tab：过滤掉 global 条目（用户记忆在左侧面板）
+  // 项目记忆 Tab：过滤掉 global 条目（用户记忆在左侧面板）。
+  // 归档档含 merged（被折叠条目也是历史痕迹，不许在两档之间隐形）
   const visible = useMemo(() => {
     const source = (hits ?? items).filter((it) => it.projectKey !== 'global')
     return source.filter((it) =>
+      (statusFilter === 'active' ? it.status === 'active' : it.status !== 'active') &&
       (tierFilter === 'all' || it.tier === tierFilter) &&
       (categoryFilter === 'all' || it.category === categoryFilter),
     )
-  }, [hits, items, tierFilter, categoryFilter])
+  }, [hits, items, statusFilter, tierFilter, categoryFilter])
 
   const searching = hits !== null
+
+  // 状态分段计数（按当前工程口径，排除 global）：归档数本身就是信任信号——系统不藏
+  const statusCounts = useMemo(() => {
+    const proj = items.filter((it) => it.projectKey !== 'global')
+    return {
+      active: proj.filter((it) => it.status === 'active').length,
+      archived: proj.filter((it) => it.status !== 'active').length,
+    }
+  }, [items])
 
   /** 弹窗保存：成功返回 true（弹窗自关），失败弹错误条返回 false（弹窗保留草稿） */
   const onSave = async (id: string, patch: MemoryUpdatePatch): Promise<boolean> => {
@@ -159,6 +190,16 @@ export function MemoryPanel() {
     }
   }
 
+  /** 恢复归档条目：失败（同题已有活跃条目撞唯一索引）弹窗告知，不静默 */
+  const onRestore = async (id: string, title: string) => {
+    try {
+      await restore(id)
+      setRunNotice({ kind: 'ok', text: `已恢复「${title}」，重新参与检索。` })
+    } catch (e) {
+      void showAlert('恢复失败', String(e))
+    }
+  }
+
   /** 重新整理：确认后执行，全量重扫会消耗较多 token */
   const onRunNow = async () => {
     if (!projectPath || busy) return
@@ -172,13 +213,16 @@ export function MemoryPanel() {
     try {
       const r = await api.memoryRunNow(projectPath)
       if (r.ok) {
-        const ops = (r as { ops?: number }).ops ?? 0
+        const ops = r.ops ?? 0
+        const t = r.tidy
+        const breakdown = t ? tidyBreakdown(t) : ''
         setRunNotice({
           kind: 'ok',
           text: ops > 0
-            ? `整理完成：新增/更新了 ${ops} 条记忆。`
+            ? `整理完成：${breakdown || `新增/更新了 ${ops} 条记忆`}。`
             : '整理完成：最近对话暂无值得沉淀的新记忆。',
         })
+        void api.memoryLastTidy().then(setTidy).catch(() => {})
         // 自动刷新列表
         if (input.trim()) await search(input.trim(), projectPath)
         else await load(projectPath)
@@ -259,6 +303,24 @@ export function MemoryPanel() {
             </button>
           )}
         </div>
+        <div className="memory__status-seg" role="tablist" aria-label="状态筛选">
+          <button
+            role="tab"
+            aria-selected={statusFilter === 'active'}
+            className={`memory__status-seg-btn ${statusFilter === 'active' ? 'is-active' : ''}`}
+            onClick={() => setStatusFilter('active')}
+          >
+            进行中 {statusCounts.active}
+          </button>
+          <button
+            role="tab"
+            aria-selected={statusFilter === 'archived'}
+            className={`memory__status-seg-btn ${statusFilter === 'archived' ? 'is-active' : ''}`}
+            onClick={() => setStatusFilter('archived')}
+          >
+            已归档 {statusCounts.archived}
+          </button>
+        </div>
         <Select
           size="sm"
           value={tierFilter}
@@ -309,6 +371,28 @@ export function MemoryPanel() {
 
       <Notice notice={runNotice} />
 
+      {/* 「上次整理」摘要条：有变化且未读才出现——被动面收口，永不主动 toast 打扰 */}
+      {tidy && tidy.ts > tidyDismissedTs && (tidy.saved + tidy.updated + tidy.archived > 0) && (
+        <div className="memory__tidy-bar">
+          <span>
+            上次整理（{timeAgo(tidy.ts)}）：{tidyBreakdown(tidy)}
+          </span>
+          <button
+            className="icon-btn"
+            aria-label="知道了"
+            title="知道了"
+            onClick={() => {
+              try {
+                globalThis.localStorage?.setItem('mem_tidy_dismissed_ts', String(tidy.ts))
+              } catch { /* 非浏览器环境 */ }
+              setTidyDismissedTs(tidy.ts)
+            }}
+          >
+            <IconClose size={11} />
+          </button>
+        </div>
+      )}
+
       {searching && degraded && (
         <div className="memory__degraded">
           <IconAlert size={13} />
@@ -323,7 +407,20 @@ export function MemoryPanel() {
           <Notice notice={{ kind: 'err', text: `记忆加载失败：${error}` }} />
         ) : visible.length === 0 ? (
           searching || input.trim() ? (
-            <div className="memory__empty-inline">没有匹配的记忆</div>
+            <div className="memory__empty-inline">
+              没有匹配的记忆
+              {/* 归档召回：「想起以前记过、被收起来了」——把「丢失」反转成「回忆」 */}
+              {archivedSuggest.length > 0 && (
+                <div className="memory__recall">
+                  {archivedSuggest.map((h) => (
+                    <div key={h.id} className="memory__recall-row">
+                      <span>归档里有相近记忆：「{h.title}」（{archivedText(h) || '已收起'}）</span>
+                      <button className="btn btn--ghost btn--sm" onClick={() => void onRestore(h.id, h.title)}>恢复</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           ) : (
             <EmptyState
               icon={<IconLayers size={22} />}
@@ -339,6 +436,7 @@ export function MemoryPanel() {
               onDetail={() => setViewingItem(it)}
               onEdit={() => setEditingItem(it)}
               onDelete={() => void onDelete(it.id, it.title)}
+              onRestore={() => void onRestore(it.id, it.title)}
               onMoveScope={it.category === 'summary' ? undefined : () => void onMoveScope(it.id, it.title)}
               moveScopeTitle="升级为用户记忆"
               readOnly={busy}
@@ -371,7 +469,7 @@ export function MemoryPanel() {
       <div className="memory__status">
         <span className="memory__scope">{projectPath ? `工程「${projectName}」` : '全局'}</span>
         <span className="memory__status-sep">·</span>
-        <span>{stats ? `共 ${stats.total} 条` : '—'}</span>
+        <span>{stats ? `共 ${stats.activeCount} 条` : '—'}</span>
         <span className="memory__status-sep">·</span>
         <span>{stats ? fmtBytes(stats.dbBytes) : '—'}</span>
         {stats?.distillTokens && (stats.distillTokens.input + stats.distillTokens.output) > 0 && (
@@ -384,6 +482,15 @@ export function MemoryPanel() {
       </div>
     </div>
   )
+}
+
+/** 「上次整理」拆账文案：新增/更新/归档分说（合说「更新 N 条」对不上用户词汇表） */
+function tidyBreakdown(t: MemoryLastTidy): string {
+  return [
+    t.saved ? `新增 ${t.saved}` : '',
+    t.updated ? `更新 ${t.updated}` : '',
+    t.archived ? `归档 ${t.archived}` : '',
+  ].filter(Boolean).join(' · ')
 }
 
 function fmtBytes(n: number): string {

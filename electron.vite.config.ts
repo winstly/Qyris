@@ -1,8 +1,19 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import type { RollupLog } from 'rollup'
 import path from 'node:path'
 import { fileURLToPath, URL } from 'node:url'
+
+// zod v4 源码内嵌 esbuild 朝向的 @__PURE__ 注释，Rollup 因注释位置无法识别——仅从产物删除
+// 注释，零功能影响（tree-shake 提示在 rollup 语境本就不生效）。第三方源码不可修（改了下次
+// npm install 就被覆盖），node_modules 内的同款警告一律静默防刷屏；自有代码的注解警告照常上报。
+// main / preload / renderer 三段统一挂载——哪段未来引了含此类注释的包都无需再改这里。
+// RollupLog 是 import type（零运行时；vite 不 re-export 该类型，rollup 随 vite 必装）。
+function onRollupWarn(warning: RollupLog, warn: (w: RollupLog) => void): void {
+  if (warning.code === 'INVALID_ANNOTATION' && warning.message.includes('node_modules')) return
+  warn(warning)
+}
 
 // main/preload 产物为 CJS（electron-vite 默认），依赖全部 bundle（dependencies 为空，
 // chokidar 等由 rollup 打进产物，打包后无需 node_modules）。
@@ -10,7 +21,10 @@ import { fileURLToPath, URL } from 'node:url'
 // 业务源码仍在 src/ 顶层，不受影响。
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    // SDK 编译期 bundle 进产物（rollup 直接吃 dist/esm，绕开运行时 exports map）；
+    // 不进 files 白名单的依赖树（express/hono 等 server 侧依赖）也不会随包。
+    // 其余 dependencies（native 运行时）照旧 external，由 electron-builder files 收集。
+    plugins: [externalizeDepsPlugin({ exclude: ['@modelcontextprotocol/sdk'] })],
     build: {
       lib: {
         // 双入口：index = 主进程；mcp-server = MCP stdio server 独立可执行（由 claude CLI 按
@@ -22,12 +36,18 @@ export default defineConfig({
           'mcp-server': 'electron/mcp-server.ts',
         },
       },
+      rollupOptions: {
+        onwarn: onRollupWarn,
+      },
     },
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
     build: {
       lib: { entry: 'electron/preload/index.ts' },
+      rollupOptions: {
+        onwarn: onRollupWarn,
+      },
     },
   },
   renderer: {
@@ -64,6 +84,7 @@ export default defineConfig({
           pet: path.resolve(__dirname, 'src/renderer/pet/index.html'),
           panel: path.resolve(__dirname, 'src/renderer/pet/panel.html'),
         },
+        onwarn: onRollupWarn,
         // 不配 manualChunks：Rollup 多入口本来就自动把共享模块提为公共 chunk。
         // 若手动把 node_modules 归并成单一 vendor chunk，桌宠入口（只用 react）
         // 也得整包加载全部依赖（~5MB），64px 动画窗口的开销反而爆炸。

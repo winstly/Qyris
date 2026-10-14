@@ -207,6 +207,7 @@ export async function getConfig(): Promise<AppConfig> {
       embedRemoteHost:
         typeof parsed.embedRemoteHost === 'string' && parsed.embedRemoteHost.trim() ? parsed.embedRemoteHost : null,
       memExtractRounds: clampRounds(parsed.memExtractRounds),
+      memAutoArchive: parsed.memAutoArchive === false ? false : undefined,
       contextCompressThreshold: clampCompressThreshold(parsed.contextCompressThreshold),
       closeAction: parsed.closeAction === 'minimize' || parsed.closeAction === 'quit' ? parsed.closeAction : undefined,
       petSound: parsed.petSound === true ? true : undefined,

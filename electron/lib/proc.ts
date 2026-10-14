@@ -187,15 +187,19 @@ function takeAndKillOne(key: string): void {
 
 // ---------- 一次性命令取消：在途 run_once 子进程登记，供「停止生成」硬中断 ----------
 
-const onceProcs = new Map<string, ChildProcess>()
+/** ChildProcess 句柄或裸 pid（外部封装的 spawn 只暴露 pid——如 MCP SDK transport） */
+type OnceProcHandle = ChildProcess | number
+
+const onceProcs = new Map<string, OnceProcHandle>()
 
 /** 取消在途一次性命令：带 token 只杀对应进程；不带杀全部（全局停止语义）。返回杀掉的进程数 */
 export function cancelRunOnce(token?: unknown): number {
   let killed = 0
-  for (const [key, child] of [...onceProcs]) {
+  for (const [key, handle] of [...onceProcs]) {
     if (typeof token === 'string' && token && key !== token) continue
     onceProcs.delete(key)
-    if (child.pid) killTree(child.pid)
+    const pid = typeof handle === 'number' ? handle : handle.pid
+    if (pid) killTree(pid)
     killed++
   }
   return killed
@@ -206,6 +210,15 @@ export function registerOnceProc(token: string, child: ChildProcess): () => void
   onceProcs.set(token, child)
   return () => {
     onceProcs.delete(token)
+  }
+}
+
+/** 裸 pid 登记（句柄在第三方库里拿不到时复用同一清理链），返回注销函数；pid 缺省时返回 noop */
+export function registerOncePid(token: string, pid: number | null | undefined): () => void {
+  if (!pid) return () => {}
+  onceProcs.set(token, pid)
+  return () => {
+    if (onceProcs.get(token) === pid) onceProcs.delete(token)
   }
 }
 

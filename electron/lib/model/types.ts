@@ -16,6 +16,8 @@
 
 // ---------- 消息层（provider 无关） ----------
 
+import type { MemoryOrigin } from '../../../shared/ipc-types'
+
 export type Role = 'system' | 'user' | 'assistant' | 'tool'
 
 /** 文本 / 图片 / 工具调用 / 工具结果，统一成一个内容块模型 */
@@ -125,6 +127,9 @@ export interface ToolCtx {
   signal?: AbortSignal
   /** 权限档位由 runner 决定，工具只管按档执行 */
   permission: ToolPermission
+  /** 调用来源（记忆写入打标用）：user_explicit=用户明说/agent_suggest=agent 主动/distill=蒸馏。
+   *  由执行侧注入，模型不可自填——缺省 agent_suggest（保护只授予被检测到的显式意图） */
+  origin?: MemoryOrigin
   /** 长执行工具（run_command 等）逐行实时回调：接了才有执行期反馈，
    *  不接则整段执行期聊天窗静默（npm install 这类几分钟的命令体感就是假死） */
   onOutput?: (line: string, stream: 'stdout' | 'stderr') => void

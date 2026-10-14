@@ -60,6 +60,7 @@ import { randomUUID } from 'node:crypto'
 import { clampToolResult, isDeferredTool } from '../tools'
 import { applySummary, estimateTokens, summarize } from './compact'
 import type { ConversationStore } from './store'
+import type { MemoryOrigin } from '../../../shared/ipc-types'
 import type {
   CompletionRequest,
   ContentPart,
@@ -108,6 +109,8 @@ interface RunnerOptions {
    * RunnerOptions 契约未列、ToolCtx 又必须有——以可选字段补齐，缺省 null 由工具自行降级。
    */
   projectRoot?: string | null
+  /** 工具调用来源（写进 ToolCtx.origin，记忆写入打标用）；缺省 agent_suggest */
+  toolOrigin?: MemoryOrigin
   /**
    * 上下文 token 预算：超过即 window()+summarize 压缩旧消息。缺省不压缩（调用方自管）。
    * 压缩触发与摘要去重是 runner 的职责（store.window 是纯视图）——但预算是 provider 相关的
@@ -702,6 +705,38 @@ function parseFallbackToolCalls(text: string): FallbackParse {
   return { kind: 'calls', prose, calls }
 }
 
+// ---------- 旧工具结果瘦身（lost-in-middle 缓解） ----------
+
+/** 单个旧 toolResult 保留的字符数：足以辨认「这条结果是什么」，细节按需重新执行工具获取 */
+const STALE_TOOL_RESULT_KEEP = 800
+
+/**
+ * 旧工具结果瘦身（纯请求组装变换，store 历史不动——翻页仍看全文）：
+ * last user 消息之前的 toolResult 块截断到 STALE_TOOL_RESULT_KEEP 字符并标注省略原因；
+ * last user 之后的（= 当前工具轮）完整保留。
+ * 瘦身只影响本次请求的组装，翻页/落库不受影响。CLI 档无此问题（serializeConversation 工具压一行）。
+ */
+function slimStaleToolResults(messages: readonly Message[], keep: number = STALE_TOOL_RESULT_KEEP): Message[] {
+  let lastUser = -1
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') { lastUser = i; break }
+  }
+  if (lastUser <= 0) return messages as Message[]
+  return messages.map((m, i) => {
+    if (i >= lastUser || !Array.isArray(m.content)) return m
+    let touched = false
+    const content = m.content.map((p) => {
+      if (p.type !== 'toolResult' || typeof p.content !== 'string' || p.content.length <= keep) return p
+      touched = true
+      return {
+        ...p,
+        content: `${p.content.slice(0, keep)}\n[……旧工具输出已省略 ${p.content.length - keep} 字（历史瘦身）；需要完整输出请重新执行该工具]`,
+      }
+    })
+    return touched ? { ...m, content } : m
+  })
+}
+
 // ---------- 主入口 ----------
 
 export async function runAgent(input: string, opts: RunnerOptions): Promise<Message> {
@@ -783,7 +818,7 @@ export async function runAgent(input: string, opts: RunnerOptions): Promise<Mess
    *   · summarize 失败降级纯窗口切片（对齐 useChatStore），但中止必须上抛，不许被降级吞掉。
    */
   const buildRequestMessages = async (): Promise<readonly Message[]> => {
-    if (maxContextTokens == null) return store.snapshot()
+    if (maxContextTokens == null) return slimStaleToolResults(store.snapshot())
     const { kept, dropped } = store.window(maxContextTokens, estimateTokens)
     if (dropped.length > 0) {
       const total = kept.length + dropped.length
@@ -800,7 +835,7 @@ export async function runAgent(input: string, opts: RunnerOptions): Promise<Mess
       }
     }
     // 重开窗：applySummary 之后 kept 里才有新摘要物化块；没压缩过时与上面等价（纯视图，代价可忽略）
-    return store.window(maxContextTokens, estimateTokens).kept
+    return slimStaleToolResults(store.window(maxContextTokens, estimateTokens).kept)
   }
 
   /** 为已 tool-start 未 tool-end 的调用补收口（幂等），防 UI 永久转圈 */
@@ -860,6 +895,7 @@ export async function runAgent(input: string, opts: RunnerOptions): Promise<Mess
       projectRoot,
       signal,
       permission,
+      origin: opts.toolOrigin ?? 'agent_suggest',
       // 执行期逐行回吐：长命令（npm install 等）不再让聊天窗静默数分钟
       onOutput: (line, stream) => emit({ type: 'tool-output', id: call.id, line, stream }),
     }
@@ -1061,11 +1097,13 @@ export async function runAgent(input: string, opts: RunnerOptions): Promise<Mess
 
       // 伪标签救援：全量文本（可见 + 被抑制的叙述）里的「标签包已知工具名 + JSON」剥出来真执行，否则任务停摆。
       // 必须用全量：证实抑制的伪标签进了 suppressed，只扫可见流会漏救。
-      // hadToolExec（本轮已真跑过 MCP 工具）时整体跳过：正文里的伪标签/围栏是已执行调用的复述，
+      // 门控一：hadToolExec（本轮已真跑过 MCP 工具）时整体跳过——正文里的伪标签/围栏是已执行调用的复述，
       // 再救援会让同一命令在服务端重复执行；零执行（弱网关模型只会文本形态调用）才是救援的本命场景。
+      // 门控二：仅文本协议档（capabilities.tools=false）执行——原生 tool call 档出现伪标签说明模型
+      // 行为异常（该用工具却写正文），剥除防刷屏即可，正文里对调用的「引用」绝不能被误当调用真执行。
       const fullText = visibleText + suppressedText
       const passCalls: CallRecord[] = []
-      if (!hadToolExec) {
+      if (!hadToolExec && !nativeTools) {
         for (const m of fullText.matchAll(PSEUDO_TOOL_CALL_RE)) {
           const name = m[2].replace(/^mcp__qyris-tools__/, '')
           if (!toolByName.has(name)) continue

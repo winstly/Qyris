@@ -72,7 +72,12 @@ export function PreviewTab() {
   const recentErrorsRef = useRef<Map<string, number>>(new Map())
   const errorCountRef = useRef(0)
 
-  const previewUrl = slot?.detectedUrl || ''
+  /** 手动地址（会话级覆盖）：用户在地址栏回车后生效；切服务时自动清除 */
+  const [manualAddr, setManualAddr] = useState<string | null>(null)
+  /** 地址栏草稿（未提交）：逐键编辑不驱动预览导航，回车才提交 */
+  const [draftAddr, setDraftAddr] = useState<string | null>(null)
+
+  const previewUrl = manualAddr ?? (slot?.detectedUrl || '')
 
   // 预览报错 → lesson 采集（噪音控制：同消息 30s 去重、每预览会话最多 3 条）
   useEffect(() => {
@@ -116,11 +121,29 @@ export function PreviewTab() {
   const phase = slot?.phase ?? 'idle'
   const url = slot?.detectedUrl || ''
   const anyAlive = slotOrder.some((k) => slots[k]?.processAlive)
-  const showIframe = phase === 'running' && url !== ''
+  // 手动地址也算「预览中」：嵌入浏览器支持不依赖服务的任意导航（用户诉求：手动请求某个页面）
+  const showIframe = (phase === 'running' && url !== '') || manualAddr !== null
   const activeDevice = DEVICES.find((d) => d.mode === deviceMode) ?? DEVICES[0]
   const constrained = activeDevice.width !== null
 
   useEffect(() => { void previewSetUrl(showIframe ? previewUrl : '') }, [showIframe, previewUrl])
+
+  // 切服务（activeSlot 变化）→ 清手动地址，回到自动检测的 URL
+  useEffect(() => {
+    setManualAddr(null)
+    setDraftAddr(null)
+  }, [activeSlot])
+
+  // AI 编译提交新命令（name/run/url 签名变化）→ 预览强制刷新（重编译产物可能已变，旧页面是陈旧内容）。
+  // 首次挂载/hydration 不触发：签名从空到已存配置是加载，不是本次编译
+  const cmdSignature = startupCommands.map((c) => `${c.name}:${c.run}:${c.url ?? ''}`).join('|')
+  const prevCmdSignature = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevCmdSignature.current
+    prevCmdSignature.current = cmdSignature
+    if (prev === null || prev === cmdSignature) return
+    if (showIframe) void previewReload()
+  }, [cmdSignature, showIframe])
 
   // placeholder 坐标同步（ResizeObserver + window resize → 主进程 setBounds）
   // 跨屏拖拽时 DPI 变化会触发 resize 事件风暴，throttle 到 rAF 频率避免 IPC 堆积
@@ -298,23 +321,42 @@ export function PreviewTab() {
 
       <BuildPipeline phase={phase} />
 
-      {/* 预览地址栏 + 设备切换 */}
+      {/* 预览地址栏（可编辑：回车导航；无协议自动补 http://）+ 设备切换 */}
       <div className="preview__urlbar">
         <IconLink size={13} />
-        {slot && slot.detectedUrl ? (
-          <>
-            <a className="preview__addr mono" href={slot.detectedUrl} target="_blank" rel="noreferrer" title={`在浏览器中打开 ${slot.detectedUrl}`}>
-              {slot.detectedUrl}
-            </a>
-            {slot.detectedUrls.length > 1 && (
-              <div className="preview__url-switch">
-                <Select size="sm" value={slot.detectedUrl} onChange={(u) => selectUrl(slot.name, u)}
-                  options={slot.detectedUrls.map((u) => ({ value: u, label: u }))} ariaLabel="切换服务地址" />
-              </div>
-            )}
-          </>
-        ) : (
-          <span className="preview__addr preview__addr--empty">当前服务的地址待自动解析（可查看进程日志）</span>
+        <input
+          className="preview__addr-input mono"
+          value={draftAddr ?? previewUrl}
+          onChange={(e) => setDraftAddr(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key !== 'Enter') return
+            const raw = (draftAddr ?? previewUrl).trim()
+            // 空输入 = 放弃手动覆盖，回到自动检测地址
+            if (!raw) {
+              setDraftAddr(null)
+              setManualAddr(null)
+              return
+            }
+            const normalized = /^https?:\/\//i.test(raw) ? raw : `http://${raw}`
+            setDraftAddr(null)
+            setManualAddr(normalized)
+            void previewSetUrl(normalized)
+          }}
+          placeholder={slot?.detectedUrl || '输入地址后回车导航（如 localhost:5173）'}
+          aria-label="预览地址"
+          spellCheck={false}
+        />
+        {slot && slot.detectedUrls.length > 1 && (
+          <div className="preview__url-switch">
+            {/* 下拉选检测地址：只切检测源，不建手动覆盖（否则后续重新检测被钉死在旧地址） */}
+            <Select size="sm" value={slot.detectedUrl ?? ''} onChange={(u) => { setDraftAddr(null); setManualAddr(null); selectUrl(slot.name, u); void previewSetUrl(u) }}
+              options={slot.detectedUrls.map((u) => ({ value: u, label: u }))} ariaLabel="切换服务地址" />
+          </div>
+        )}
+        {(draftAddr !== null || (manualAddr !== null && manualAddr !== slot?.detectedUrl)) && (
+          <button className="icon-btn" onClick={() => { setDraftAddr(null); setManualAddr(null) }} aria-label="回到自动检测地址" title="清除手动地址，回到自动检测">
+            <IconClose size={12} />
+          </button>
         )}
         <div className="preview__spacer" />
         <div className="preview__devices" role="radiogroup" aria-label="预览设备">
@@ -326,7 +368,7 @@ export function PreviewTab() {
           ))}
         </div>
         <span className="statusbar__sep" />
-        <button className="icon-btn" onClick={() => void api.openExternal(url)} disabled={!url} aria-label="系统浏览器打开" title="在系统默认浏览器中打开"><IconExternal size={13} /></button>
+        <button className="icon-btn" onClick={() => void api.openExternal(previewUrl)} disabled={!previewUrl} aria-label="系统浏览器打开" title="在系统默认浏览器中打开"><IconExternal size={13} /></button>
         <button className="icon-btn" onClick={() => void api.startElementPick()} disabled={!showIframe} aria-label="选取元素" title="选取预览页元素"><IconTarget size={13} /></button>
         <button className="icon-btn" disabled={!showIframe} onClick={() => void previewReload()} aria-label="刷新预览" title="清缓存并刷新预览"><IconRefresh size={13} /></button>
         <button className="icon-btn" disabled={!showIframe} onClick={() => void previewDevtools()} aria-label="DevTools" title="打开预览页 DevTools"><IconTerminal size={13} /></button>
@@ -380,7 +422,9 @@ export function PreviewTab() {
             style={constrained ? { maxWidth: activeDevice.width! } : undefined} />
         ) : !slot || phase === 'idle' ? (
           <EmptyState icon={<IconPlay size={22} />} title="待启动"
-            text={hasCommands ? `已识别 ${startupCommands.length} 个服务的启动命令，点击「全部运行」直接启动。` : '点击「AI 编译」，由 AI 探测项目技术栈并识别启动命令。'}
+            text={hasCommands
+              ? `已识别 ${startupCommands.length} 个服务的启动命令，点击「全部运行」直接启动。`
+              : '不需要 AI 探测时，可直接在上方「添加服务」手动定义启动命令；也可以点「AI 编译」由 AI 自动识别。'}
             action={hasCommands
               ? <button className="btn btn--primary" onClick={() => void runAll()}><IconPlay size={14} /> 全部运行</button>
               : <button className="btn btn--primary" disabled={chatBusy} onClick={() => void aiCompile()}>{compiling ? 'AI 编译中…' : 'AI 编译'}</button>}

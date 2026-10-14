@@ -50,6 +50,7 @@ import {
   callHostTool,
   HOST_TOOL_ENV_EXCLUDE,
   HOST_TOOL_ENV_EXTERNAL_FILE,
+  HOST_TOOL_ENV_INCLUDE,
   hostProxyFromEnv,
   isHostRoutedTool,
   type HostToolProxyTarget,
@@ -76,6 +77,10 @@ interface McpServerConfig {
   hostProxy: HostToolProxyTarget | null
   /** 本 session 额外剔除的工具名（子 session 剔除 dispatch_subtasks，防嵌套派发） */
   excludeTools?: readonly string[]
+  /** 本 session 正向白名单（逗号分隔 env 注入）：非空时只暴露名单内工具（记忆蒸馏等窄面场景） */
+  includeTools?: readonly string[]
+  /** 工具调用来源（记忆写入打标；--origin 传入）；缺省 agent_suggest */
+  origin?: 'user_explicit' | 'agent_suggest' | 'distill'
   /** 外部 MCP 工具描述（暴露面元数据；执行经 hostProxy 代行回主进程——连接池在那边）。
    *  经 HOST_TOOL_ENV_EXTERNAL_FILE 指的 JSON 文件注入，坏文件 fail-safe 收敛空表 */
   externalTools?: readonly ExternalToolStub[]
@@ -92,6 +97,7 @@ export function parseServerArgv(argv: readonly string[], env: NodeJS.ProcessEnv 
   const PERMS: readonly ToolPermission[] = ['readonly', 'write', 'exec']
   let permission: ToolPermission = 'readonly'
   let projectRoot: string | null = null
+  let origin: 'user_explicit' | 'agent_suggest' | 'distill' = 'agent_suggest'
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--permission') {
@@ -102,6 +108,10 @@ export function parseServerArgv(argv: readonly string[], env: NodeJS.ProcessEnv 
     } else if (a === '--project-root') {
       const v = argv[++i]
       projectRoot = v && v.trim() ? v : null
+    } else if (a === '--origin') {
+      const v = argv[++i]
+      if (v === 'user_explicit' || v === 'agent_suggest' || v === 'distill') origin = v
+      else warn(`--origin 值非法（${String(v)}），按 agent_suggest 兜底`)
     } else {
       warn(`未知参数「${String(a)}」，已忽略`)
     }
@@ -109,8 +119,10 @@ export function parseServerArgv(argv: readonly string[], env: NodeJS.ProcessEnv 
   return {
     permission,
     projectRoot,
+    origin,
     hostProxy: hostProxyFromEnv(env),
     excludeTools: (env[HOST_TOOL_ENV_EXCLUDE] ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+    includeTools: (env[HOST_TOOL_ENV_INCLUDE] ?? '').split(',').map((s) => s.trim()).filter(Boolean),
     externalTools: readExternalToolStubs(env),
   }
 }
@@ -189,10 +201,12 @@ export function createMcpCore(cfg: McpServerConfig, io: McpIo): McpCore {
     adoptRemoteStubs(externalStubs, (name, input, signal) => callHostTool(cfg.hostProxy!, name, input, signal), cfg.projectRoot)
   }
   // excludeTools：本 session 再剔除（子 session 剔 dispatch_subtasks 防嵌套派发）。
+  // includeTools：正向白名单（非空时只暴露名单内工具——蒸馏等窄面场景，权限档约束之上再收口）。
   const surface = toolsForPermission(cfg.permission, cfg.projectRoot)
     .filter((t) => !isDeferredTool(t.name))
     .filter((t) => !isHostRoutedTool(t.name) || cfg.hostProxy != null)
     .filter((t) => !(cfg.excludeTools ?? []).includes(t.name))
+    .filter((t) => (cfg.includeTools ?? []).length === 0 || (cfg.includeTools ?? []).includes(t.name))
   const surfaceNames = new Set(surface.map((t) => t.name))
 
   // 在途 tools/call：requestId → AbortController（notifications/cancelled 与 cancelAll 按它中止）
@@ -213,7 +227,7 @@ export function createMcpCore(cfg: McpServerConfig, io: McpIo): McpCore {
     }
     const ac = new AbortController()
     inflight.set(id, ac)
-    const ctx: ToolCtx = { projectRoot: cfg.projectRoot, signal: ac.signal, permission: cfg.permission }
+    const ctx: ToolCtx = { projectRoot: cfg.projectRoot, signal: ac.signal, permission: cfg.permission, origin: cfg.origin ?? 'agent_suggest' }
     // 编排类工具与外部 MCP 工具回主进程执行（run 的事件出口 / 外部连接池都在那里）；
     // 其余就地执行。通道缺失时 fail-closed 报错而不是就地跑（surface 已挡一层，双保险防暴露面漂移）
     const exec = isHostRoutedTool(name)

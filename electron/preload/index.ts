@@ -32,6 +32,7 @@ function subscribe<T>(channel: string, cb: (payload: T) => void): Unsubscribe {
 const desktopAPI: DesktopAPI = {
   // 文件系统
   listDir: (projectRoot: string, dir: string) => ipcRenderer.invoke('list_dir', { projectRoot, dir }),
+  pathExists: (p: string) => ipcRenderer.invoke('path_exists', { path: p }) as Promise<boolean>,
   listDirBatch: (projectRoot: string, dirs: string[]) =>
     ipcRenderer.invoke('list_dir_batch', { projectRoot, dirs }) as Promise<Record<string, { name: string; path: string; kind: 'file' | 'folder' }[]>>,
   searchFiles: (projectRoot: string, query: string) =>
@@ -92,12 +93,15 @@ const desktopAPI: DesktopAPI = {
     ipcRenderer.invoke('memory_search', { query, projectRoot, topK: topK ?? null, includeArchived: includeArchived === true }) as Promise<MemorySearchResult>,
   memoryUpdate: (id: string, patch: MemoryPatch) =>
     ipcRenderer.invoke('memory_update', { id, patch }) as Promise<MemoryItem>,
+  memoryUnarchive: (id: string) =>
+    ipcRenderer.invoke('memory_unarchive', { id }) as Promise<MemoryItem>,
   memoryDelete: (id: string) => ipcRenderer.invoke('memory_delete', { id }) as Promise<void>,
   memoryMoveScope: (id: string, target: 'project' | 'user', projectRoot?: string) =>
     ipcRenderer.invoke('memory_move_scope', { id, target, projectRoot: projectRoot ?? null }) as Promise<MemoryItem>,
   memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
     ipcRenderer.invoke('memory_clear', { scope, projectRoot: projectRoot ?? null }) as Promise<void>,
   memoryStats: () => ipcRenderer.invoke('memory_stats') as Promise<MemoryStats>,
+  memoryLastTidy: () => ipcRenderer.invoke('memory_last_tidy') as Promise<{ ts: number; saved: number; updated: number; archived: number } | null>,
   // mem agent（P2 记忆蒸馏管线；载荷类型与 electron/lib/memory/agent + service 对齐）
   memorySessionContext: (projectRoot: string, sessionId: string) =>
     ipcRenderer.invoke('memory_session_context', { projectRoot, sessionId }) as Promise<{ summary: string | null }>,
@@ -209,11 +213,12 @@ const desktopAPI: DesktopAPI = {
   gitPull: (dir: string) => ipcRenderer.invoke('git_pull', { dir }) as Promise<string>,
   gitFetch: (dir: string) => ipcRenderer.invoke('git_fetch', { dir }) as Promise<string>,
   gitPush: (dir: string) => ipcRenderer.invoke('git_push', { dir }) as Promise<string>,
+  gitMerge: (dir: string, branch: string) => ipcRenderer.invoke('git_merge', { dir, branch }) as Promise<string>,
   gitDiscard: (dir: string, paths: string[]) => ipcRenderer.invoke('git_discard', { dir, paths }),
   pickParentDir: () => ipcRenderer.invoke('pick_parent_dir') as Promise<string | null>,
 
   // AI
-  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string; outputFormat?: string }) =>
+  aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string }) =>
     ipcRenderer.invoke('ai_chat_stream', { requestId, provider, baseUrl, model, messages, tools, dispatchMode: dispatchMode ?? 'api', projectRoot: projectRoot ?? null, opts: opts ?? null }),
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
     ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api', cliCommand }),

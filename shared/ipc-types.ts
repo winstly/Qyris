@@ -146,9 +146,7 @@ export interface AiCompletion {
   reasoning: string | null
   toolCalls: AiToolCall[]
   finishReason: string | null
-  /** 仅 CLI 模式：模型请求下一轮附带的 Skill id 列表（消费方按已扫描索引校验后采用） */
-  nextSkill?: string[]
-  /** 仅 CLI 模式：模型提交的启动命令清单（AI 编译场景；消费方落盘 startupCommands） */
+  /** 模型提交的启动命令清单（AI 编译场景；消费方落盘 startupCommands） */
   startCommands?: StartCommand[] | null
 }
 
@@ -218,6 +216,22 @@ export type MemoryCategory = 'preference' | 'fact' | 'event' | 'lesson' | 'skill
 
 export type MemoryStatus = 'active' | 'merged' | 'archived'
 
+/** 记忆来源契约（写入侧打标，模型不可自填）：
+ *  user_explicit = 用户明说「记住 X」（终身保护：免自动归档/衰减，覆写走 supersede）
+ *  agent_suggest = 对话中 agent 主动沉淀；distill = 蒸馏 agent 自动提取 */
+export type MemoryOrigin = 'user_explicit' | 'agent_suggest' | 'distill'
+
+/** 「上次整理」快照（面板摘要条数据源）：新增/更新/归档分账——合说「更新 N 条」是口径谎言 */
+export interface MemoryLastTidy {
+  ts: number
+  saved: number
+  updated: number
+  archived: number
+}
+
+/** 归档操作者（archived_by 字段） */
+export type MemoryArchivedBy = 'user' | 'agent' | 'distill' | 'decay' | 'import'
+
 /** mem_items 行（主进程 SQLite，camelCase 直出） */
 export interface MemoryItem {
   id: string
@@ -237,6 +251,11 @@ export interface MemoryItem {
   lastAccessedAt: number | null
   status: MemoryStatus
   supersededBy: string | null
+  origin: MemoryOrigin
+  /** 归档痕迹（active 时全 null）——自动归档必须可解释、可恢复 */
+  archivedAt: number | null
+  archivedBy: MemoryArchivedBy | null
+  archivedReason: string | null
   createdAt: number
   updatedAt: number
 }
@@ -252,11 +271,18 @@ export interface MemoryPatch {
   content?: string
   category?: string
   importance?: number
+  /** 状态回写：'active' = 恢复（走 memory_unarchive 语义，清归档痕迹） */
+  status?: 'active' | 'archived'
+  /** 语义推翻：本条取代 targetId——target 归档留痕并回链 supersededBy */
+  supersedes?: string
 }
 
 /** 记忆库统计（memoryStats，全局口径不分工程） */
 export interface MemoryStats {
   total: number
+  /** 活跃条数（面板状态条口径；total 含归档，仅作总量参考） */
+  activeCount: number
+  archivedCount: number
   byTier: Record<string, number>
   byCategory: Record<string, number>
   /** 本地 embedding 模型就绪（false = 降级仅关键词检索） */

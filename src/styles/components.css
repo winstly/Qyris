@@ -463,12 +463,21 @@
     flex-shrink: 0;
     align-items: center;
     justify-content: space-between;
+    gap: var(--space-3);
     font-size: var(--font-size-18);
     font-weight: var(--font-weight-ui);
     letter-spacing: -0.2px;
     line-height: 125%;
     color: var(--text);
   }
+  /* 标题截断（长记忆标题不许挤扁关闭钮）+ 关钮定宽不收缩 */
+  .modal__head > span {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .modal__head .icon-btn { flex-shrink: 0; }
 
   .modal__msg {
     color: var(--text-muted);
@@ -1159,6 +1168,8 @@
     flex-direction: column;
     gap: 3px;
   }
+  /* flex column 滚动容器的子项不随容器收缩（flex-shrink 缺省 1 会被压扁），固定为不收缩 */
+  .user-mem__list > * { flex: 0 0 auto; }
 
   .user-mem__loading,
   .user-mem__error {
@@ -2629,6 +2640,8 @@
   border: 1px solid var(--divider);
   border-radius: var(--radius-md);
 }
+/* 同 .user-mem__list：flex column 滚动容器子项 flex-shrink:0，防条目被压扁 */
+.slots > * { flex: 0 0 auto; }
 
 .slots__row {
   display: flex;
@@ -2802,6 +2815,23 @@
   text-decoration: none;
 }
 .preview__addr:hover { text-decoration: underline; }
+/* 可编辑地址栏：与地址栏行高一致，回车导航（支持手动请求任意页面） */
+.preview__addr-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--fg-1);
+  font-size: var(--text-xs);
+}
+.preview__addr-input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+.preview__addr-input::placeholder { color: var(--muted); }
 .preview__addr--empty,
 .preview__addr--empty:hover { color: var(--muted); text-decoration: none; }
 
@@ -3255,13 +3285,15 @@
   background: var(--accent-dim);
   color: var(--accent);
   font-size: var(--text-micro);
-  max-width: 90px;
+  /* 弹性宽替代硬上限：放得下就完整显示（分支名是头部核心信息），放不下才省略+title 全文 */
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.gitpanel__ab { font-size: var(--text-micro); color: var(--warn, var(--fg-2)); }
-.gitpanel__count { margin-left: auto; font-size: var(--text-micro); color: var(--muted); }
+.gitpanel__ab { flex-shrink: 0; font-size: var(--text-micro); color: var(--warn, var(--fg-2)); }
+.gitpanel__count { margin-left: auto; flex-shrink: 0; font-size: var(--text-micro); color: var(--muted); }
 .gitpanel__count--dirty { color: var(--fg-2); }
 
 .gitpanel__body {
@@ -3695,6 +3727,8 @@
   overflow: auto;
   padding: var(--space-3);
 }
+/* 同 .user-mem__list：flex column 滚动容器的子项必须 flex-shrink:0，否则条目多时整列被压扁而不滚动 */
+.history > * { flex: 0 0 auto; }
 
 .history__list {
   display: flex;
@@ -3738,6 +3772,30 @@
 .history__item--active {
   background: var(--row-active);
   cursor: default;
+}
+
+/* 目录已不存在的项目行：显式标记 + 降活性（不能打开，只剩删除钮）。
+   降活性只压信息区（图标/名称/时间），徽标与删除钮保持全强度——唯一可操作的钮不能像禁用 */
+.history__item--missing {
+  cursor: default;
+}
+.history__item--missing:hover { background: transparent; }
+.history__item--missing .history__item-icon,
+.history__item--missing .history__item-info,
+.history__item--missing .history__item-time {
+  opacity: 0.55;
+}
+/* 状态徽标：本仓危险徽标语义（--red-bg 淡底 + --red 字、无描边，同 notice--err 族）——
+   密集行里边框描边是主要观感噪音源 */
+.history__item-badge {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill);
+  background: var(--red-bg);
+  color: var(--red);
+  font-size: var(--text-micro);
+  line-height: 1.45;
+  white-space: nowrap;
 }
 
 .history__item-icon {
@@ -4773,6 +4831,83 @@ body.dragging-col .split__first { transition: none; }
   color: var(--muted);
 }
 .memory__badge--muted { color: var(--muted); font-weight: var(--font-weight-prose); }
+.memory__badge--accent {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+  font-weight: var(--font-weight-prose-strong);
+}
+
+/* 状态分段控件（进行中 | 已归档）：归档可见面的入口——系统不藏 */
+.memory__status-seg {
+  display: flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+}
+.memory__status-seg-btn {
+  height: 26px;
+  padding: 0 10px;
+  background: transparent;
+  border: 0;
+  color: var(--muted);
+  font-size: var(--text-micro);
+  font-weight: var(--font-weight-prose);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.memory__status-seg-btn + .memory__status-seg-btn { border-left: 1px solid var(--divider); }
+.memory__status-seg-btn:hover { color: var(--fg-2); }
+.memory__status-seg-btn.is-active {
+  background: color-mix(in oklab, var(--accent), transparent 88%);
+  color: var(--accent);
+  font-weight: var(--font-weight-prose-strong);
+}
+
+/* 「上次整理」摘要条：被动面（不 toast 不通知）——归档可见性的收口之一 */
+/* 记忆面板元信息行共用骨架（上次整理条 / 归档召回行）：边框与字色由各自修饰 */
+.memory__tidy-bar,
+.memory__recall-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  font-size: var(--text-micro);
+}
+.memory__tidy-bar {
+  margin-bottom: var(--space-2);
+  border: 1px solid var(--divider);
+  color: var(--fg-2);
+}
+.memory__tidy-bar .icon-btn { flex: 0 0 auto; }
+
+/* 归档召回（搜索零命中时）：把「丢失」反转成「想起」 */
+.memory__recall {
+  margin-top: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  text-align: left;
+}
+.memory__recall-row {
+  border: 1px dashed var(--divider);
+  color: var(--muted);
+}
+.memory__recall-row .btn { flex: 0 0 auto; }
+
+/* 记忆设置：自动归档开关（立场式开关，不暴露参数——用户设不了错的东西） */
+.settings-memtoggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--fg-1);
+  font-size: var(--text-xs);
+  font-weight: var(--font-weight-prose-strong);
+  cursor: pointer;
+}
+.settings-memtoggle input { accent-color: var(--accent); }
 
 /* ── 记忆编辑弹窗（MemoryEditModal）：modal 体系内的内容区补充 ── */
 .memory-modal__content {

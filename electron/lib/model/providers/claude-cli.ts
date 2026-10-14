@@ -31,6 +31,7 @@ import { MCP_SERVER_NAME, parseMcpToolName } from '../../mcp/server'
 import {
   HOST_TOOL_ENV_EXCLUDE,
   HOST_TOOL_ENV_EXTERNAL_FILE,
+  HOST_TOOL_ENV_INCLUDE,
   HOST_TOOL_ENV_PORT,
   HOST_TOOL_ENV_TOKEN,
   type HostToolProxyTarget,
@@ -80,6 +81,10 @@ interface ClaudeMcpChannel {
   hostProxy?: HostToolProxyTarget | null
   /** 本 session 的 MCP 面额外剔除工具名（子 session 剔除 dispatch_subtasks，防嵌套派发） */
   excludeTools?: readonly string[]
+  /** 本 session 的 MCP 面正向白名单：非空时只暴露名单内工具（记忆蒸馏等窄面场景） */
+  includeTools?: readonly string[]
+  /** 工具调用来源（记忆写入打标，经 --origin 透传 MCP 子进程）；缺省 agent_suggest */
+  origin?: 'user_explicit' | 'agent_suggest' | 'distill'
   /** 外部 MCP 工具描述（暴露面元数据，见 mcp/external.ts）：落 scratch JSON 文件、env 指路
    *  注入子进程；执行经 hostProxy 代行回主进程（外部连接池在那边，子进程不建连） */
   externalTools?: readonly ExternalToolStub[]
@@ -547,6 +552,9 @@ function buildMcpServerConfig(mcp: ClaudeMcpChannel, externalToolsFile: string |
   const excludeEnv = mcp.excludeTools?.length
     ? { [HOST_TOOL_ENV_EXCLUDE]: mcp.excludeTools.join(',') }
     : {}
+  const includeEnv = mcp.includeTools?.length
+    ? { [HOST_TOOL_ENV_INCLUDE]: mcp.includeTools.join(',') }
+    : {}
   // 外部工具描述文件指路（同 QYRIS_HOST_TOOL_ 前缀，buildChildEnv 对孙子进程自动剥离）
   const externalEnv = externalToolsFile ? { [HOST_TOOL_ENV_EXTERNAL_FILE]: externalToolsFile } : {}
   return {
@@ -554,8 +562,8 @@ function buildMcpServerConfig(mcp: ClaudeMcpChannel, externalToolsFile: string |
       [MCP_SERVER_NAME]: {
         type: 'stdio',
         command: process.execPath,
-        args: [resolveMcpServerScript(), '--permission', mcp.permission, '--project-root', mcp.projectRoot ?? ''],
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...credEnv, ...proxyEnv, ...excludeEnv, ...externalEnv },
+        args: [resolveMcpServerScript(), '--permission', mcp.permission, '--project-root', mcp.projectRoot ?? '', ...(mcp.origin ? ['--origin', mcp.origin] : [])],
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...credEnv, ...proxyEnv, ...excludeEnv, ...includeEnv, ...externalEnv },
       },
     },
   }

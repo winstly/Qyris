@@ -26,13 +26,15 @@ import type { ToolResult } from '../model/types'
 
 /** 只能由主进程执行的工具：执行、事件出口或主进程单例状态必须留在主进程 run 上。
  *  dispatch_subtasks = 编排事件出口；preview_* = 预览面板/控制台缓冲单例；
- *  update_server_tags / memory_save / memory_archive = 落盘后要 fire 本进程配置/记忆变更事件 */
+ *  update_server_tags / memory_save / memory_update / memory_archive = 落盘后要 fire 本进程
+ *  配置/记忆变更事件（memory_update 还要主进程 embedder 重嵌，子进程无嵌入管线） */
 export const HOST_ONLY_TOOLS: readonly string[] = [
   'dispatch_subtasks',
   'preview_open',
   'preview_console',
   'update_server_tags',
   'memory_save',
+  'memory_update',
   'memory_archive',
 ]
 
@@ -62,6 +64,8 @@ export const HOST_TOOL_ENV_PORT = 'QYRIS_HOST_TOOL_PORT'
 export const HOST_TOOL_ENV_TOKEN = 'QYRIS_HOST_TOOL_TOKEN'
 /** 本 session 的 MCP 面额外剔除名单（逗号分隔）：子 session 剔除 dispatch_subtasks 防嵌套派发 */
 export const HOST_TOOL_ENV_EXCLUDE = 'QYRIS_HOST_TOOL_EXCLUDE'
+/** 本 session 的 MCP 面正向白名单（逗号分隔）：非空时只暴露名单内工具（记忆蒸馏等窄工具面场景） */
+export const HOST_TOOL_ENV_INCLUDE = 'QYRIS_HOST_TOOL_INCLUDE'
 /** 外部 MCP 工具描述文件路径（主进程写 scratch 文件 → 本 env 指路）：
  *  子进程需要这些元数据进暴露面（tools/list），但外部连接池在主进程——故只注描述、
  *  执行一律代行。走文件而非 env 内联：工具 schema 可观，Windows 环境块 32KB 上限是硬悬崖。

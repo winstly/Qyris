@@ -26,6 +26,7 @@
     "smoke:memory": "esbuild scripts/smoke-memory.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --external:better-sqlite3 --external:sqlite-vec --external:@huggingface/transformers --external:onnxruntime-web --outfile=node_modules/.cache/smoke-memory.cjs && node node_modules/.cache/smoke-memory.cjs",
     "smoke:memory-agent": "esbuild scripts/smoke-memory-agent.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --external:better-sqlite3 --external:sqlite-vec --external:@huggingface/transformers --external:onnxruntime-web --outfile=node_modules/.cache/smoke-memory-agent.cjs && node node_modules/.cache/smoke-memory-agent.cjs",
     "smoke:pet": "esbuild scripts/smoke-pet-panel.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --outfile=node_modules/.cache/smoke-pet-panel.cjs && node node_modules/.cache/smoke-pet-panel.cjs",
+    "bench:mem-scoring": "esbuild scripts/bench-memory-scoring.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --external:better-sqlite3 --external:sqlite-vec --external:@huggingface/transformers --external:onnxruntime-web --external:sharp --outfile=node_modules/.cache/bench-mem-scoring.cjs && node node_modules/.cache/bench-mem-scoring.cjs",
     "ssh:diagnose": "esbuild scripts/ssh-diagnose.ts --bundle --platform=node --format=cjs --external:electron --external:ssh2 --outfile=node_modules/.cache/ssh-diagnose.cjs && npx electron node_modules/.cache/ssh-diagnose.cjs",
     "ssh:probe": "esbuild scripts/ssh-repro-probe.ts --bundle --platform=node --format=cjs --alias:electron=./scripts/electron-stub.ts --external:ssh2 --outfile=node_modules/.cache/ssh-repro-probe.cjs && node node_modules/.cache/ssh-repro-probe.cjs",
     "dist": "electron-vite build && electron-builder && node scripts/verify-dist.mjs",
@@ -56,6 +57,7 @@
   },
   "dependencies": {
     "@huggingface/transformers": "^4.2.0",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "better-sqlite3": "^13.0.3",

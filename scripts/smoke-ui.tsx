@@ -55,7 +55,8 @@ const memItem: MemoryItem = {
   id: 'm1', projectKey: 'global', sessionId: null, tier: 'long', category: 'preference',
   title: '包管理器用 pnpm', content: '用户要求一律用 pnpm', sourceJson: null,
   importance: 0.7, accessCount: 0, lastAccessedAt: null, status: 'active',
-  supersededBy: null, createdAt: 1, updatedAt: 1,
+  supersededBy: null, origin: 'user_explicit', archivedAt: null, archivedBy: null, archivedReason: null,
+  createdAt: 1, updatedAt: 1,
 }
 
 async function main(): Promise<void> {
@@ -216,6 +217,7 @@ async function main(): Promise<void> {
     domWindow.desktopAPI = {
       memoryList: async () => ({ items: [{ ...memItem, id: 'p1', projectKey: 'proj-hash' }] }),
       memoryStats: async () => ({ total: 1, byTier: { long: 1 }, byCategory: {}, embedReady: true, vecAvailable: true, dbBytes: 0, distillTokens: { input: 0, output: 0 } }),
+      memoryLastTidy: async () => null,
       memoryExtracting: async () => true,
       onMemoryChanged: () => () => {},
       onMemoryExtractState: () => () => {},
@@ -236,6 +238,7 @@ async function main(): Promise<void> {
     domWindow.desktopAPI = {
       memoryList: async () => ({ items: [memItem] }),
       memoryStats: async () => ({ total: 1, byTier: { long: 1 }, byCategory: {}, embedReady: true, vecAvailable: true, dbBytes: 0 }),
+      memoryLastTidy: async () => null,
       memoryExtracting: async () => false,
       onMemoryChanged: () => () => {},
     } as unknown as DesktopAPI

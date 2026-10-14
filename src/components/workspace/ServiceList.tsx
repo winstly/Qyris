@@ -49,11 +49,11 @@ export function ServiceList(p: Props) {
     }
   }
 
-  if (p.serviceRows.length === 0) return null
+  // 空列表不整体返回：「添加服务」必须始终可达——不需要 AI 编译的工程从这里手动定义服务
 
   return (
     <>
-      <div className="slots__count">共 {p.serviceRows.length} 个服务</div>
+      {p.serviceRows.length > 0 && <div className="slots__count">共 {p.serviceRows.length} 个服务</div>}
       <div className="slots" role="list" aria-label="服务列表">
         {p.serviceRows.map((row) => {
           const st = row.slot
