@@ -21,10 +21,17 @@ function onRollupWarn(warning: RollupLog, warn: (w: RollupLog) => void): void {
 // 业务源码仍在 src/ 顶层，不受影响。
 export default defineConfig({
   main: {
-    // SDK 编译期 bundle 进产物（rollup 直接吃 dist/esm，绕开运行时 exports map）；
-    // 不进 files 白名单的依赖树（express/hono 等 server 侧依赖）也不会随包。
-    // 其余 dependencies（native 运行时）照旧 external，由 electron-builder files 收集。
-    plugins: [externalizeDepsPlugin({ exclude: ['@modelcontextprotocol/sdk'] })],
+    // externalizeDepsPlugin 默认把 package.json dependencies 全部 external（运行时 require），
+    // 只有 exclude 名单才编译期 bundle。这份名单是「mcp-server 外部进程能活着」的生死线：
+    // mcp-server 由 claude CLI 以 ELECTRON_RUN_AS_NODE 在 asar 之外 spawn，读不到 asar 里的
+    // node_modules——凡共享 chunk（runner-*.js）顶层可达的纯 JS 依赖必须 bundle 进产物：
+    //   · @modelcontextprotocol/sdk —— MCP 客户端（rollup 直吃 dist/esm，绕开运行时 exports map）
+    //   · ssh2 —— SSH 互联（打包实测：external 时 ssh2 落在 asar.unpacked 而其传递依赖 asn1 不随包，
+    //     mcp-server 加载即 MODULE_NOT_FOUND，claude --strict-mcp-config 静默放弃 MCP → 模型零工具）
+    //   · ajv / ajv-formats —— MCP SDK 校验代码的运行时 require，同样不随包
+    // native 三件套（better-sqlite3 / node-pty / sqlite-vec）照旧 external，由 electron-builder
+    // files + asarUnpack 收集；electron / transformers / onnxruntime-web 为懒加载守卫依赖，不在此列。
+    plugins: [externalizeDepsPlugin({ exclude: ['@modelcontextprotocol/sdk', 'ssh2', 'ajv', 'ajv-formats'] })],
     build: {
       lib: {
         // 双入口：index = 主进程；mcp-server = MCP stdio server 独立可执行（由 claude CLI 按

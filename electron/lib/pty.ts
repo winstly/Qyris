@@ -9,6 +9,7 @@
  */
 import * as pty from 'node-pty'
 import { emitToWindow } from './emitter'
+import { buildChildEnv } from './proc-env'
 
 const FLUSH_INTERVAL_MS = 5
 const KILL_THROTTLE_MS = 250
@@ -44,7 +45,9 @@ export function createPty(termId: string, winId: number, opts: {
     cols: Math.max(20, opts.cols || 80),
     rows: Math.max(5, opts.rows || 24),
     cwd: opts.cwd || process.env.HOME || process.env.USERPROFILE || '/',
-    env: process.env as Record<string, string>,
+    // env 走 buildChildEnv：打包 GUI 启动 PATH 极简（Finder 启动缺 homebrew/nvm 目录，
+    // 终端里 claude/git/node 找不到），且 QYRIS_SSH_CRED_/QYRIS_HOST_TOOL_ 键不可经 env 泄进终端
+    env: buildChildEnv() as Record<string, string>,
   })
   const entry: PtyEntry = { term, winId, buffer: '', flushTimer: null, lastKill: 0 }
   registry.set(termId, entry)

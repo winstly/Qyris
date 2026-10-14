@@ -6,6 +6,7 @@ import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { errorMessage } from './util'
+import { buildChildEnv } from './proc-env'
 
 /** 在 parentDir 下创建一个空的项目目录并返回其绝对路径 */
 export async function createEmptyProject(parentDir: string, name: string): Promise<string> {
@@ -137,7 +138,7 @@ function defaultBranchFirst(a: string, b: string): number {
 /** 执行 git 命令（不走过期 shell），超时强杀；exit≠0 抛错并附 stderr 摘要 */
 function runGit(args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs })
+    const proc = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, env: buildChildEnv() })
     let stdout = ''
     let stderr = ''
     proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
@@ -178,7 +179,7 @@ function runGitStream(
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   const noDataTimeoutMs = opts.noDataTimeoutMs ?? 90_000
   return new Promise((resolve, reject) => {
-    const proc = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    const proc = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'], env: buildChildEnv() })
     opts.onSpawn?.(proc)
     let stdout = ''
     let stderr = ''

@@ -26,6 +26,7 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { cancelRunOnce, registerOnceProc } from '../../proc'
 import { buildCmdLine, splitCliCommand } from '../../cmd-quote'
+import { buildChildEnv } from '../../proc-env'
 import { errorMessage } from '../../util'
 import { MCP_SERVER_NAME, parseMcpToolName } from '../../mcp/server'
 import {
@@ -55,7 +56,9 @@ export interface CliRunOptions {
   /** CLI 命令，允许「可执行 + 前置参数」形态（如 `npx -y xxx`）；缺省用方言默认名 */
   cliCommand?: string
   timeoutMs?: number
-  /** 子进程工作目录；缺省 homedir（补全通道不默认扎进工程目录） */
+  /** 子进程工作目录；缺省 scratchDir（每轮临时目录）。CLI 家族都在 cwd 读工程态：
+   *  claude 读 CLAUDE.md/项目记忆，codex/opencode 读 AGENTS.md 并按 cwd 落会话——
+   *  扎进真实目录就会跟终端里同工程的另一个 CLI 串上下文，继承父进程 cwd 则是隐性随机（dev 从哪起就扎哪） */
   cwd?: string | null
   /** agentic 循环轮数上限（claude 方言 = --max-turns）；缺省 DEFAULT_CLI_MAX_TURNS，设置项 aiMaxTurns 可调 */
   maxTurns?: number
@@ -328,7 +331,10 @@ async function* runCliComplete(
   const args = dialect.buildArgs({ jsonSchema, jsonSchemaPath, lastMessagePath, mcpConfigPath, maxTurns: cfg.maxTurns ?? DEFAULT_CLI_MAX_TURNS })
 
   try {
-    let cwd = cfg.cwd ?? undefined
+    // 缺省用本轮 scratchDir：继承父进程 cwd 是隐性的——dev 从某工程根启动 Electron，
+    // claude 就扎进那个工程的 CLI 共享态（串味真凶之一）；scratchDir 每轮全新、用完即删，
+    // CLI 家族的 cwd 态加载天然隔离
+    let cwd = cfg.cwd ?? scratchDir
     if (cwd && !existsSync(cwd)) cwd = homedir() // cwd 失效会 spawn ENOENT
     try {
       child = spawnCli(command, args, cwd)
@@ -465,9 +471,12 @@ async function* runCliComplete(
 
 /** 统一 CLI 子进程 spawn。Windows 走 shell:true 单串传参（cmd.exe /d /s /c "<整串>"，
  *  /s 只剥最外层引号，带空格的自定义路径不会被逐 token 撕碎）；引号纪律在 cmd-quote.ts（全仓唯一口径）。
- *  Unix 直启 argv，detached 保证 killTree 能按进程组树杀。 */
+ *  Unix 直启 argv，detached 保证 killTree 能按进程组树杀。
+ *  env 显式走 buildChildEnv：打包 GUI 启动的进程 PATH 极简（找不到 claude/git），
+ *  且凭据/代行通道键出口即剥。 */
 function spawnCli(command: string, args: string[], cwd?: string): ChildProcess {
   const stdio: ('pipe')[] = ['pipe', 'pipe', 'pipe']
+  const env = buildChildEnv()
   if (process.platform === 'win32') {
     const cmdLine = buildCmdLine(command, args)
     if (cmdLine.length > WIN_CMDLINE_LIMIT) {
@@ -475,10 +484,10 @@ function spawnCli(command: string, args: string[], cwd?: string): ChildProcess {
         `CLI 命令行过长（${cmdLine.length} 字符，Windows 上限 8191）：大体积内容必须走 stdin 或临时文件，不能进命令行`,
       )
     }
-    return spawn(cmdLine, { cwd, stdio, shell: true, windowsHide: true })
+    return spawn(cmdLine, { cwd, stdio, shell: true, windowsHide: true, env })
   }
   const [exe, ...prefix] = splitCliCommand(command)
-  return spawn(exe, [...prefix, ...args], { cwd, stdio, windowsHide: true, detached: true })
+  return spawn(exe, [...prefix, ...args], { cwd, stdio, windowsHide: true, detached: true, env })
 }
 
 /** 退出码非 0 的诊断拼装。真因常在 stdout 的结构化字段（subtype/terminal_reason/errors）里，
@@ -539,7 +548,8 @@ function resolveMcpServerScript(): string {
  * claude `--mcp-config` 的文件内容（形状：mcpServers 表 + stdio 条目）。
  * spawn 主体 = 本应用可执行 + ELECTRON_RUN_AS_NODE=1：不依赖用户 PATH 里有 node
  * （claude 可以是原生二进制安装，node 未必在），Electron 发行版自带完整 Node 运行时。
- * env 继承全量再注入开关：MCP server 里执行的工具（run_command / git / npm）要靠原 PATH 找可执行。
+ * env 用 buildChildEnv 重建（打包 GUI 启动 PATH 极简，MCP server 里执行的工具要靠重建后的
+ * PATH 找可执行；凭据/代行通道键先剥再注入，不把主进程残留漏给子进程）再注入会话开关。
  */
 function buildMcpServerConfig(mcp: ClaudeMcpChannel, externalToolsFile: string | null = null): object {
   const credEnv = Object.fromEntries(
@@ -563,7 +573,7 @@ function buildMcpServerConfig(mcp: ClaudeMcpChannel, externalToolsFile: string |
         type: 'stdio',
         command: process.execPath,
         args: [resolveMcpServerScript(), '--permission', mcp.permission, '--project-root', mcp.projectRoot ?? '', ...(mcp.origin ? ['--origin', mcp.origin] : [])],
-        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ...credEnv, ...proxyEnv, ...excludeEnv, ...includeEnv, ...externalEnv },
+        env: { ...buildChildEnv(), ELECTRON_RUN_AS_NODE: '1', ...credEnv, ...proxyEnv, ...excludeEnv, ...includeEnv, ...externalEnv },
       },
     },
   }

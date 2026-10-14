@@ -59,9 +59,34 @@ export class FileLogger extends AbstractMessageLogger {
 /** 主进程全局日志单例：BufferLogger 先缓冲，app ready 后接入控制台+文件双写 */
 export const mainLog = new BufferLogger()
 
+/** attachFileLogging 之前的崩溃兜底：index.ts 的 imports 链（node-pty / db worker 等重模块）
+ *  求值发生在 whenReady 挂文件日志之前，这段窗口里的异常只进 BufferLogger 内存——进程一死
+ *  证据全灭（打包版「零日志悬案」的观测缺口）。模块加载瞬间就登记：未挂载时把崩溃行直接
+ *  appendSync 落盘；reportUncaught（index.ts 注册）不在场时补走默认崩溃（stderr + 非 0 退出），
+ *  在场则处置归它（记日志不崩主进程）；已挂载则让位给 reportUncaught。 */
+let fileLoggingAttached = false
+process.on('uncaughtException', (e) => {
+  if (fileLoggingAttached) return
+  try {
+    mkdirSync(logsDir(), { recursive: true })
+    appendFileSync(
+      logFileFor(new Date()),
+      `[${new Date().toISOString()}] [error] [pre-attach-crash] ${format(e)}\n`,
+      'utf8',
+    )
+  } catch { /* 磁盘都不可写时无能为力 */ }
+  // 挂上 handler 后 Node 默认崩溃即被抑制（import 链异常会退化成 exit 0 静默退出）；
+  // 本 handler 是唯一监听 = reportUncaught 尚未注册的窗口，记完盘手动恢复崩溃语义
+  if (process.listenerCount('uncaughtException') === 1) {
+    console.error(format(e))
+    process.exit(1)
+  }
+})
+
 /** app ready 后调用（app.getPath 可用之前 FileLogger 无法定位目录） */
 export function attachFileLogging(): void {
   pruneOldLogs()
+  fileLoggingAttached = true
   mainLog.setLogger(new MultiplexLogger([new ConsoleLogger(), new FileLogger()]))
 }
 

@@ -90,7 +90,12 @@ export async function resolveChatProvider(opts: ResolveChatProviderOptions): Pro
       maxTurns,
       // 旧链路 CLI_TIMEOUT_MS=30 分钟：单轮补全沿用同一水位，长思考不被 10 分钟缺省掐掉
       timeoutMs: 30 * 60_000,
-      cwd: projectRoot,
+      // claude 不再扎进工程目录：cwd 下的 CLAUDE.md / .claude/ / 项目级记忆是 CLI 共享态，
+      // 同工程终端里同时跑着另一个 claude 时，Qyris 的实例会捡到对方写入的上下文/指令 → 对话串味
+      // （实测：工程根下跑同款 -p 命令，~/.claude/projects/<工程>/memory 的记忆索引被整份注入）。
+      // 工具面不依赖 claude 进程 cwd：MCP server 由 --project-root 透传工程根（buildMcpServerConfig）。
+      // undefined = 引擎缺省 scratchDir（见 claude-cli.ts runCliComplete），每轮一个干净中性目录
+      cwd: undefined,
       ...(wantTools
         ? {
             mcp: {
