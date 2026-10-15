@@ -76,7 +76,12 @@ function resetDistillTokens(): void {
   }).catch(() => {})
 }
 
-/** P2 mem agent 写入口（渲染层六通道不含 create，暂不注册 IPC） */
+/** 手动重置蒸馏 token 计数（面板状态条入口）：只清统计数字，不动任何记忆数据 */
+export async function memoryResetDistillTokens(): Promise<void> {
+  resetDistillTokens()
+}
+
+/** P2 mem agent 写入口（memory_create IPC 也复用此形状，但走 createOrFoldAtomic 折叠入口） */
 interface MemoryCreateInput {
   /** 工程条目按 projectRoot 归键；global=true 则落 'global' 跨工程 */
   projectRoot?: string
@@ -109,6 +114,19 @@ function assertNotDegraded(oldContent: string, newContent: string): void {
   if (oldC && newC && oldC.includes(newC) && newC.length < oldC.length * 0.5) {
     throw new Error('疑似信息退化（新正文只是旧正文的片段）：请保留完整信息后再更新')
   }
+}
+
+/** SqliteError → 人话：原始报错（表/列名、约束名）进 console 留诊断，抛给渲染层的
+ *  是可读文案。conflictAdvice 覆盖唯一索引冲突的处置建议（不同动作的可行出路不同）。 */
+function rethrowFriendly(e: unknown, action: string, conflictAdvice = '请换个标题，或直接编辑那条记忆'): never {
+  const raw = e instanceof Error ? e.message : String(e)
+  console.warn(`[memory] ${action} 原始错误：${raw}`)
+  if (raw.includes('UNIQUE constraint failed') && raw.includes('mem_items')) {
+    // idx_mem_active_title 部分唯一索引（project_key+category+title WHERE active）
+    throw new Error(`${action}：同分类同标题的活跃记忆已存在，${conflictAdvice}`)
+  }
+  // 其余错误（库锁/磁盘/约束名等）不外泄原文，统一可读文案（action 已含「失败」字样）
+  throw new Error(`${action}：请稍后重试（详情已记入日志）`)
 }
 
 // ---------- 嵌入模型指纹（meta 表 embed_model_fingerprint，不符停向量路；全量重嵌 P3） ----------
@@ -331,16 +349,21 @@ export async function memoryUpdate(id: string, patch: MemoryPatch, opts?: { by?:
   // 文本变更 → 热钟归零（内容刷新即一次「被用」，但不虚增 access_count）；纯元数据变更不动热钟
   const nowTs = Date.now()
   const heatTs = textChanged ? nowTs : null
-  if (vector) {
-    await db.transaction([
-      { sql: 'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, last_accessed_at = COALESCE(?, last_accessed_at), updated_at = ? WHERE id = ?', params: [nextTitle, nextContent, nextCategory, nextImportance, heatTs, nowTs, id] },
-      { sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [id] },
-      { sql: 'INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)', params: [id, vector] },
-    ])
-  } else {
-    await db.prepare(
-      'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, last_accessed_at = COALESCE(?, last_accessed_at), updated_at = ? WHERE id = ?',
-    ).run(nextTitle, nextContent, nextCategory, nextImportance, heatTs, nowTs, id)
+  // 改标题/分类撞同题活跃条目（idx_mem_active_title）→ 人话报错（此前裸 SqliteError 直上 UI）
+  try {
+    if (vector) {
+      await db.transaction([
+        { sql: 'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, last_accessed_at = COALESCE(?, last_accessed_at), updated_at = ? WHERE id = ?', params: [nextTitle, nextContent, nextCategory, nextImportance, heatTs, nowTs, id] },
+        { sql: 'DELETE FROM mem_vec WHERE item_id = ?', params: [id] },
+        { sql: 'INSERT INTO mem_vec (item_id, embedding) VALUES (?, ?)', params: [id, vector] },
+      ])
+    } else {
+      await db.prepare(
+        'UPDATE mem_items SET title = ?, content = ?, category = ?, importance = ?, last_accessed_at = COALESCE(?, last_accessed_at), updated_at = ? WHERE id = ?',
+      ).run(nextTitle, nextContent, nextCategory, nextImportance, heatTs, nowTs, id)
+    }
+  } catch (e) {
+    rethrowFriendly(e, '保存失败')
   }
   emitMemoryChanged([row.project_key])
   const updated = await getRow(db, id)
@@ -375,9 +398,14 @@ export async function memoryMoveScope(
   const nextKey = toUser ? 'global' : projectKey(String(projectRoot))
   const nextTier = toUser ? 'long' : row.tier
   const nextSession = toUser ? null : row.session_id
-  await db.prepare(
-    'UPDATE mem_items SET project_key = ?, tier = ?, session_id = ?, updated_at = ? WHERE id = ?',
-  ).run(nextKey, nextTier, nextSession, Date.now(), id)
+  // 目标范围已有同题活跃条目（idx_mem_active_title）→ 人话报错
+  try {
+    await db.prepare(
+      'UPDATE mem_items SET project_key = ?, tier = ?, session_id = ?, updated_at = ? WHERE id = ?',
+    ).run(nextKey, nextTier, nextSession, Date.now(), id)
+  } catch (e) {
+    rethrowFriendly(e, '转换失败')
+  }
   emitMemoryChanged([row.project_key, nextKey])
   const updated = await getRow(db, id)
   return rowToItem(updated ?? row)
@@ -413,18 +441,20 @@ export async function memoryClear(scope: 'project' | 'global' | 'all', projectRo
   )
 }
 
-/** 统计：面板概览用（active/archived 分账——「共 N 条」与列表对不上是信任杀手） */
-export async function memoryStats(): Promise<MemoryStats> {
+/** 统计：面板概览用，按范围出账（projectRoot=工程档；null=global 档），与列表同键过滤。
+ *  active/archived 分账同口径；dbBytes 恒为整库磁盘占用（盘是共享的）；蒸馏 token 是全局累计。 */
+export async function memoryStats(projectRoot?: string | null): Promise<MemoryStats> {
   const db = await getDb()
-  const total = ((await db.prepare('SELECT COUNT(*) AS n FROM mem_items').get()) as { n: number }).n
-  const activeCount = Number(((await db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE status = 'active'").get()) as { n: number }).n)
-  const archivedCount = Number(((await db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE status = 'archived'").get()) as { n: number }).n)
+  const key = projectRoot ? projectKey(projectRoot) : 'global'
+  const total = ((await db.prepare('SELECT COUNT(*) AS n FROM mem_items WHERE project_key = ?').get(key)) as { n: number }).n
+  const activeCount = Number(((await db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE project_key = ? AND status = 'active'").get(key)) as { n: number }).n)
+  const archivedCount = Number(((await db.prepare("SELECT COUNT(*) AS n FROM mem_items WHERE project_key = ? AND status = 'archived'").get(key)) as { n: number }).n)
   const byTier: Record<string, number> = {}
-  for (const r of await db.prepare('SELECT tier AS k, COUNT(*) AS n FROM mem_items GROUP BY tier').all() as { k: string; n: number }[]) {
+  for (const r of await db.prepare('SELECT tier AS k, COUNT(*) AS n FROM mem_items WHERE project_key = ? GROUP BY tier').all(key) as { k: string; n: number }[]) {
     byTier[r.k] = r.n
   }
   const byCategory: Record<string, number> = {}
-  for (const r of await db.prepare('SELECT category AS k, COUNT(*) AS n FROM mem_items GROUP BY category').all() as { k: string; n: number }[]) {
+  for (const r of await db.prepare('SELECT category AS k, COUNT(*) AS n FROM mem_items WHERE project_key = ? GROUP BY category').all(key) as { k: string; n: number }[]) {
     byCategory[r.k] = r.n
   }
   let dbBytes = 0
@@ -545,16 +575,20 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
       createdAt: now,
       updatedAt: now,
     }
-    await db.transaction([
-      {
-        sql: "UPDATE mem_items SET status = 'archived', superseded_by = ?, archived_at = ?, archived_by = ?, archived_reason = '被新版本取代', updated_at = ? WHERE id = ? AND status = 'active'",
-        params: [item.id, now, archivedByOf(origin), now, dup.id],
-      },
-      {
-        sql: `INSERT INTO mem_items (id, project_key, session_id, tier, category, title, content, source_json, importance, access_count, last_accessed_at, status, superseded_by, origin, archived_at, archived_by, archived_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, NULL, NULL, NULL, ?, ?)`,
-        params: [item.id, item.projectKey, item.sessionId, item.tier, item.category, item.title, item.content, item.sourceJson, item.importance, item.origin, item.createdAt, item.updatedAt],
-      },
-    ])
+    try {
+      await db.transaction([
+        {
+          sql: "UPDATE mem_items SET status = 'archived', superseded_by = ?, archived_at = ?, archived_by = ?, archived_reason = '被新版本取代', updated_at = ? WHERE id = ? AND status = 'active'",
+          params: [item.id, now, archivedByOf(origin), now, dup.id],
+        },
+        {
+          sql: `INSERT INTO mem_items (id, project_key, session_id, tier, category, title, content, source_json, importance, access_count, last_accessed_at, status, superseded_by, origin, archived_at, archived_by, archived_reason, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'active', NULL, ?, NULL, NULL, NULL, ?, ?)`,
+          params: [item.id, item.projectKey, item.sessionId, item.tier, item.category, item.title, item.content, item.sourceJson, item.importance, item.origin, item.createdAt, item.updatedAt],
+        },
+      ])
+    } catch (e) {
+      rethrowFriendly(e, '新增失败')
+    }
     await writeVecGuarded(db, item.id, await embedOne(db, item.title, item.content))
     emitMemoryChanged([key])
     return { folded: true, id: item.id }
@@ -565,9 +599,14 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
     // SELECT→UPDATE 间隙的竞态）；caller 是显式时契约升级到目标行（保护传递）；内容刷新 → 热钟归零
     assertNotDegraded(dup.content, input.content)
     const upgradedOrigin = origin === 'user_explicit' ? 'user_explicit' : toOrigin(dup.origin)
-    const r = await db.prepare(
-      "UPDATE mem_items SET content = ?, importance = MAX(importance, ?), origin = ?, last_accessed_at = ?, updated_at = ? WHERE id = ? AND status = 'active'",
-    ).run(input.content, importance, upgradedOrigin, now, now, dup.id)
+    let r
+    try {
+      r = await db.prepare(
+        "UPDATE mem_items SET content = ?, importance = MAX(importance, ?), origin = ?, last_accessed_at = ?, updated_at = ? WHERE id = ? AND status = 'active'",
+      ).run(input.content, importance, upgradedOrigin, now, now, dup.id)
+    } catch (e) {
+      rethrowFriendly(e, '新增失败')
+    }
     if (Number(r.changes) > 0) {
       await writeVecGuarded(db, dup.id, await embedOne(db, input.title, input.content))
       emitMemoryChanged([key])
@@ -596,14 +635,19 @@ export async function createOrFoldAtomic(input: MemoryCreateInput): Promise<{ fo
     createdAt: now,
     updatedAt: now,
   }
-  await insertItemTx(db, item)
+  try {
+    await insertItemTx(db, item)
+  } catch (e) {
+    rethrowFriendly(e, '新增失败')
+  }
   // 事务外：嵌入 + 向量回写（存在性检查防孤儿）
   await writeVecGuarded(db, item.id, await embedOne(db, input.title, input.content))
   emitMemoryChanged([key])
   return { folded: false, id: item.id }
 }
 
-/** 新建（无折叠语义的直建入口，agent create 走 createOrFoldAtomic）：
+/** 新建（无折叠语义的直建入口，agent create 走 createOrFoldAtomic；**不暴露给渲染层 IPC**——
+ *  同 (工程,分类,标题) 已有活跃条目时直建会撞 idx_mem_active_title 唯一索引，UI 通道必须走折叠）：
  *  同步事务插入 → 事务外 embed → 向量回写带存在性检查（embed 期间被删则不留孤儿向量）。
  *  向量为 best-effort（embedder 未就绪/失败时仅落文本条目，FTS 可检索，不丢数据）。 */
 export async function memoryCreate(input: MemoryCreateInput): Promise<MemoryItem> {
@@ -743,7 +787,8 @@ export async function memoryUnarchive(id: string): Promise<MemoryItem> {
          last_accessed_at = ?, updated_at = ? WHERE id = ?`,
     ).run(now, now, id)
   } catch (e) {
-    throw new Error(`恢复失败（同题已有活跃条目，请先处理重复项）：${String(e)}`)
+    // 恢复动作改不了本条标题，出路是先处理那条同题活跃条目
+    rethrowFriendly(e, '恢复失败', '请先处理那条活跃记忆（改标题或删除）再恢复')
   }
   emitMemoryChanged([row.project_key])
   return rowToItem({ ...row, status: 'active', archived_at: null, archived_by: null, archived_reason: null, last_accessed_at: now, updated_at: now })
@@ -973,21 +1018,30 @@ export async function memoryDecayAudit(): Promise<{ ts: number; archivedIds: str
 }
 
 // ---------- 「上次整理」快照（面板摘要条数据源；蒸馏完成时落，读侧按 ts 判新旧） ----------
+// 按工程分键（mem_last_tidy:<projectKey>）：蒸馏是 per-project 动作，快照串项目=假数据
+//（A 工程刚整理完，B 工程面板挂上 A 的账）。null = global 档。
 
 export type LastTidySnapshot = MemoryLastTidy
 
-export async function saveLastTidy(s: LastTidySnapshot): Promise<void> {
+function tidyMetaKey(projectRoot?: string | null): string {
+  return `mem_last_tidy:${projectRoot ? projectKey(projectRoot) : 'global'}`
+}
+
+export async function saveLastTidy(projectRoot: string | null, s: LastTidySnapshot): Promise<void> {
   try {
     const db = await getDb()
-    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run('mem_last_tidy', JSON.stringify(s))
+    await db.prepare('INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)').run(tidyMetaKey(projectRoot), JSON.stringify(s))
   } catch { /* 摘要条是辅助面，失败不阻断 */ }
 }
 
-export async function lastTidy(): Promise<LastTidySnapshot | null> {
+export async function lastTidy(projectRoot?: string | null): Promise<LastTidySnapshot | null> {
   try {
     const db = await getDb()
-    const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get('mem_last_tidy') as { value: string } | undefined
-    return row?.value ? (JSON.parse(row.value) as LastTidySnapshot) : null
+    const row = await db.prepare('SELECT value FROM meta WHERE key = ?').get(tidyMetaKey(projectRoot)) as { value: string } | undefined
+    if (row?.value) return JSON.parse(row.value) as LastTidySnapshot
+    // 分键前的旧档（单一 mem_last_tidy）：读不到新键时兜底，避免升级后摘要条空窗到下次蒸馏
+    const legacy = await db.prepare('SELECT value FROM meta WHERE key = ?').get('mem_last_tidy') as { value: string } | undefined
+    return legacy?.value ? (JSON.parse(legacy.value) as LastTidySnapshot) : null
   } catch {
     return null
   }

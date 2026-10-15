@@ -59,7 +59,10 @@ interface MemoryState {
   moveScope: (id: string, target: 'project' | 'user', projectRoot: string | null) => Promise<void>
   /** 清空（危险操作，confirm 由调用方负责），完成后重载当前范围 */
   clear: (scope: 'project' | 'global' | 'all', projectRoot: string | null) => Promise<void>
-  refreshStats: () => Promise<void>
+  /** 手动新增（面板「新增」入口；origin 主进程钉死 user_explicit）。列表刷新由调用方负责。
+   *  folded=true = 同题活跃条目已存在，内容被折叠/取代（列表条数不变） */
+  create: (input: { projectRoot?: string | null; global?: boolean; tier: 'long' | 'short'; category: string; title: string; content: string; importance?: number }) => Promise<{ folded: boolean; id: string }>
+  refreshStats: (projectRoot?: string | null) => Promise<void>
 }
 
 /** 请求序号：慢请求返回时若已切换工程/发起新请求，丢弃过期结果（防止串工程） */
@@ -178,9 +181,18 @@ export const useMemoryStore = create<MemoryState>()((set, get) => ({
     await get().load(projectRoot)
   },
 
-  refreshStats: async () => {
+  create: async (input) => {
+    const r = await api.memoryCreate(input)
+    // 统计与本列表范围一致；列表刷新由调用方走 load/search（口径可能带搜索词）
+    void get().refreshStats(input.global ? null : input.projectRoot ?? null)
+    return r
+  },
+
+  refreshStats: async (projectRoot) => {
     try {
-      set({ stats: await api.memoryStats() })
+      // 缺省跟当前列表范围走（update/remove 等就地改写后调用不带参）
+      const p = projectRoot !== undefined ? projectRoot : get().scopeRoot
+      set({ stats: await api.memoryStats(p) })
     } catch { /* 记忆模块未就绪：状态条保持空值占位 */ }
   },
 

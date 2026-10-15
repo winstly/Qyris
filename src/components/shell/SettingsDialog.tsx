@@ -12,6 +12,7 @@ import { useMemoryStore } from '@/store/useMemoryStore'
 import { IconClose, IconCheck, IconCopy } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
 import { TabStrip } from '@/components/common/TabStrip'
+import { toast } from '@/components/common/Toast'
 
 export function SettingsDialog() {
   const trapRef = useFocusTrap<HTMLDivElement>(true)
@@ -19,7 +20,6 @@ export function SettingsDialog() {
   const setOpen = useAppStore((s) => s.setSettingsOpen)
   const setModelCfgOpen = useAppStore((s) => s.setModelCfgOpen)
   const showConfirm = useAppStore((s) => s.showConfirm)
-  const showAlert = useAppStore((s) => s.showAlert)
 
   const [tab, setTab] = useState<'pet' | 'system'>('pet')
   const [dataDir, setDataDir] = useState<string | null>(null)
@@ -69,12 +69,12 @@ export function SettingsDialog() {
       if (r.ok) {
         setDataDir(target)
         void useMemoryStore.getState().refreshStats()
-        void showAlert('迁移完成', '应用数据已迁移到新位置。')
+        toast.ok('迁移完成', '应用数据已迁移到新位置。')
       } else {
-        void showAlert('迁移失败', r.error ?? '未知错误')
+        toast.err('迁移失败', r.error ?? '未知错误')
       }
     } catch (e) {
-      void showAlert('迁移失败', String(e))
+      toast.err('迁移失败', String(e))
     } finally {
       setDirBusy(null)
     }

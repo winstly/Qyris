@@ -13,7 +13,18 @@ import { StatusBar } from '@/components/shell/StatusBar'
 import { SettingsDialog } from '@/components/shell/SettingsDialog'
 import { ClosePromptDialog } from '@/components/shell/ClosePromptDialog'
 import { Dialogs } from '@/components/common/Dialogs'
+import { ToastHost } from '@/components/common/Toast'
 import { IconAlert } from '@/components/common/icons'
+
+/** 分割比例钳制：工作区 ≥500px、对话栏 ≥300px（分割线 5px 计入对话侧）。
+ *  两头冲突（窗口太小放不下 500+300）时对话侧赢——工作区工具栏被压烂比对话窄更伤，
+ *  但对话栏自身还有 CSS min-width:300 地板兜底，不会撑爆 body。total≤0（未布局/隐藏）原样返回。 */
+function clampSplitRatio(r: number, total: number, sidebarW: number): number {
+  if (total <= 0) return r
+  const next = Math.max(500 / total, r)
+  return Math.min(1 - (sidebarW + 5 + 300) / total, next)
+}
+
 export default function App() {
   const booted = useAppStore((s) => s.booted)
   const splitRatio = useAppStore((s) => s.splitRatio)
@@ -58,11 +69,8 @@ export default function App() {
     const total = bodyRect.width
     const move = (clientX: number) => {
       // flexBasis 百分比以 body 全宽为基准：工作区宽 = clientX - 工作区左缘
-      let r = (clientX - wsLeft) / total
-      r = Math.max(500 / total, r)
-      // 对话栏 ≥300px + 分割线 5px：工作区上限 = 1 - (侧边栏宽 + 分割线 + 300) / 全宽
-      r = Math.min(1 - (sidebarW + 5 + 300) / total, r)
-      setSplitRatio(r)
+      const r = (clientX - wsLeft) / total
+      setSplitRatio(clampSplitRatio(r, total, sidebarW))
     }
     const onMove = (ev: PointerEvent) => move(ev.clientX)
     const onUp = () => {
@@ -98,13 +106,30 @@ export default function App() {
     const bodyRect = body.getBoundingClientRect()
     const wsLeft = ws.getBoundingClientRect().left
     const sidebarW = wsLeft - bodyRect.left
-    const total = bodyRect.width
-    let r = splitRatio + step
-    r = Math.max(500 / total, r)
-    r = Math.min(1 - (sidebarW + 5 + 300) / total, r)
-    setSplitRatio(r)
+    setSplitRatio(clampSplitRatio(splitRatio + step, bodyRect.width, sidebarW))
     e.preventDefault()
   }
+
+  // 窗口缩放 / 侧栏开合后重钳比例：拖拽期的 min 只管当下，之后 body 宽度一变
+  // （缩窗口、开侧栏），存的百分比会把工作区压到工具栏按钮被裁掉——边界事件
+  // 都按最新几何重新钳一遍（工作区 ≥500px、对话栏 ≥300px，两头冲突时对话栏赢）
+  const memorySidebarOpen = useAppStore((s) => s.memorySidebarOpen)
+  useEffect(() => {
+    const reclamp = () => {
+      const body = bodyRef.current
+      const ws = workspaceRef.current
+      if (!body || !ws) return
+      const bodyRect = body.getBoundingClientRect()
+      const wsLeft = ws.getBoundingClientRect().left
+      const sidebarW = wsLeft - bodyRect.left
+      const cur = useAppStore.getState().splitRatio
+      const next = clampSplitRatio(cur, bodyRect.width, sidebarW)
+      if (Math.abs(next - cur) > 0.0005) setSplitRatio(next)
+    }
+    reclamp()
+    window.addEventListener('resize', reclamp)
+    return () => window.removeEventListener('resize', reclamp)
+  }, [memorySidebarOpen, setSplitRatio])
 
   return (
     <div className="app">
@@ -166,6 +191,7 @@ export default function App() {
       <SettingsDialog />
       <ClosePromptDialog />
       <Dialogs />
+      <ToastHost />
     </div>
   )
 }

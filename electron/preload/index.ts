@@ -16,6 +16,7 @@ import type { FileContent } from '../lib/fsops'
 import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
 import type {
   AiDeltaPayload, AiReasoningPayload, CliAgentEventPayload, CliToolEventPayload, CliToolResultPayload,
+  CloneProgress, CloneResult,
 } from '../../shared/ipc-types'
 import type { DesktopAPI } from '../../shared/desktop-api'
 
@@ -100,8 +101,16 @@ const desktopAPI: DesktopAPI = {
     ipcRenderer.invoke('memory_move_scope', { id, target, projectRoot: projectRoot ?? null }) as Promise<MemoryItem>,
   memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
     ipcRenderer.invoke('memory_clear', { scope, projectRoot: projectRoot ?? null }) as Promise<void>,
-  memoryStats: () => ipcRenderer.invoke('memory_stats') as Promise<MemoryStats>,
-  memoryLastTidy: () => ipcRenderer.invoke('memory_last_tidy') as Promise<{ ts: number; saved: number; updated: number; archived: number } | null>,
+  memoryStats: (projectRoot?: string | null) =>
+    ipcRenderer.invoke('memory_stats', { projectRoot: projectRoot ?? null }) as Promise<MemoryStats>,
+  memoryLastTidy: (projectRoot?: string | null) =>
+    ipcRenderer.invoke('memory_last_tidy', { projectRoot: projectRoot ?? null }) as Promise<{ ts: number; saved: number; updated: number; archived: number } | null>,
+  /** 手动新增记忆（面板「新增」入口）：主进程把 origin 钉死 user_explicit（亲口说的，衰减打不穿）；
+   *  同 (工程,分类,标题) 已有活跃条目时折叠/取代而非直建（folded=true = 合并进了既有条目） */
+  memoryCreate: (input: { projectRoot?: string | null; global?: boolean; tier?: 'long' | 'short'; category: string; title: string; content: string; importance?: number }) =>
+    ipcRenderer.invoke('memory_create', input) as Promise<{ folded: boolean; id: string }>,
+  /** 蒸馏 token 计数重置（只清统计数字，不动记忆数据） */
+  memoryResetDistillTokens: () => ipcRenderer.invoke('memory_reset_distill') as Promise<void>,
   // mem agent（P2 记忆蒸馏管线；载荷类型与 electron/lib/memory/agent + service 对齐）
   memorySessionContext: (projectRoot: string, sessionId: string) =>
     ipcRenderer.invoke('memory_session_context', { projectRoot, sessionId }) as Promise<{ summary: string | null }>,
@@ -194,9 +203,9 @@ const desktopAPI: DesktopAPI = {
 
   // 创建项目 / Git
   createEmptyProject: (parentDir: string, name: string) => ipcRenderer.invoke('create_empty_project', { parentDir, name }) as Promise<string>,
-  cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => ipcRenderer.invoke('clone_repos', { parentDir, repos }) as Promise<string[]>,
+  cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => ipcRenderer.invoke('clone_repos', { parentDir, repos }) as Promise<CloneResult>,
   cloneCancel: () => ipcRenderer.invoke('clone_cancel') as Promise<void>,
-  onCloneProgress: (cb: (p: { index: number; total: number; name: string; stage: string; pct: number | null }) => void): Unsubscribe =>
+  onCloneProgress: (cb: (p: CloneProgress) => void): Unsubscribe =>
     subscribe('clone:progress', cb),
   testRepo: (url: string) =>
     ipcRenderer.invoke('test_repo', { url }) as Promise<{ valid: boolean; branches: string[]; error: string | null }>,

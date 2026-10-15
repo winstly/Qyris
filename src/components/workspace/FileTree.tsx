@@ -11,6 +11,7 @@ import { SnapshotHistoryDialog } from '@/components/workspace/SnapshotHistoryDia
 import { Select } from '@/components/common/Select'
 import { IconChevron, IconFolder, IconFolderOpen, IconFile, IconPlus, IconFolderPlus, IconPencil, IconTrash, IconRefresh, IconSearch, IconClose, IconBranch, IconUndo, IconCopy, IconScissors, IconCheck, IconSend, IconTarget } from '@/components/common/icons'
 import { focusGitCommit } from '@/components/workspace/GitPanel'
+import { toast } from '@/components/common/Toast'
 
 /** 右键「切换/合并分支」对话框的目标目录、仓库信息与动作模式 */
 export interface BranchTarget {
@@ -24,22 +25,21 @@ export interface BranchTarget {
 /** 打开分支切换/合并对话框前的仓库检查（文件树右键与 Git 面板共用）：
  *  检查通过返回 BranchTarget；不是仓库/无可用分支/查询失败弹告警并返回 null。 */
 export async function prepareBranchTarget(dir: string, mode: 'switch' | 'merge'): Promise<BranchTarget | null> {
-  const alert = useAppStore.getState().showAlert
   const label = mode === 'merge' ? '合并分支' : '切换分支'
   try {
     const info = await api.gitRepoInfo(dir)
     if (!info.isRepo) {
-      void alert(label, '该目录不是 Git 仓库（未找到 .git）。')
+      toast.info(label, '该目录不是 Git 仓库（未找到 .git）。')
       return null
     }
     const selectable = info.branches.filter((b) => b !== info.currentBranch)
     if (info.branches.length === 0 || (mode === 'merge' && selectable.length === 0)) {
-      void alert(label, mode === 'merge' ? '该仓库没有可合并的其他本地分支。' : '该仓库没有任何本地分支。')
+      toast.info(label, mode === 'merge' ? '该仓库没有可合并的其他本地分支。' : '该仓库没有任何本地分支。')
       return null
     }
     return { dir, currentBranch: info.currentBranch, branches: info.branches, mode }
   } catch (e) {
-    void alert(label, String(e))
+    toast.err(label + '失败', String(e))
     return null
   }
 }
@@ -99,6 +99,16 @@ export function FileTree() {
     }, 200)
     return () => window.clearTimeout(timer)
   }, [query, rootPath])
+
+  // projectPath 与 rootPath 偶发失同步（跨窗口 project:changed 处理链被异常打断时，
+  // 工程已开但文件树 store 还是空的）：按 useAppStore.projectPath 自愈重载文件树。
+  // 正常打开流程里 setProjectPath 与文件树写入同一同步批次完成，React 批量提交后
+  // rootPath 已就位——此效果只在失同步真的残留时才会动手。
+  const appProjectPath = useAppStore((s) => s.projectPath)
+  useEffect(() => {
+    if (rootPath || !appProjectPath) return
+    void useFileStore.getState().openProject(appProjectPath)
+  }, [rootPath, appProjectPath])
 
   if (!rootPath) {
     return (
@@ -527,7 +537,7 @@ function buildTreeMenuItems(
       await afterFsChange(dirForNew)
       if (!isDir) await useFileStore.getState().openFile(created.path)
     } catch (e) {
-      void useAppStore.getState().showAlert('操作失败', String(e))
+      toast.err('操作失败', String(e))
     }
   }
 
@@ -548,7 +558,7 @@ function buildTreeMenuItems(
       }
       await afterFsChange(parentDir)
     } catch (e) {
-      void useAppStore.getState().showAlert('操作失败', String(e))
+      toast.err('操作失败', String(e))
     }
   }
 
@@ -565,7 +575,7 @@ function buildTreeMenuItems(
       if (target.kind === 'file' && fs.openTabs.includes(target.path)) fs.closeTab(target.path)
       await afterFsChange(parentDir)
     } catch (e) {
-      void useAppStore.getState().showAlert('操作失败', String(e))
+      toast.err('操作失败', String(e))
     }
   }
 
@@ -584,7 +594,7 @@ function buildTreeMenuItems(
     try {
       await useFileStore.getState().restoreSnapshot(target.path)
     } catch (e) {
-      void useAppStore.getState().showAlert('回退失败', String(e))
+      toast.err('回退失败', String(e))
     }
   }
 
@@ -695,7 +705,7 @@ export function BranchSwitchDialog({ target, onClose, onSwitched, onMerge }: {
         else await api.gitMerge(target.dir, branch)
         await refreshTree()
       } catch (e) {
-        void useAppStore.getState().showAlert('合并分支失败', String(e))
+        toast.err('合并分支失败', String(e))
       }
       return
     }
@@ -705,7 +715,7 @@ export function BranchSwitchDialog({ target, onClose, onSwitched, onMerge }: {
       await refreshTree()
       onClose()
     } catch (e) {
-      void useAppStore.getState().showAlert('切换分支失败', String(e))
+      toast.err('切换分支失败', String(e))
     } finally {
       setSwitching(false)
     }
@@ -751,11 +761,11 @@ export function BranchSwitchDialog({ target, onClose, onSwitched, onMerge }: {
 /** Windows 文件名校验：非法字符与保留名，失败弹明确提示（而非文件系统层的泛化报错） */
 function validateEntryName(name: string): boolean {
   if (/[<>:"|?*]/.test(name) || /\u0000/.test(name)) {
-    void useAppStore.getState().showAlert('名称无效', '文件名不能包含 < > : " | ? * 等字符。')
+    toast.err('名称无效', '文件名不能包含 < > : " | ? * 等字符。')
     return false
   }
   if (/^(CON|PRN|AUX|NUL|COM\d|LPT\d)$/i.test(name.trim())) {
-    void useAppStore.getState().showAlert('名称无效', '不能使用 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）。')
+    toast.err('名称无效', '不能使用 Windows 保留名（CON / PRN / AUX / NUL / COM1-9 / LPT1-9）。')
     return false
   }
   return true

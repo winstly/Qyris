@@ -95,7 +95,10 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
           useBuildStore.getState().closeProject(p.closedProject)
           useChatStore.getState().closeProject(p.closedProject)
           useAgentStore.getState().closeProject(p.closedProject)
-          if (app.projectPath === p.closedProject) {
+          // 比较必须读最新 state：同一事件里 closedProject 分支会改 projectPath，
+          // 拿事件开头的快照比会看错代值（closed=当前工程且 payload 又带新工程时，
+          // 切换分支被跳过 → 工程开了但文件树 store 还是空的）
+          if (useAppStore.getState().projectPath === p.closedProject) {
             useFileStore.getState().reset()
             // 置空 projectPath：否则重开同一项目时 p.projectPath === app.projectPath，
             // 重载分支被跳过 → 端侧躺在已删除的 store 上什么也不加载
@@ -109,18 +112,23 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
           [...new Set([...p.openProjects, ...useAppStore.getState().openProjects])].filter((x) => x !== p.closedProject),
         )
         // 切换项目：静默版——不调 openProject（避免重入广播），直接更新所有 store
-        if (p.projectPath && p.projectPath !== app.projectPath) {
+        const cur = useAppStore.getState().projectPath
+        if (p.projectPath && p.projectPath !== cur) {
           // 切走前快照当前工程文件态（与 openProject 一致；漏掉则切回时恢复旧快照，未保存编辑丢失）
-          if (app.projectPath) checkpointFileStore(app.projectPath)
+          if (cur) checkpointFileStore(cur)
           // setProjectPath 同步刷新项目级镜像（startupCommands / projectSkillsDirs / projectSkillMetas）
           app.setProjectPath(p.projectPath)
-          // 补齐 openProject 会做的 store 同步（轻量版，不触发广播）
-          useBuildStore.getState().ensureProject(p.projectPath)
-          useBuildStore.getState().setCurrent(p.projectPath)
-          useAgentStore.getState().ensureProject(p.projectPath)
-          useAgentStore.getState().setCurrent(p.projectPath)
-          useStartupStore.getState().setCurrentProject(p.projectPath)
-          useFileStore.getState().openProject(p.projectPath).catch(() => {})
+          try {
+            // 补齐 openProject 会做的 store 同步（轻量版，不触发广播）
+            useBuildStore.getState().ensureProject(p.projectPath)
+            useBuildStore.getState().setCurrent(p.projectPath)
+            useAgentStore.getState().ensureProject(p.projectPath)
+            useAgentStore.getState().setCurrent(p.projectPath)
+            useStartupStore.getState().setCurrentProject(p.projectPath)
+          } finally {
+            // 中间 store 同步绝不能把文件树落下：否则 projectPath 已切、rootPath 还空着
+            useFileStore.getState().openProject(p.projectPath).catch(() => {})
+          }
           // 订阅该工程文件变更（openProject 同款）——否则本窗口不在 watcher 名单，文件树不自动刷新
           void api.startWatching(p.projectPath).catch(() => {})
           // 标题跟随当前工程（openProject 的 setWindowTitle 只作用于发送方窗口）

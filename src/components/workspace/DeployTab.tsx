@@ -11,9 +11,11 @@ import { isDesktop, onConfigChanged } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
+import { toast } from '@/components/common/Toast'
 import type { DeployServer } from '@/types'
 import { EmptyState } from '@/components/common/EmptyState'
-import { Notice, useNotice } from '@/components/common/Notice'
+import { Notice } from '@/components/common/Notice'
+import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
 import { Select } from '@/components/common/Select'
 import { DetailDialog, DetailChips } from '@/components/common/DetailDialog'
 import {
@@ -32,7 +34,8 @@ export function DeployTab() {
   const [viewing, setViewing] = useState<DeployServer | null>(null)    // 只读详情（卡片点击）
   const projectPath = useAppStore((s) => s.projectPath)
   const hasApiKey = useAppStore((s) => s.hasApiKey)
-  const [notice, showNotice] = useNotice()
+  // 服务器卡片分页：切项目回第一页
+  const paged = usePaged(servers, PAGE_SIZE, projectPath ?? '')
 
   // 服务器列表加载 + 订阅变更：AI 的 update_server_tags 工具 / 另一窗口改了 deployServersMap
   // 都会广播 config:changed——不订阅则工具更新标签后卡片列表纹丝不动。
@@ -66,12 +69,12 @@ export function DeployTab() {
     if (!projectPath) return
     const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
     if (!hasApiKey && !cliMode) {
-      void useAppStore.getState().showAlert('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 部署。')
+      toast.info('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 部署。')
       return
     }
     const curChat = selectCurrentChat(useChatStore.getState())
     if (curChat.status !== 'idle' && curChat.status !== 'error') {
-      void useAppStore.getState().showAlert('AI 正忙', '上一条消息还在处理中，请稍候。')
+      toast.info('AI 正忙', '上一条消息还在处理中，请稍候。')
       return
     }
     const list = mode === 'all' ? servers : [target!].filter(Boolean)
@@ -125,8 +128,6 @@ ${scope}
         </button>
       </div>
 
-      <Notice notice={notice} />
-
       {servers.length === 0 ? (
         <EmptyState
           icon={<IconPlus size={22} />}
@@ -139,18 +140,21 @@ ${scope}
             : undefined}
         />
       ) : (
+        <>
         <div className="deploy-grid">
-          {servers.map((s, i) => (
+          {paged.slice.map((s, i) => (
             <ServerCard
               key={s.id}
               server={s}
-              index={i}
+              index={paged.start + i}
               onEdit={() => setEditing(s)}
               onDetail={() => setViewing(s)}
               onDeploy={() => void deployViaChat('single', s)}
             />
           ))}
         </div>
+        <Pager page={paged.page} pageCount={paged.pageCount} total={paged.total} onPage={paged.setPage} />
+        </>
       )}
 
       {viewing && (
@@ -178,8 +182,12 @@ ${scope}
           server={editing}
           projectRoot={projectPath}
           onClose={() => setEditing(null)}
-          onSaved={(saved) => { upsertServer(saved); setEditing(null); showNotice({ kind: 'ok', text: '服务器已保存' }) }}
-          onDeleted={(id) => { setServers((p) => p.filter((x) => x.id !== id)); setEditing(null); showNotice({ kind: 'ok', text: '服务器已删除' }) }}
+          onSaved={(saved) => { upsertServer(saved); setEditing(null); toast.ok('服务器已保存', `「${saved.name}」的配置已更新。`) }}
+          onDeleted={(id) => {
+            setServers((p) => p.filter((x) => x.id !== id))
+            setEditing(null)
+            toast.ok('服务器已删除', '该服务器已从发布列表移除。')
+          }}
         />
       )}
 

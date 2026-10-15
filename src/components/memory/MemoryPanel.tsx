@@ -12,8 +12,10 @@ import { MemoryItemRow, MEMORY_CATEGORY_LABELS, memoryDetailRows, archivedText }
 import { DetailDialog } from '@/components/common/DetailDialog'
 import { MemoryEditModal } from './MemoryEditModal'
 import { EmptyState } from '@/components/common/EmptyState'
-import { Notice, useNotice } from '@/components/common/Notice'
+import { Notice } from '@/components/common/Notice'
+import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
 import { Select } from '@/components/common/Select'
+import { toast } from '@/components/common/Toast'
 import { IconAlert, IconClose, IconLayers, IconSearch } from '@/components/common/icons'
 import { timeAgo } from '@/utils/time'
 import type { MemoryItem, MemoryLastTidy } from '@/types'
@@ -23,11 +25,11 @@ export function MemoryPanel() {
   const projectPath = useAppStore((s) => s.projectPath)
   const projectName = useAppStore((s) => s.projectName)
   const showConfirm = useAppStore((s) => s.showConfirm)
-  const showAlert = useAppStore((s) => s.showAlert)
   const activeTab = useAppStore((s) => s.activeTab)
 
   const items = useMemoryStore((s) => s.items)
   const hits = useMemoryStore((s) => s.hits)
+  const query = useMemoryStore((s) => s.query)
   const archivedSuggest = useMemoryStore((s) => s.archivedSuggest)
   const tierFilter = useMemoryStore((s) => s.tierFilter)
   const categoryFilter = useMemoryStore((s) => s.categoryFilter)
@@ -47,27 +49,34 @@ export function MemoryPanel() {
   const restore = useMemoryStore((s) => s.restore)
   const moveScope = useMemoryStore((s) => s.moveScope)
   const clear = useMemoryStore((s) => s.clear)
+  const create = useMemoryStore((s) => s.create)
+  const refreshStats = useMemoryStore((s) => s.refreshStats)
   const extractingProjects = useMemoryStore((s) => s.extractingProjects)
   const setExtracting = useMemoryStore((s) => s.setExtracting)
 
   /** 输入框实时值；防抖 300ms 后才提交为检索词 */
   const [input, setInput] = useState('')
-  /** 编辑弹窗目标（打开时以该条目快照初始化草稿，弹窗自持） */
+  /** 编辑弹窗目标（打开时以该条目快照初始化草稿，弹窗自持）；null+creating=true = 新增 */
   const [editingItem, setEditingItem] = useState<MemoryItem | null>(null)
+  const [creating, setCreating] = useState(false)
   const [viewingItem, setViewingItem] = useState<MemoryItem | null>(null)
-  /** 「立即整理」运行态与结果提示（ok/err，6s 自清） */
+  /** 「立即整理」运行态（结果走 toast 反馈） */
   const [tidying, setTidying] = useState(false)
-  const [runNotice, setRunNotice] = useNotice()
-  /** 「上次整理」摘要条（有变化才出现；点「知道了」后同批不再出现——已读游标落 localStorage）。
-   *  localStorage 读写带守卫：非浏览器环境（测试渲染）无此全局 */
+  /** 「上次整理」摘要条（有变化才出现；点「知道了」后同批不再出现——已读游标按工程落
+   *  localStorage，快照本身也按工程分键，互不串账）。localStorage 读写带守卫：非浏览器
+   *  环境（测试渲染）无此全局 */
   const [tidy, setTidy] = useState<MemoryLastTidy | null>(null)
-  const [tidyDismissedTs, setTidyDismissedTs] = useState(() => {
+  const tidyDismissKey = `mem_tidy_dismissed_ts:${projectPath ?? 'global'}`
+  const [tidyDismissedTs, setTidyDismissedTs] = useState(0)
+  // 挂载/切工程：拉本工程的「上次整理」快照 + 已读游标（快照与游标同键空间，跨项目不串）
+  useEffect(() => {
+    void api.memoryLastTidy(projectPath).then(setTidy).catch(() => {})
     try {
-      return Number(globalThis.localStorage?.getItem('mem_tidy_dismissed_ts') ?? 0)
+      setTidyDismissedTs(Number(globalThis.localStorage?.getItem(tidyDismissKey) ?? 0))
     } catch {
-      return 0
+      setTidyDismissedTs(0)
     }
-  })
+  }, [projectPath, tidyDismissKey])
   /** 导出/导入运行态（导入含嵌入可能秒级；二者互斥防并发弹框） */
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
@@ -97,11 +106,6 @@ export function MemoryPanel() {
       setExtracting(projectRoot, on)
     })
   }, [setExtracting])
-
-  // 「上次整理」快照：挂载/切工程拉一次（摘要条数据源）
-  useEffect(() => {
-    void api.memoryLastTidy().then(setTidy).catch(() => {})
-  }, [projectPath])
 
   // 订阅记忆数据变更广播（R6）：任意工程/窗口写完记忆后重放当前视图入口（与刷新按钮同路，
   // store 内 reqSeq 防串工程）。500ms 防抖合并突发；搜索输入非空时跳过，不打掉检索时点结果。
@@ -149,6 +153,13 @@ export function MemoryPanel() {
 
   const searching = hits !== null
 
+  // 分页：切工程/换搜索词/换筛选回第一页；数据量收缩由 safePage 钳制
+  const paged = usePaged(
+    visible,
+    PAGE_SIZE,
+    `${projectPath ?? ''}|${query}|${statusFilter}|${tierFilter}|${categoryFilter}`,
+  )
+
   // 状态分段计数（按当前工程口径，排除 global）：归档数本身就是信任信号——系统不藏
   const statusCounts = useMemo(() => {
     const proj = items.filter((it) => it.projectKey !== 'global')
@@ -158,13 +169,14 @@ export function MemoryPanel() {
     }
   }, [items])
 
-  /** 弹窗保存：成功返回 true（弹窗自关），失败弹错误条返回 false（弹窗保留草稿） */
+  /** 弹窗保存：成功 toast + 返回 true（弹窗自关），失败 toast 返回 false（弹窗保留草稿） */
   const onSave = async (id: string, patch: MemoryUpdatePatch): Promise<boolean> => {
     try {
       await update(id, patch)
+      toast.ok('已保存记忆', `「${patch.title}」已更新。`)
       return true
     } catch (e) {
-      void showAlert('保存记忆失败', String(e))
+      toast.err('保存记忆失败', String(e))
       return false
     }
   }
@@ -173,8 +185,9 @@ export function MemoryPanel() {
     if ((await showConfirm('删除记忆', `确定删除「${title}」？删除后不可恢复。`)) !== true) return
     try {
       await remove(id)
+      toast.ok('已删除记忆', `「${title}」已删除。`)
     } catch (e) {
-      void showAlert('删除记忆失败', String(e))
+      toast.err('删除记忆失败', String(e))
     }
   }
 
@@ -185,18 +198,19 @@ export function MemoryPanel() {
     if (ok !== true) return
     try {
       await moveScope(id, 'user', projectPath)
+      toast.ok('已升级为用户记忆', `「${title}」现在所有工程都能检索到。`)
     } catch (e) {
-      void showAlert('转换失败', String(e))
+      toast.err('转换失败', String(e))
     }
   }
 
-  /** 恢复归档条目：失败（同题已有活跃条目撞唯一索引）弹窗告知，不静默 */
+  /** 恢复归档条目：失败（同题已有活跃条目撞唯一索引）toast 告知，不静默 */
   const onRestore = async (id: string, title: string) => {
     try {
       await restore(id)
-      setRunNotice({ kind: 'ok', text: `已恢复「${title}」，重新参与检索。` })
+      toast.ok('已恢复记忆', `「${title}」已恢复，重新参与检索。`)
     } catch (e) {
-      void showAlert('恢复失败', String(e))
+      toast.err('恢复失败', String(e))
     }
   }
 
@@ -209,28 +223,27 @@ export function MemoryPanel() {
     )
     if (ok !== true) return
     setTidying(true)
-    setRunNotice({ kind: 'ok', text: '正在整理记忆，请稍候…' })
     try {
       const r = await api.memoryRunNow(projectPath)
       if (r.ok) {
         const ops = r.ops ?? 0
         const t = r.tidy
         const breakdown = t ? tidyBreakdown(t) : ''
-        setRunNotice({
-          kind: 'ok',
-          text: ops > 0
-            ? `整理完成：${breakdown || `新增/更新了 ${ops} 条记忆`}。`
-            : '整理完成：最近对话暂无值得沉淀的新记忆。',
-        })
-        void api.memoryLastTidy().then(setTidy).catch(() => {})
+        toast.ok(
+          '整理完成',
+          ops > 0
+            ? `${breakdown || `新增/更新了 ${ops} 条记忆`}。`
+            : '最近对话暂无值得沉淀的新记忆。',
+        )
+        void api.memoryLastTidy(projectPath).then(setTidy).catch(() => {})
         // 自动刷新列表
         if (input.trim()) await search(input.trim(), projectPath)
         else await load(projectPath)
       } else {
-        setRunNotice({ kind: 'err', text: r.error || '整理失败，请稍后重试。' })
+        toast.err('整理失败', r.error || '整理失败，请稍后重试。')
       }
     } catch (e) {
-      setRunNotice({ kind: 'err', text: String(e) })
+      toast.err('整理失败', String(e))
     } finally {
       setTidying(false)
     }
@@ -240,14 +253,12 @@ export function MemoryPanel() {
   const onExport = async () => {
     if (exporting || importing) return
     setExporting(true)
-    setRunNotice(null)
     try {
       const r = await api.memoryExport(projectPath ? 'project' : 'global', projectPath ?? undefined)
-      if (r.ok) setRunNotice({ kind: 'ok', text: `已导出 ${r.count ?? 0} 条记忆：${r.path ?? ''}` })
-      else if (isCancelled(r.error)) setRunNotice(null)
-      else setRunNotice({ kind: 'err', text: r.error || '导出失败，请稍后重试。' })
+      if (r.ok) toast.ok('导出完成', `已导出 ${r.count ?? 0} 条记忆：\n${r.path ?? ''}`)
+      else if (!isCancelled(r.error)) toast.err('导出失败', r.error || '导出失败，请稍后重试。')
     } catch (e) {
-      setRunNotice({ kind: 'err', text: String(e) })
+      toast.err('导出失败', String(e))
     } finally {
       setExporting(false)
     }
@@ -257,19 +268,54 @@ export function MemoryPanel() {
   const onImport = async () => {
     if (exporting || importing) return
     setImporting(true)
-    setRunNotice(null)
     try {
       const r = await api.memoryImport()
       if (r.ok) {
-        setRunNotice({ kind: 'ok', text: `导入完成：新增 ${r.imported ?? 0} 条，跳过 ${r.skipped ?? 0} 条。` })
+        toast.ok('导入完成', `新增 ${r.imported ?? 0} 条，跳过 ${r.skipped ?? 0} 条。`)
         if (input.trim()) await search(input.trim(), projectPath)
         else await load(projectPath)
-      } else if (isCancelled(r.error)) setRunNotice(null)
-      else setRunNotice({ kind: 'err', text: r.error || '导入失败，请稍后重试。' })
+      } else if (!isCancelled(r.error)) toast.err('导入失败', r.error || '导入失败，请稍后重试。')
     } catch (e) {
-      setRunNotice({ kind: 'err', text: String(e) })
+      toast.err('导入失败', String(e))
     } finally {
       setImporting(false)
+    }
+  }
+
+  /** 手动新增一条工程记忆：弹 create 模式编辑弹窗，保存走 store.create（origin 主进程钉 user_explicit）。
+   *  同题活跃条目已存在时主进程折叠/取代（folded=true）——列表条数不涨，toast 说明避免「像失败」 */
+  const onCreateSave = async (patch: MemoryUpdatePatch): Promise<boolean> => {
+    if (!projectPath) return false
+    try {
+      const { folded } = await create({
+        projectRoot: projectPath,
+        tier: 'long',
+        category: patch.category ?? 'fact',
+        title: patch.title ?? '',
+        content: patch.content ?? '',
+        importance: patch.importance,
+      })
+      if (input.trim()) await search(input.trim(), projectPath)
+      else await load(projectPath)
+      if (folded) toast.info('已合并到既有记忆', `已有同分类同标题的活跃记忆「${patch.title}」，内容已更新进去（旧版本归档留痕）。`)
+      else toast.ok('已新增记忆', `「${patch.title}」已保存为工程记忆。`)
+      return true
+    } catch (e) {
+      toast.err('新增记忆失败', String(e))
+      return false
+    }
+  }
+
+  /** 蒸馏 token 计数重置：只清统计数字，不动记忆数据 */
+  const onResetDistill = async () => {
+    const ok = await showConfirm('重置蒸馏计数', '将把「蒸馏」token 统计清零（仅统计数字，不影响任何记忆数据）。确定重置？')
+    if (ok !== true) return
+    try {
+      await api.memoryResetDistillTokens()
+      void refreshStats(projectPath)
+      toast.ok('已重置蒸馏计数')
+    } catch (e) {
+      toast.err('重置失败', String(e))
     }
   }
 
@@ -280,8 +326,9 @@ export function MemoryPanel() {
     try {
       await clear('project', projectPath)
       setInput('')
+      toast.ok('已清空工程记忆', `工程「${projectName}」的全部记忆已删除。`)
     } catch (e) {
-      void showAlert('清空记忆失败', String(e))
+      toast.err('清空记忆失败', String(e))
     }
   }
 
@@ -353,6 +400,14 @@ export function MemoryPanel() {
         <button
           className="btn btn--ghost btn--sm"
           disabled={!projectPath || busy}
+          title={projectPath ? '手动新增一条工程记忆' : '需先打开工程'}
+          onClick={() => setCreating(true)}
+        >
+          新增
+        </button>
+        <button
+          className="btn btn--ghost btn--sm"
+          disabled={!projectPath || busy}
           title={!projectPath ? '需先打开工程' : busy ? '整理中…' : '立即整理'}
           onClick={() => void onRunNow()}
         >
@@ -369,8 +424,6 @@ export function MemoryPanel() {
         </button>
       </div>
 
-      <Notice notice={runNotice} />
-
       {/* 「上次整理」摘要条：有变化且未读才出现——被动面收口，永不主动 toast 打扰 */}
       {tidy && tidy.ts > tidyDismissedTs && (tidy.saved + tidy.updated + tidy.archived > 0) && (
         <div className="memory__tidy-bar">
@@ -383,7 +436,7 @@ export function MemoryPanel() {
             title="知道了"
             onClick={() => {
               try {
-                globalThis.localStorage?.setItem('mem_tidy_dismissed_ts', String(tidy.ts))
+                globalThis.localStorage?.setItem(tidyDismissKey, String(tidy.ts))
               } catch { /* 非浏览器环境 */ }
               setTidyDismissedTs(tidy.ts)
             }}
@@ -429,7 +482,7 @@ export function MemoryPanel() {
             />
           )
         ) : (
-          visible.map((it) => (
+          paged.slice.map((it) => (
             <MemoryItemRow
               key={it.id}
               item={it}
@@ -444,6 +497,8 @@ export function MemoryPanel() {
           ))
         )}
       </div>
+
+      <Pager page={paged.page} pageCount={paged.pageCount} total={paged.total} onPage={paged.setPage} />
 
       {viewingItem && (
         <DetailDialog
@@ -465,17 +520,33 @@ export function MemoryPanel() {
           readOnly={busy}
         />
       )}
+      {creating && (
+        <MemoryEditModal
+          item={null}
+          scopeHint={projectPath ? `保存为工程「${projectName}」的记忆（长期档，手动添加不会被自动归档打穿）` : undefined}
+          onSave={onCreateSave}
+          onClose={() => setCreating(false)}
+          readOnly={busy}
+        />
+      )}
 
       <div className="memory__status">
         <span className="memory__scope">{projectPath ? `工程「${projectName}」` : '全局'}</span>
         <span className="memory__status-sep">·</span>
+        {/* 计数与列表同范围出账（工程档只数本工程；global 档只数跨工程）——对不上即 bug */}
         <span>{stats ? `共 ${stats.activeCount} 条` : '—'}</span>
         <span className="memory__status-sep">·</span>
         <span>{stats ? fmtBytes(stats.dbBytes) : '—'}</span>
         {stats?.distillTokens && (stats.distillTokens.input + stats.distillTokens.output) > 0 && (
           <>
             <span className="memory__status-sep">·</span>
-            <span title="蒸馏消耗 token（近似）">蒸馏 {fmtTokens(stats.distillTokens.input + stats.distillTokens.output)}</span>
+            <button
+              className="memory__status-reset"
+              title="蒸馏消耗 token（全局累计近似值）。点击重置为 0（仅统计数字，不影响记忆数据）"
+              onClick={() => void onResetDistill()}
+            >
+              蒸馏 {fmtTokens(stats.distillTokens.input + stats.distillTokens.output)}
+            </button>
           </>
         )}
         <span className={`memory__status-dot ${stats?.embedReady ? 'memory__status-dot--ok' : ''}`} />

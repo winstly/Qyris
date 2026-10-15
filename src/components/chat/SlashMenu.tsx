@@ -1,4 +1,4 @@
-import { useMemo, useEffect, useCallback, useState } from 'react'
+import { useMemo, useEffect, useCallback, useRef, useState } from 'react'
 import { IconCheck } from '@/components/common/icons'
 import type { SkillMeta } from '@/types'
 
@@ -7,6 +7,10 @@ export function useSlashCommand(allSkills: SkillMeta[]) {
   const [slashOpen, setSlashOpen] = useState(false)
   const [slashFilter, setSlashFilter] = useState('')
   const [slashIndex, setSlashIndex] = useState(0)
+  /** 最近一次移动选中项的通道：只有键盘导航才 scrollIntoView——hover 也回写索引，
+   *  若 hover 同样触发滚动，滚轮把列表滚到悬停项半露出时会被 nearest 拉回去，
+   *  表现为「菜单永远滚不动」。 */
+  const navByKeyboardRef = useRef(false)
 
   const filteredSkills = useMemo(() => {
     if (!slashOpen) return []
@@ -28,21 +32,37 @@ export function useSlashCommand(allSkills: SkillMeta[]) {
   useEffect(() => { setSlashIndex(0) }, [slashFilter])
 
   useEffect(() => {
-    if (!slashOpen) return
-    const el = document.querySelector('.slash-menu__item--active')
-    el?.scrollIntoView({ block: 'nearest' })
+    if (!slashOpen || !navByKeyboardRef.current) return
+    // 可能同时开着两个菜单（主输入 + 编辑态），按类名全局取会滚错菜单：全部对齐滚动，
+    // 非活动菜单的可见项 scrollIntoView 是 no-op
+    document.querySelectorAll('.slash-menu__item--active').forEach((el) => el.scrollIntoView({ block: 'nearest' }))
   }, [slashIndex, slashOpen])
+
+  /** 键盘 ↑↓ 移动选中项（触发自动滚动） */
+  const moveSlashIndex = useCallback((updater: (i: number) => number) => {
+    navByKeyboardRef.current = true
+    setSlashIndex(updater)
+  }, [])
+
+  /** 鼠标悬停移动选中项（不触发自动滚动，让位给滚轮） */
+  const hoverSlashIndex = useCallback((i: number) => {
+    navByKeyboardRef.current = false
+    setSlashIndex(i)
+  }, [])
 
   const closeSlash = useCallback(() => {
     setSlashOpen(false)
     setSlashFilter('')
     setSlashIndex(0)
+    navByKeyboardRef.current = false
   }, [])
 
   return {
     slashOpen, setSlashOpen,
     slashFilter, setSlashFilter,
-    slashIndex, setSlashIndex,
+    slashIndex,
+    setSlashIndex: moveSlashIndex,
+    hoverSlashIndex,
     filteredSkills,
     closeSlash,
   }

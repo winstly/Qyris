@@ -361,7 +361,7 @@ export async function memoryRunNow(projectRoot: string): Promise<{ ok: boolean; 
     lastExtractError = null
     return { ok: false, error: `提取失败：${err}` }
   }
-  return { ok: true, ops: result, tidy: await service.lastTidy() }
+  return { ok: true, ops: result, tidy: await service.lastTidy(projectRoot) }
 }
 
 // ---------- 串行队列 ----------
@@ -543,8 +543,9 @@ async function extractWithRows(
   if (usageInput > 0 || usageOutput > 0) await service.addDistillTokens(usageInput, usageOutput)
   const summary = textOfContent(finalMessage.content).trim()
   if (summary) await service.saveSessionSummary(projectRoot, sessionId, summary)
-  // 「上次整理」快照：面板摘要条数据源（拆分新增/更新/归档——合说「更新 N 条」是口径谎言）
-  await service.saveLastTidy({ ts: clock(), ...opCounts })
+  // 「上次整理」快照：面板摘要条数据源，新增/更新/归档分列计数；
+  // 按工程分键落库（null=global），面板读同键
+  await service.saveLastTidy(projectRoot, { ts: clock(), ...opCounts })
   const applied = opCounts.saved + opCounts.updated + opCounts.archived
   console.info(
     `[mem-agent] trigger=${trigger} 输入=${rows.length}条(转录${transcript.text.length}字) ` +

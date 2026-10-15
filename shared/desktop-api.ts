@@ -3,7 +3,7 @@
  * 渲染层经 desktop-api.d.ts 的全局声明消费。载荷类型全部出自 shared/ 纯类型模块。
  */
 import type {
-  AiCompletion, AiDeltaPayload, AiReasoningPayload, ChatMessage, CliAgentEventPayload, McpTestResult,
+  AiCompletion, AiDeltaPayload, AiReasoningPayload, ChatMessage, CliAgentEventPayload, CloneProgress, CloneResult, McpTestResult,
   CliToolEventPayload, CliToolResultPayload, FileContent, GitStatus, MemoryHit, MemoryItem, MemoryLastTidy, MemoryPatch,
   MemoryStats, MessageMeta, PreviewConsoleEntry, SkillMeta, ToolCall, ToolResultEntry, TreeNode,
 } from './ipc-types'
@@ -104,9 +104,9 @@ export interface DesktopAPI {
 
   // 创建项目 / Git
   createEmptyProject: (parentDir: string, name: string) => Promise<string>
-  cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => Promise<string[]>
+  cloneRepos: (parentDir: string, repos: { url: string; branch?: string }[]) => Promise<CloneResult>
   cloneCancel: () => Promise<void>
-  onCloneProgress: DesktopEventSub<{ index: number; total: number; name: string; stage: string; pct: number | null }>
+  onCloneProgress: DesktopEventSub<CloneProgress>
   testRepo: (url: string) => Promise<{ valid: boolean; branches: string[]; error: string | null }>
   gitRepoInfo: (dir: string) => Promise<{ isRepo: boolean; currentBranch: string | null; branches: string[] }>
   gitCheckout: (dir: string, branch: string) => Promise<void>
@@ -137,8 +137,15 @@ export interface DesktopAPI {
   memoryDelete: (id: string) => Promise<void>
   memoryMoveScope: (id: string, target: 'project' | 'user', projectRoot?: string) => Promise<MemoryItem>
   memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) => Promise<void>
-  memoryStats: () => Promise<MemoryStats>
-  memoryLastTidy: () => Promise<MemoryLastTidy | null>
+  /** 统计按范围出账（projectRoot=工程档；null=global 档），与列表口径一致 */
+  memoryStats: (projectRoot?: string | null) => Promise<MemoryStats>
+  /** 「上次整理」快照（按工程分键；projectRoot=null 读 global 档） */
+  memoryLastTidy: (projectRoot?: string | null) => Promise<MemoryLastTidy | null>
+  /** 手动新增记忆（origin 由主进程钉死 user_explicit）；projectRoot 与 global 二选一。
+   *  同 (工程,分类,标题) 已有活跃条目时折叠/取代（folded=true = 合并进了既有条目） */
+  memoryCreate: (input: { projectRoot?: string | null; global?: boolean; tier?: 'long' | 'short'; category: string; title: string; content: string; importance?: number }) => Promise<{ folded: boolean; id: string }>
+  /** 蒸馏 token 计数重置（只清统计数字，不动记忆数据） */
+  memoryResetDistillTokens: () => Promise<void>
   // 记忆管线 P2（渲染层消费面；electron 侧由 memory 管线提供）
   /** 工作记忆会话滚动摘要（category='summary' 的 active 条目；无则 null） */
   memorySessionContext: (projectRoot: string, sessionId: string) => Promise<{ summary: string | null }>

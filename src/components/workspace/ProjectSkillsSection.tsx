@@ -8,8 +8,9 @@ import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { api } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { EmptyState } from '@/components/common/EmptyState'
-import { Notice, useNotice } from '@/components/common/Notice'
+import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
 import { ScopeRow, dirLabel, type ScopeRowEntry } from '@/components/common/ScopeRow'
+import { toast } from '@/components/common/Toast'
 import { IconClose, IconPlus, IconSearch, IconTerminal, IconTrash } from '@/components/common/icons'
 import type { SkillMeta } from '@/types'
 
@@ -35,7 +36,6 @@ export function ProjectSkillsPanel() {
   const [dirSkills, setDirSkills] = useState<SkillMeta[]>([])
   const [loading, setLoading] = useState(false)
   const [importing, setImporting] = useState(false)
-  const [notice, showNotice] = useNotice()
   const [search, setSearch] = useState('')
   /** 详情弹窗（点卡查看 Skill 内容） */
   const [detail, setDetail] = useState<SkillMeta | null>(null)
@@ -86,13 +86,13 @@ export function ProjectSkillsPanel() {
     try {
       const r = await api.projectSkillImportZip(selectedDir, zipPath)
       if (r.ok) {
-        showNotice({ kind: 'ok', text: `已导入 Skill「${r.name}」` })
+        toast.ok('导入完成', `已导入 Skill「${r.name}」`)
         await refreshDir()
       } else {
-        showNotice({ kind: 'err', text: r.error || '导入失败' })
+        toast.err('导入失败', r.error || '导入失败')
       }
     } catch (e) {
-      showNotice({ kind: 'err', text: String(e) })
+      toast.err('导入失败', String(e))
     } finally {
       setImporting(false)
     }
@@ -108,13 +108,13 @@ export function ProjectSkillsPanel() {
       const r = await api.projectSkillImportDir(selectedDir, srcDir)
       if (r.ok) {
         const msg = r.count && r.count > 1 ? `已导入 ${r.count} 个 Skill` : `已导入 Skill「${r.name}」`
-        showNotice({ kind: 'ok', text: msg })
+        toast.ok('导入完成', msg)
         await refreshDir()
       } else {
-        showNotice({ kind: 'err', text: r.error || '导入失败' })
+        toast.err('导入失败', r.error || '导入失败')
       }
     } catch (e) {
-      showNotice({ kind: 'err', text: String(e) })
+      toast.err('导入失败', String(e))
     } finally {
       setImporting(false)
     }
@@ -128,13 +128,13 @@ export function ProjectSkillsPanel() {
     try {
       const r = await api.projectSkillDelete(selectedDir, id)
       if (r.ok) {
-        showNotice({ kind: 'ok', text: `已删除 Skill「${name}」` })
+        toast.ok('已删除 Skill', `「${name}」已删除。`)
         await refreshDir()
       } else {
-        showNotice({ kind: 'err', text: r.error || '删除失败' })
+        toast.err('删除失败', r.error || '删除失败')
       }
     } catch (e) {
-      showNotice({ kind: 'err', text: String(e) })
+      toast.err('删除失败', String(e))
     }
   }
 
@@ -186,6 +186,8 @@ export function ProjectSkillsPanel() {
         return s.name.toLowerCase().includes(q) || s.id.toLowerCase().includes(q) || s.description.toLowerCase().includes(q)
       })
     : dirSkills
+  // 卡片分页：切目录/换搜索词回第一页
+  const paged = usePaged(filtered, PAGE_SIZE, `${selectedDir ?? ''}|${search}`)
 
   // 目录组（全局在前、项目在后）：同一套行渲染与交互，差异全部收敛为行元数据
   const dirGroups: { label: string; rows: ScopeRowEntry[]; onAdd: () => void; addTitle: string; empty: string }[] = [
@@ -286,8 +288,6 @@ export function ProjectSkillsPanel() {
           )}
         </div>
 
-        <Notice notice={notice} />
-
         <div className="skills-panel__list" role="list" aria-label="Skill 列表">
           {loading ? (
             <div className="skills-panel__loading">加载中…</div>
@@ -300,9 +300,9 @@ export function ProjectSkillsPanel() {
                 : '此目录下暂无 Skill（全局目录只读）'}
             />
           ) : (
-            filtered.map((skill, i) => {
-              /* 四色卡：按序轮换（紫/蓝/绿/橙） */
-              const tone = SKILL_CARD_TONES[i % SKILL_CARD_TONES.length]
+            paged.slice.map((skill, i) => {
+              /* 四色卡：按绝对序轮换（紫/蓝/绿/橙），翻页不重置花色节奏 */
+              const tone = SKILL_CARD_TONES[(paged.start + i) % SKILL_CARD_TONES.length]
               return (
                 <div
                   key={skill.id}
@@ -340,6 +340,8 @@ export function ProjectSkillsPanel() {
             })
           )}
         </div>
+
+        <Pager page={paged.page} pageCount={paged.pageCount} total={paged.total} onPage={paged.setPage} />
 
         {detail && (
           <SkillDetailDialog skill={detail} dir={selectedDir} onClose={() => setDetail(null)} />

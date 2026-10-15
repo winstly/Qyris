@@ -41,6 +41,23 @@ export interface GitStatus {
   files: GitFileEntry[]
 }
 
+/** git clone 进度事件：state=cloning 时 stage/pct 为实时阶段，done/error 为该仓库终态 */
+export interface CloneProgress {
+  index: number
+  total: number
+  name: string
+  stage: string
+  pct: number | null
+  state: 'cloning' | 'done' | 'error'
+  error?: string
+}
+
+/** 批量克隆结果：cloned 为成功路径（按入参序），failed 为逐仓错误（各仓互不影响） */
+export interface CloneResult {
+  cloned: string[]
+  failed: { index: number; name: string; error: string }[]
+}
+
 /** 对话流事件载荷（ai.ts 事件桥 → preload → 渲染层三面共用同一形状） */
 export interface AiDeltaPayload {
   requestId: string
@@ -290,6 +307,6 @@ export interface MemoryStats {
   /** sqlite-vec 扩展可用 */
   vecAvailable: boolean
   dbBytes: number
-  /** mem agent 蒸馏累计 token（近似值，清空记忆时归零；未跑过蒸馏时缺省） */
+  /** mem agent 蒸馏累计 token（全局近似值；清空记忆或面板手动重置时归零；未跑过蒸馏时缺省） */
   distillTokens?: { input: number; output: number }
 }

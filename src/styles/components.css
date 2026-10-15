@@ -1112,7 +1112,8 @@
   .user-mem__search-clear:hover { color: var(--text); background: var(--surface-hover); }
 
   /* ── ⋯ 菜单（导出/导入/清空）：触发按钮 + portal 菜单 ── */
-  .user-mem__menu-wrap { flex: 0 0 auto; position: relative; }
+  /* 两颗 icon-btn 各带一圈弱框：不排 flex 的话边框贴边框挤在一起，与 __top 的 4px 节奏对齐 */
+  .user-mem__menu-wrap { flex: 0 0 auto; position: relative; display: flex; align-items: center; gap: 4px; }
   .user-mem__more {
     height: 26px;
     padding: 0 7px;
@@ -1941,6 +1942,7 @@
   /* ============ 输入区 ============ */
   .chat__inputwrap {
     flex: 0 0 auto;
+    position: relative; /* slash 菜单向上绝对定位的锚 */
     padding: var(--space-2) var(--space-3) var(--space-2);
     border-top: 1px solid var(--divider);
   }
@@ -2056,6 +2058,20 @@
     margin-bottom: 0;
   }
   .msg__edit { position: relative; }
+
+  /* chat 输入区的 slash 菜单：向上浮出盖在消息列表上——不走文档流（不挤占消息列表
+     触发重排/裁剪），短窗口里菜单完整可见，自身滚动（overflow-y）不受 flex 挤压 */
+  .slash-menu--chat {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    top: auto;
+    left: 16px;
+    right: 16px;
+    z-index: var(--z-slash);
+    margin: 0;
+    max-height: min(320px, 42vh);
+    overscroll-behavior: contain;
+  }
 
   .slash-menu__item {
     display: flex;
@@ -3081,6 +3097,60 @@
   font-size: var(--text-micro);
 }
 
+/* 克隆进度（每行一条）：阶段文案 + 细进度条；排队/解析不出百分比时走不确定态滑光 */
+.create-project__clone {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.create-project__clone-text {
+  font-size: var(--text-micro);
+  color: var(--text-soft);
+}
+.create-project__clone--done .create-project__clone-text { color: var(--green); }
+.create-project__clone--error .create-project__clone-text {
+  color: var(--red);
+  /* 错误文案可能很长（git stderr 摘要）：换行展示，不截成省略号让人猜 */
+  white-space: pre-line;
+  word-break: break-word;
+}
+.create-project__progress {
+  height: 4px;
+  border-radius: var(--radius-pill);
+  background: var(--bg-fill-tertiary);
+  overflow: hidden;
+}
+.create-project__progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: var(--radius-pill);
+  background: var(--accent);
+  transition: width var(--motion-base) var(--curve-product);
+}
+.create-project__progress--indeterminate .create-project__progress-fill {
+  width: 40%;
+  animation: create-project-indeterminate 1.2s var(--curve-product) infinite;
+}
+@keyframes create-project-indeterminate {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .create-project__progress--indeterminate .create-project__progress-fill {
+    animation: none;
+    width: 100%;
+    opacity: 0.45;
+  }
+}
+
+/* 底栏汇总（role=status）：左对齐贴按钮组 */
+.create-project__clone-summary {
+  margin-right: auto;
+  align-self: center;
+  font-size: var(--text-xs);
+  color: var(--text-soft);
+}
+
 /* ============ 文件 Tab ============ */
 
 .files-tab { flex: 1; min-height: 0; display: flex; }
@@ -3095,6 +3165,7 @@
 }
 .files-first__tree {
   flex: 1 1 auto;
+  min-width: 0;
   min-height: 0;
   display: flex;
 }
@@ -3213,9 +3284,12 @@
   font-size: var(--text-xs);
 }
 
-/* 文件树容器：搜索框固定 + 树滚动 */
+/* 文件树容器：搜索框固定 + 树滚动。
+   min-width:0 —— 行内 flex 子项的自动最小尺寸会按 min-content 撑住整栏
+   （搜索框 input 的固有宽 ~180px），栏一拉窄就把头栏工具钮挤出栏外、被右栏编辑器盖住。 */
 .filetree-wrap {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   display: flex;
   flex-direction: column;
@@ -3306,7 +3380,11 @@
   overflow: hidden; /* 滚动收敛到文件列表自身，body 不再出现第二层滚动 */
 }
 
-.gitpanel__sync { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+/* 同步操作条 / 提交动作条：窄栏换行不裁切（body overflow:hidden 会把超出的按钮直接切掉） */
+.gitpanel__sync { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.gitpanel__sync .btn,
+.gitpanel__commit-actions .btn,
+.gitpanel__row .icon-btn { flex-shrink: 0; }
 .gitpanel__spacer { flex: 1; }
 
 .gitpanel__files {
@@ -3336,7 +3414,12 @@
 .gitpanel__row--active { background: var(--accent-dim); }
 
 .gitpanel__badge {
-  flex-shrink: 0;
+  /* 极窄栏让位省略号，别把右侧动作钮挤出栏外（按钮 shrink:0 不许缩） */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   padding: 0 5px;
   border-radius: 4px;
   font-size: var(--text-micro);
@@ -3378,8 +3461,17 @@
 }
 .gitpanel__msg:focus { outline: none; border-color: var(--selected); }
 
-.gitpanel__commit-actions { display: flex; align-items: center; gap: 6px; }
-.gitpanel__staged-hint { font-size: var(--text-micro); color: var(--muted); }
+.gitpanel__commit-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+/* 计数提示让位（省略号）而不是把「暂存全部/提交」挤出栏外 */
+.gitpanel__staged-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-micro);
+  color: var(--muted);
+}
 
 
 .filetree-wrap--empty {
@@ -3785,19 +3877,6 @@
 .history__item--missing .history__item-time {
   opacity: 0.55;
 }
-/* 状态徽标：本仓危险徽标语义（--red-bg 淡底 + --red 字、无描边，同 notice--err 族）——
-   密集行里边框描边是主要观感噪音源 */
-.history__item-badge {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border-radius: var(--radius-pill);
-  background: var(--red-bg);
-  color: var(--red);
-  font-size: var(--text-micro);
-  line-height: 1.45;
-  white-space: nowrap;
-}
-
 .history__item-icon {
   flex-shrink: 0;
   display: flex;
@@ -4621,12 +4700,14 @@ body.dragging-col .split__first { transition: none; }
   gap: 0;
 }
 
-/* ── 工具条：所有子元素统一 28px 高 ── */
+/* ── 工具条：所有子元素统一 28px 高；子项全 shrink:0，窄面板下换行不溢出
+   （nowrap 时固有宽 ~880px，工作区被压到 500px 下限后最右「清空」溢出到对话区底下） ── */
 .memory__bar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-wrap: wrap;
   padding: 6px var(--space-3);
   border-bottom: 1px solid var(--divider);
   background: var(--bg-panel);
@@ -4709,6 +4790,11 @@ body.dragging-col .split__first { transition: none; }
   /* 卡片墙：与技能卡同族网格（窄侧栏自动塌成单列） */
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  /* 显式 max-content 行：本网格的卡片是 overflow:hidden + flex column 的网格项，
+     Chrome 对 auto 行会把这类 item 的高度贡献坍缩成几十 px（同列宽越宽塌得越狠），
+     内容（尤其贴底 meta 行）被 overflow 裁掉不可见——技能卡是 block 型 item 无此坑。
+     max-content 行强制按真实内容量行，行为与技能卡墙对齐。 */
+  grid-auto-rows: max-content;
   gap: 12px;
   align-content: start;
   padding: var(--space-2) var(--space-3);
@@ -5544,6 +5630,23 @@ body.dragging-col .split__first { transition: none; }
      .statusbar__toggle 文字胶囊 / .btn--ghost 语义无框 /
      .sidebar__icon-btn rail 语境 / .editor__tab-close 等行内
      hover 渐显钮（focus-within 已保键盘可达） */
+
+  /* 预览地址栏内的 icon-btn 回归无框档：urlbar 自带边框与底色，30px 按钮再各自
+     带一圈强框=整排方盒子（尤其浅色主题，用户看到的就是「一大圈边框」）。
+     容器已提供「实体感」，内部按钮只保留 hover 反馈与键盘焦点环。 */
+  .preview__urlbar .icon-btn {
+    background: transparent;
+    border-color: transparent;
+  }
+  .preview__urlbar .icon-btn:hover:not(:disabled) {
+    background: var(--surface-hover);
+    border-color: transparent;
+    color: var(--text);
+  }
+  .preview__urlbar .icon-btn--active {
+    background: var(--selected-soft);
+    border-color: transparent;
+  }
 }
 
 /* ============================================================
@@ -5997,4 +6100,162 @@ body.dragging-col .split__first { transition: none; }
     color: var(--text);
     box-shadow: var(--shadow-xs);
   }
+}
+
+/* ============================================================
+ * 卡片列表分页器（Skill / 记忆 / 项目历史 / MCP server / 服务器卡共用）
+ * 居中一行：‹ 上一页 · 第 x / N 页 · 共 M 条 · 下一页 ›
+ * ============================================================ */
+@layer components {
+  .pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-3);
+    padding: var(--space-2) 0;
+    flex: 0 0 auto;
+  }
+  .pager__btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 14px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--motion-fast) var(--ease-standard),
+                color var(--motion-fast) var(--ease-standard);
+  }
+  .pager__btn:hover:not(:disabled) { background: var(--surface-hover); color: var(--text); }
+  .pager__btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .pager__info {
+    font-size: var(--text-xs);
+    color: var(--text-soft);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 记忆状态条里的「蒸馏 N」可点重置：样式融入状态条（无框文字钮），hover 提亮告知可点 */
+  .memory__status-reset {
+    border: none;
+    background: transparent;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    border-bottom: 1px dashed var(--divider);
+  }
+  .memory__status-reset:hover { color: var(--text); border-bottom-color: var(--text-soft); }
+}
+
+/* ============================================================
+ * 全局 Toast（右上角堆叠）：操作反馈统一出口（取代内联提示条与模态 alert）
+ * ok 绿勾 3.5s / err 红叹号 6s / info 蓝点 6s；点击整卡即关；入场右上滑入
+ * ============================================================ */
+@layer components {
+  .toast-stack {
+    position: fixed;
+    top: 44px;
+    right: 14px;
+    z-index: var(--z-menu);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(340px, calc(100vw - 28px));
+    pointer-events: none;
+  }
+  .toast {
+    pointer-events: auto;
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 9px 10px 9px 12px;
+    border-radius: var(--radius-large);
+    background: var(--surface-solid);
+    border: 1px solid var(--border-strong);
+    box-shadow: var(--shadow-lg);
+    cursor: pointer;
+    animation: toast-in var(--motion-fast) var(--ease-standard);
+  }
+  @keyframes toast-in {
+    from { transform: translateX(16px); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+  }
+  /* 图标本身着色（remix 实心圆角），不做底色圆——细勾+色块显笨重 */
+  .toast__icon {
+    flex: 0 0 auto;
+    font-size: 17px;
+    line-height: 1;
+    margin-top: 2px;
+  }
+  .toast--ok .toast__icon { color: var(--green); }
+  .toast--err .toast__icon { color: var(--danger); }
+  .toast--info .toast__icon { color: var(--accent); }
+  .toast__body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .toast__title {
+    font-size: var(--text-sm);
+    font-weight: var(--font-weight-prose-strong);
+    color: var(--text);
+    line-height: 1.4;
+  }
+  .toast__text {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    line-height: 1.5;
+    word-break: break-word;
+    white-space: pre-line;
+  }
+  .toast__close {
+    flex: 0 0 auto;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border: none;
+    border-radius: var(--radius-row);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+  }
+  .toast__close:hover { background: var(--surface-hover); color: var(--text); }
+}
+
+/* ============================================================
+ * 窄面板防压烂（分割线拖拽/小窗口）：按钮不许缩（一缩就叠印/裁切），
+ * 提示文案与输入框让位（省略号/min-width:0）；工作区 tab 条退化为横向滚动。
+ * 注：unlayered——要压过前面 layer 内的同名属性。
+ * ============================================================ */
+.workspace__tabs { overflow-x: auto; scrollbar-width: none; }
+.workspace__tabs::-webkit-scrollbar { display: none; }
+.workspace__tab,
+.workspace__tabs .btn,
+.workspace__tabs .projswitcher { flex-shrink: 0; }
+
+.preview__bar .btn,
+.memory__bar .btn,
+.memory__bar .memory__status-seg,
+.memory__bar .memory__search,
+.skills-panel__skills-bar .btn,
+.mcp-panel__bar .btn,
+.filetree__toolbar,
+.preview__devices,
+.preview__urlbar .icon-btn { flex-shrink: 0; }
+
+.preview__hint,
+.mcp-panel__hint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

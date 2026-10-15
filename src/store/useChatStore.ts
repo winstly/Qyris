@@ -27,7 +27,8 @@ import { useStartupStore } from './useStartupStore'
 import { useAgentStore, type AgentEntryTool } from './useAgentStore'
 import { uid, safeParseObject } from '@/utils/id'
 import { estimateTokens, estimateMessagesTokens } from '@/utils/tokens'
-import { buildHistory, HISTORY_WINDOW } from '@/utils/chatHistory'
+import { buildHistory, HISTORY_WINDOW, userTextOf } from '@/utils/chatHistory'
+import { mergeSkills } from '@/utils/skillInstruction'
 import { CONTEXT_SUMMARY_HEADING, MEMORY_BLOCK_HEADING, SESSION_SUMMARY_HEADING } from '../../shared/prompt-contract'
 import { CancellationTokenSource } from '@base/cancellation'
 import { sleepInterruptible as tokenSleep } from '@base/async'
@@ -986,10 +987,7 @@ const askResolvers = new Map<string, (v: string) => void>()
 
 /** 剥掉 Skill 指令前缀 / 元素注入前缀，取检索用纯文本（不必完美，够检索即可） */
 function searchQueryOf(content: string): string {
-  return content
-    .replace(/^请先用 load_skill[^\n]*\n\n/s, '')
-    .replace(/^\[用户选中的预览页元素\][^\n]*\n\n/s, '')
-    .trim()
+  return userTextOf(content)
 }
 
 /** 单条记忆的注入行：content 截 80 字摘要 */
@@ -1238,8 +1236,8 @@ async function runAgentLoop(project: string) {
       try {
         const { settings, skillMetas } = useSettingsStore.getState()
         const projectSkillMetas = useAppStore.getState().projectSkillMetas
-        // 合并用户级 + 项目级 Skill（项目在前，用户在后）
-        const allSkills = [...projectSkillMetas, ...skillMetas]
+        // 合并用户级 + 项目级 Skill（项目在前，用户在后；同 id 去重，与输入框菜单同口径）
+        const allSkills = mergeSkills(projectSkillMetas, skillMetas)
         // 单 system 消息合并：基础提示词 + 会话摘要（在前）+ 上下文压缩摘要 + 长期记忆（在后）
         const contextSummaryBlock = contextSummary ? `${CONTEXT_SUMMARY_HEADING}\n${contextSummary}` : null
         const systemContent = [buildSystemPrompt(project, allSkills), summaryBlock, contextSummaryBlock, memoryBlock]

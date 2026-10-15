@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
+import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
 import { IconClock, IconClose, IconFolder, IconPlus, IconTrash } from '@/components/common/icons'
 import { basename } from '@/utils/path'
 import { timeAgo } from '@/utils/time'
+import { toast } from '@/components/common/Toast'
 
 /** 项目 Tab：顶栏「创建/打开项目」+ 分「当前项目」（本会话驻留/运行中）与「历史项目」（持久化记录）两段。 */
 export function ProjectsTab() {
@@ -15,10 +17,10 @@ export function ProjectsTab() {
   const closeProject = useAppStore((s) => s.closeProject)
   const removeRecentProject = useAppStore((s) => s.removeRecentProject)
   const showConfirm = useAppStore((s) => s.showConfirm)
-  const showAlert = useAppStore((s) => s.showAlert)
   const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
   // 历史项目 = 最近记录里排除当前已打开（避免与「当前项目」重复）
   const historyOnly = recentProjects.filter((p) => !openProjects.includes(p.path))
+  const paged = usePaged(historyOnly, PAGE_SIZE)
 
   /** 目录已不存在的历史项目路径（检测结果：打「已删除」标签、禁打开、只留删除钮） */
   const [missingPaths, setMissingPaths] = useState<ReadonlySet<string>>(new Set())
@@ -99,7 +101,7 @@ export function ProjectsTab() {
       if (deleteFailed) {
         // 删除失败：保留在列表，提示用户
         useAppStore.getState().closeDialog()
-        void showAlert('删除失败', deleteFailed)
+        toast.err('删除失败', deleteFailed)
       } else {
         // 删除成功：从列表移除
         removeRecentProject(proj.path)
@@ -110,7 +112,7 @@ export function ProjectsTab() {
       failed = String(e)
     }
     useAppStore.getState().closeDialog()
-    if (failed) void showAlert('移除失败', failed)
+    if (failed) toast.err('移除失败', failed)
   }
 
   const empty = recentProjects.length === 0 && openProjects.length === 0
@@ -126,7 +128,7 @@ export function ProjectsTab() {
         </button>
       </div>
 
-      {/* 目录已不存在的条目自带「已删除」标签——标签即提示，不再另出 toast */}
+      {/* 目录已不存在的条目整行置灰——置灰即提示，不再挂标签也不另出 toast */}
 
       {empty ? (
         <div className="history">
@@ -180,9 +182,11 @@ export function ProjectsTab() {
             {historyOnly.length === 0 ? (
               <div className="history__empty">暂无历史项目</div>
             ) : (
+              <>
               <div className="history__list">
-                {historyOnly.map((proj) => {
-                  // 目录已不存在：打「已删除」标签、禁打开（不进 openProject）、只留删除钮
+                {paged.slice.map((proj) => {
+                  // 目录已不存在：整行置灰禁打开（不进 openProject）、只留删除钮——
+                  // 不再挂「已删除」标签（置灰即真相，标签是视觉噪音）
                   const missing = missingPaths.has(proj.path)
                   return (
                     <div
@@ -192,13 +196,13 @@ export function ProjectsTab() {
                       role={missing ? undefined : 'button'}
                       tabIndex={missing ? undefined : 0}
                       onKeyDown={missing ? undefined : (e) => { if (e.key === 'Enter') void openProject(proj.path) }}
+                      title={missing ? '目录已不存在，可从历史中移除' : undefined}
                     >
                       <div className="history__item-icon"><IconFolder size={15} /></div>
                       <div className="history__item-info">
                         <span className="history__item-name">{proj.name}</span>
                         <span className="history__item-path mono">{proj.path}</span>
                       </div>
-                      {missing && <span className="history__item-badge">已删除</span>}
                       <span className="history__item-time">{timeAgo(proj.lastOpened)}</span>
                       {!missing && (
                         <button
@@ -222,6 +226,8 @@ export function ProjectsTab() {
                   )
                 })}
               </div>
+              <Pager page={paged.page} pageCount={paged.pageCount} total={paged.total} onPage={paged.setPage} />
+              </>
             )}
           </div>
         </div>

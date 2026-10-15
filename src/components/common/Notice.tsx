@@ -1,8 +1,7 @@
 /**
- * 提示条（ok/err）+ 自动收口：全仓面板共用一份渲染与节奏（6s 不粘屏）。
- * 静态错误提示（无自动消失）也可直接用 <Notice/>，不接 useNotice 即常驻。
+ * 静态提示条（ok/err，无自动消失）：常驻状态展示用（列表加载失败等）。
+ * 操作反馈不走这里——统一出口是 Toast（右上角冒泡，自动消失）。
  */
-import { useEffect, useState } from 'react'
 import { IconAlert, IconCheck } from './icons'
 
 export interface NoticeState {
@@ -18,15 +17,4 @@ export function Notice({ notice }: { notice: NoticeState | null }) {
       <span>{notice.text}</span>
     </div>
   )
-}
-
-/** notice 状态 + 自动消失（timeoutMs 缺省 6s） */
-export function useNotice(timeoutMs = 6000): [NoticeState | null, (n: NoticeState | null) => void] {
-  const [notice, setNotice] = useState<NoticeState | null>(null)
-  useEffect(() => {
-    if (!notice) return
-    const t = window.setTimeout(() => setNotice(null), timeoutMs)
-    return () => window.clearTimeout(t)
-  }, [notice, timeoutMs])
-  return [notice, setNotice]
 }

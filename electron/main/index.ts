@@ -238,8 +238,23 @@ function registerIpc(): void {
   handle('memory_delete', (_e, p) => memory.memoryDelete(p.id))
   handle('memory_move_scope', (_e, p) => memory.memoryMoveScope(p.id, p.target, p.projectRoot))
   handle('memory_clear', (_e, p) => memory.memoryClear(p.scope, p.projectRoot))
-  handle('memory_stats', () => memory.memoryStats())
-  handle('memory_last_tidy', () => memory.lastTidy())
+  handle('memory_stats', (_e, p) => memory.memoryStats(p?.projectRoot ?? null))
+  handle('memory_last_tidy', (_e, p) => memory.lastTidy(p?.projectRoot ?? null))
+  // 手动新增（面板「新增」入口）：origin 由主进程钉死 user_explicit——渲染层不可自填来源。
+  // 走 createOrFoldAtomic（查重→折叠/显式取代）而非 memoryCreate 直建：同 (工程,分类,标题)
+  // 已有活跃条目时直建会撞 idx_mem_active_title 唯一索引抛 SqliteError，折叠才是契约正门
+  handle('memory_create', (_e, p) => memory.createOrFoldAtomic({
+    projectRoot: p.projectRoot ?? undefined,
+    global: p.global === true,
+    tier: p.tier === 'short' ? 'short' : 'long',
+    category: String(p.category ?? 'fact'),
+    title: String(p.title ?? ''),
+    content: String(p.content ?? ''),
+    importance: typeof p.importance === 'number' ? p.importance : undefined,
+    origin: 'user_explicit',
+  }))
+  // 蒸馏 token 计数重置（面板状态条入口）：只清统计，不动记忆数据
+  handle('memory_reset_distill', () => memory.memoryResetDistillTokens())
   // P3 备份通道（对话框绑定调用方窗口）
   handle('memory_export', (e, p) =>
     memory.memoryExport(p.scope, p.projectRoot ?? undefined, BrowserWindow.fromWebContents(e.sender)))

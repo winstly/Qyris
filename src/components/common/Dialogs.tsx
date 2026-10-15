@@ -39,7 +39,6 @@ export function Dialogs() {
   if (!dialog) return null
 
   const isPrompt = dialog.kind === 'prompt'
-  const isAlert = dialog.kind === 'alert'
   const isChoice = dialog.kind === 'choice'
   const hasChecks = !!dialog.checks?.length
 
@@ -120,14 +119,14 @@ export function Dialogs() {
             </>
           ) : (
             <>
-              {!isAlert && <button className="btn btn--ghost" onClick={cancel} disabled={confirming}>取消</button>}
+              <button className="btn btn--ghost" onClick={cancel} disabled={confirming}>取消</button>
               <button
                 className="btn btn--primary"
                 onClick={confirm}
                 autoFocus
                 disabled={(isPrompt && !value.trim()) || confirming}
               >
-                {confirming ? (dialog.confirmingText ?? '处理中…') : isAlert ? '知道了' : dialog.confirmLabel ?? '确定'}
+                {confirming ? (dialog.confirmingText ?? '处理中…') : dialog.confirmLabel ?? '确定'}
               </button>
             </>
           )}

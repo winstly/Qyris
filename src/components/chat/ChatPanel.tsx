@@ -12,6 +12,7 @@ import { ModelMemoryDialog } from '@/components/shell/ModelMemoryDialog'
 import { api } from '@/services/desktop'
 import { useMemoryStore } from '@/store/useMemoryStore'
 import { IconTrash, IconUndo, IconModel } from '@/components/common/icons'
+import { toast } from '@/components/common/Toast'
 
 const STATUS_LABEL: Record<ChatStatus, string> = {
   idle: '待命',
@@ -56,10 +57,7 @@ export function ChatPanel({ showHeaderActions = true }: { showHeaderActions?: bo
     )
     if (!ok) return
     const n = await useFileStore.getState().restoreSession(sessionId)
-    void useAppStore.getState().showAlert(
-      '已回退',
-      n > 0 ? `已回退 ${n} 个文件到会话开始前。` : '本次会话没有可回退的文件改动。',
-    )
+    toast.ok('已回退', n > 0 ? `已回退 ${n} 个文件到会话开始前。` : '本次会话没有可回退的文件改动。')
   }
 
   const clearChat = async () => {

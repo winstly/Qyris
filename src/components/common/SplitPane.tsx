@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 
 interface SplitPaneProps {
   orientation: 'vertical' | 'horizontal'
@@ -27,6 +27,29 @@ export function SplitPane({
   const containerRef = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState(false)
   const vertical = orientation === 'vertical'
+  // 最新 ratio/回调经 ref 读取：ResizeObserver 只订阅一次，不随父组件每帧新闭包重建
+  const ratioRef = useRef(ratio)
+  ratioRef.current = ratio
+  const onRatioChangeRef = useRef(onRatioChange)
+  onRatioChangeRef.current = onRatioChange
+
+  // 容器尺寸变化后重钳 ratio：minFirst/minSecond 只在拖拽/键盘时生效，窗口一缩、
+  // 存储的百分比就会把某一侧压过下限（如文件树 <180px 后定位/折叠钮被裁掉）。
+  // ResizeObserver 按最新容器尺寸把 ratio 拉回界内，两侧下限冲突时第二侧赢。
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || (minFirst <= 0 && minSecond <= 0)) return
+    const ro = new ResizeObserver(() => {
+      const total = vertical ? container.clientWidth : container.clientHeight
+      if (total <= 0) return
+      const r = ratioRef.current
+      let next = Math.max(minFirst / total, r)
+      next = Math.min(1 - minSecond / total, next)
+      if (Math.abs(next - r) > 0.0005) onRatioChangeRef.current(next)
+    })
+    ro.observe(container)
+    return () => ro.disconnect()
+  }, [vertical, minFirst, minSecond])
 
   const onPointerDown = useCallback((e: React.PointerEvent) => {
     e.preventDefault()

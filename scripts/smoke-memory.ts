@@ -324,23 +324,28 @@ async function main(): Promise<void> {
     })
 
     console.log('⑩ memory_stats 与 clear：')
-    const stats = await memoryStats()
-    check('stats 汇总正确', () => {
-      assert.equal(stats.total, 3) // itemG + itemB + itemT2
-      assert.equal(stats.byTier.long, 2)
-      assert.equal(stats.byTier.short, 1)
-      assert.ok((stats.byCategory.preference ?? 0) >= 1)
+    const stats = await memoryStats(root)
+    const statsGlobal = await memoryStats(null)
+    check('stats 按范围出账（工程档/全局档分账，与列表同口径）', () => {
+      assert.equal(stats.total, 1) // 工程 root：itemA
+      assert.equal(stats.byTier.long, 1)
+      assert.equal(statsGlobal.total, 1) // global：itemG
+      assert.equal(statsGlobal.byTier.long, 1)
+      assert.ok((statsGlobal.byCategory.preference ?? 0) >= 1)
       assert.equal(stats.vecAvailable, true)
       assert.equal(stats.embedReady, true)
       assert.ok(stats.dbBytes > 0)
     })
     await memoryClear('project', root2)
     await checkAsync('clear(project) 只清本工程', async () => {
-      assert.equal((await memoryStats()).total, 2) // itemG + itemT2
+      assert.equal((await memoryStats(root2)).total, 0) // beta 已清
+      assert.equal((await memoryStats(root)).total, 1) // itemT2 不受影响（itemA 已在三态③删除）
+      assert.equal((await memoryStats(null)).total, 1) // itemG 不受影响
     })
     await memoryClear('global')
     await checkAsync('clear(global) 只清跨工程', async () => {
-      assert.equal((await memoryStats()).total, 1) // itemT2
+      assert.equal((await memoryStats(null)).total, 0) // itemG 已清
+      assert.equal((await memoryStats(root)).total, 1) // itemT2 不受影响
     })
 
     console.log('⑪ 存储迁移（happy + 校验拒绝 + 回滚）：')
@@ -684,7 +689,10 @@ async function main(): Promise<void> {
 
     setConfigWriter(null)
     await memoryClear('all')
-    await checkAsync('clear(all) 清空全部', async () => assert.equal((await memoryStats()).total, 0))
+    await checkAsync('clear(all) 清空全部', async () => {
+      assert.equal((await memoryStats(null)).total, 0)
+      assert.equal((await memoryStats(root)).total, 0)
+    })
   } finally {
     // 先 await 关库再删临时目录：Windows 上 Worker 还握着 db 文件时 rm 会 EPERM
     await closeDb()

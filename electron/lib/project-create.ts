@@ -7,6 +7,7 @@ import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { errorMessage } from './util'
 import { buildChildEnv } from './proc-env'
+import type { CloneProgress, CloneResult } from '../../shared/ipc-types'
 
 /** 在 parentDir 下创建一个空的项目目录并返回其绝对路径 */
 export async function createEmptyProject(parentDir: string, name: string): Promise<string> {
@@ -29,34 +30,78 @@ interface CloneRepo {
   branch?: string
 }
 
-/** 克隆进度钩子：index/total 为仓库序，name 为仓库名，stage 为阶段文案，pct 为百分比（无法解析时 null） */
 interface CloneHooks {
-  onProgress?: (info: { index: number; total: number; name: string; stage: string; pct: number | null }) => void
+  onProgress?: (info: CloneProgress) => void
 }
 
-/** 在 parentDir 下克隆多个仓库（逐个串行执行），每个仓库克隆为以仓库名命名的子目录，返回所有克隆路径 */
-export async function cloneRepos(parentDir: string, repos: CloneRepo[], hooks?: CloneHooks): Promise<string[]> {
+/** 并发上限：clone 是网络/磁盘密集，全放开只会互相抢带宽（且易撞远端限流），3 路并行已吃满常见带宽 */
+const CLONE_CONCURRENCY = 3
+
+/**
+ * 在 parentDir 下克隆多个仓库（并发执行，上限 CLONE_CONCURRENCY），每个仓库克隆为以仓库名命名的子目录。
+ * 单仓失败不阻断其余仓库（网络抖动不该拖死整批）；结果见 CloneResult。
+ * 取消（cancelClones）以「克隆已取消」抛出——已完成的仓库保持在盘上，进度事件已各自收场。
+ */
+export async function cloneRepos(parentDir: string, repos: CloneRepo[], hooks?: CloneHooks): Promise<CloneResult> {
   if (!repos.length) throw new Error('至少提供一个仓库地址')
   cloneCancelRequested = false
-  const results: string[] = []
-  let index = 0
-  for (const repo of repos) {
-    // 每个仓库开跑前查取消：取消发生在两仓库间隙时不必再白克隆一整个仓库
-    if (cloneCancelRequested) throw new Error('克隆已取消')
-    const trimmed = repo.url.trim()
-    if (!trimmed) continue
+
+  // 全量预校验：分支引用合法 + 目标目录名去重。重名必须在开跑前拦——
+  // 并行时两个 git 会往同一目标目录写，直接写坏仓库
+  const jobs: { index: number; url: string; branch?: string; name: string }[] = []
+  const seen = new Map<string, number>()
+  for (const [i, repo] of repos.entries()) {
+    const url = repo.url.trim()
+    if (!url) continue
     const branch = repo.branch?.trim() || undefined
     if (branch) assertSafeGitRef(branch, '分支名')
-    const repoName = guessRepoName(trimmed)
-    const target = path.join(parentDir, repoName)
-    hooks?.onProgress?.({ index, total: repos.length, name: repoName, stage: '开始克隆', pct: null })
-    await gitClone(trimmed, target, branch, {
-      onProgress: (p) => hooks?.onProgress?.({ index, total: repos.length, name: repoName, ...p }),
-    })
-    index++
-    results.push(target)
+    const name = guessRepoName(url)
+    const prev = seen.get(name)
+    if (prev !== undefined) throw new Error(`仓库名重复：「${name}」对应两个地址，会克隆到同一目录，请去掉其中一个`)
+    seen.set(name, i)
+    jobs.push({ index: i, url, branch, name })
   }
-  return results
+
+  const total = jobs.length
+  const outcomes = new Array<'ok' | Error>(total)
+  const targets = new Array<string>(total)
+  let cursor = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const k = cursor++
+      if (k >= jobs.length) return
+      const job = jobs[k]
+      // 每个仓库开跑前查取消：取消发生在仓库间隙时不必再白克隆一整个仓库
+      if (cloneCancelRequested) {
+        outcomes[k] = new Error('克隆已取消')
+        continue
+      }
+      const target = path.join(parentDir, job.name)
+      hooks?.onProgress?.({ index: job.index, total, name: job.name, stage: '开始克隆', pct: null, state: 'cloning' })
+      try {
+        await gitClone(job.url, target, job.branch, {
+          onProgress: (p) => hooks?.onProgress?.({ index: job.index, total, name: job.name, ...p, state: 'cloning' }),
+        })
+        targets[k] = target
+        outcomes[k] = 'ok'
+        hooks?.onProgress?.({ index: job.index, total, name: job.name, stage: '完成', pct: 100, state: 'done' })
+      } catch (e) {
+        const msg = errorMessage(e)
+        outcomes[k] = new Error(msg)
+        hooks?.onProgress?.({ index: job.index, total, name: job.name, stage: '失败', pct: null, state: 'error', error: msg })
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CLONE_CONCURRENCY, jobs.length) }, worker))
+  if (cloneCancelRequested) throw new Error('克隆已取消')
+
+  const cloned: string[] = []
+  const failed: CloneResult['failed'] = []
+  for (const [k, job] of jobs.entries()) {
+    if (outcomes[k] === 'ok') cloned.push(targets[k])
+    else failed.push({ index: job.index, name: job.name, error: (outcomes[k] as Error).message })
+  }
+  return { cloned, failed }
 }
 
 /** 测试远端仓库连通性：成功返回分支列表（默认分支优先），失败返回 error 文案 */
@@ -118,10 +163,15 @@ export async function gitCheckout(dir: string, branch: string): Promise<void> {
 
 // ---------- 内部工具 ----------
 
-/** 从 git URL 猜测仓库名（去掉 .git 后缀，取最后一段） */
+/** 从 git URL 猜测仓库名（去掉 .git 后缀，取最后一段）。
+ *  兼容 https://…/repo.git、git@host:org/repo.git、以及本地路径（Windows 反斜杠） */
 function guessRepoName(url: string): string {
-  const last = url.split('/').pop() ?? url
-  return last.replace(/\.git$/, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'repo'
+  const cleaned = url.replace(/[\\/]+$/, '')
+  const seg = cleaned.split(/[\\/]/).pop() ?? cleaned
+  // scp 形态 host:repo（无斜杠）时剥掉 host: 前缀
+  const colon = seg.lastIndexOf(':')
+  const tail = colon >= 0 ? seg.slice(colon + 1) : seg
+  return tail.replace(/\.git$/, '').replace(/[^a-zA-Z0-9._-]/g, '_') || 'repo'
 }
 
 /** git CLI 参数注入守卫：分支/引用若以 - 开头会被当成选项，直接拒绝 */

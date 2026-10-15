@@ -6,7 +6,21 @@
  * （category='summary'）注入 system 区补齐。
  */
 import type { ChatMessage, OAIMessage } from '@/types'
-import { skillLoadInstruction } from '@/utils/skillInstruction'
+import { skillLoadInstruction, stripSkillInstruction } from '@/utils/skillInstruction'
+
+/** 元素注入块前缀：send() 拼装时垫在消息最外层（Skill 指令与用户原文在其后） */
+const ELEMENT_PREFIX = '[用户选中的预览页元素]'
+
+/** 存储消息 → 用户原文：剥元素注入块与 Skill 指令前缀（这两段对 AI 可见，用户只看卡片）。
+ *  元素块在最外层，先剥元素再剥 skill——反序剥不掉 skill 前缀。无前缀消息原样 trim 返回。 */
+export function userTextOf(content: string): string {
+  let rest = content
+  if (rest.startsWith(ELEMENT_PREFIX)) {
+    const idx = rest.indexOf('\n\n', rest.indexOf(']'))
+    rest = idx >= 0 ? rest.slice(idx + 2) : ''
+  }
+  return stripSkillInstruction(rest).trim()
+}
 
 /** 工作记忆窗口大小（消息条数）。窗口起点回退到 user 边界时可少量超出。 */
 export const HISTORY_WINDOW = 40

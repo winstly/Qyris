@@ -165,11 +165,15 @@ async function main(): Promise<void> {
   assert(!panel.includes('isBuiltinDir'), '废弃 isBuiltinDir 分叉（策略收敛到 canManage）')
   assert(panel.split('canManage').length - 1 >= 3, 'canManage 统管导入/删除/空态三处')
 
-  console.log('提示条契约（不许粘屏——自动消失；行为断言在 smoke:ui）：')
+  console.log('反馈通道契约（操作反馈=Toast；静态常驻状态=Notice；行为断言在 smoke:ui）：')
   const noticeSrc = readFileSync(join(process.cwd(), 'src', 'components', 'common', 'Notice.tsx'), 'utf8')
-  assert(/export function useNotice/.test(noticeSrc) && /setTimeout\(/.test(noticeSrc), 'useNotice 是自动收口的唯一实现点')
-  assert(panel.includes('useNotice') && mcpSrc.includes('useNotice'), '技能/MCP 面板提示条走 useNotice（无各自计时副本）')
-  assert(!/setTimeout\(\(\) => setNotice/.test(panel) && !/setTimeout\(\(\) => setNotice/.test(mcpSrc), '面板内不再自持提示条计时')
+  const toastSrc = readFileSync(join(process.cwd(), 'src', 'components', 'common', 'Toast.tsx'), 'utf8')
+  const appStoreSrc = readFileSync(join(process.cwd(), 'src', 'store', 'useAppStore.ts'), 'utf8')
+  assert(/export const toast/.test(toastSrc) && /export function ToastHost/.test(toastSrc), 'Toast 是操作反馈统一出口（toast 命令式入口 + ToastHost 挂载点）')
+  assert(!/export function useNotice/.test(noticeSrc), 'useNotice 已退役（静态常驻状态直接用 <Notice/>）')
+  assert(!/showAlert/.test(appStoreSrc), 'showAlert 已退役（不许回流）')
+  assert(panel.includes("common/Toast") && mcpSrc.includes("common/Toast"), '技能/MCP 面板操作反馈走 toast（无各自计时副本）')
+  assert(!/useNotice|showAlert/.test(panel) && !/useNotice|showAlert/.test(mcpSrc), '面板内不再自持提示条计时/旧模态告警')
 
   if (failures > 0) {
     console.error(`\n${failures} 项断言失败`)

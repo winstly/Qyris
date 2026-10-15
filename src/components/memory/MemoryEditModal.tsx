@@ -1,6 +1,7 @@
 /**
- * 记忆编辑弹窗：卡片行内编辑的替代形态（侧边栏 260px 塞不下表单，卡片正文恒定两行截断，
+ * 记忆编辑/新增弹窗：卡片行内编辑的替代形态（侧边栏 260px 塞不下表单，卡片正文恒定两行截断，
  * 全文查看与编辑都收敛在这里——弹窗即详情视图）。结构沿用 SettingsDialog 的 mask+modal 惯例。
+ * item=null = 新增模式（手动添加记忆，用户/项目记忆共用本弹窗，落点由父级 scopeHint 说明）。
  * 草稿在打开时以 item 快照初始化，此后不随 item prop 重同步——后台重载（memory-changed 刷新列表）
  * 不得打断进行中的编辑。保存失败时 onSave 返回 false，弹窗保持开启可重试。
  */
@@ -19,22 +20,23 @@ interface MemoryRowDraft {
   importance: string
 }
 
-function draftOf(item: MemoryItem): MemoryRowDraft {
-  return {
-    title: item.title,
-    content: item.content,
-    category: item.category,
-    importance: String(item.importance),
-  }
+function draftOf(item: MemoryItem | null): MemoryRowDraft {
+  // 新增档缺省 0.6：与主进程 user_explicit 重要度下限对齐（亲口说的，衰减打不穿）
+  return item
+    ? { title: item.title, content: item.content, category: item.category, importance: String(item.importance) }
+    : { title: '', content: '', category: 'fact', importance: '0.6' }
 }
 
-export function MemoryEditModal({ item, onSave, onClose, readOnly }: {
-  item: MemoryItem
-  /** 保存由父级执行（store.update / IPC），返回是否成功：失败时弹窗不关、草稿保留 */
+export function MemoryEditModal({ item, onSave, onClose, readOnly, scopeHint }: {
+  /** null = 新增模式 */
+  item: MemoryItem | null
+  /** 保存由父级执行（store.update / IPC create），返回是否成功：失败时弹窗不关、草稿保留 */
   onSave: (patch: MemoryUpdatePatch) => Promise<boolean>
   onClose: () => void
   /** 整理中只读：禁用保存 */
   readOnly?: boolean
+  /** 落点说明（「保存为工程记忆…」/「保存为跨工程用户记忆」），新增模式展示 */
+  scopeHint?: string
 }) {
   const [draft, setDraft] = useState<MemoryRowDraft>(() => draftOf(item))
   const [saving, setSaving] = useState(false)
@@ -68,13 +70,14 @@ export function MemoryEditModal({ item, onSave, onClose, readOnly }: {
       onMouseDown={(e) => { if (e.target === e.currentTarget) close() }}
       onKeyDown={(e) => { if (e.key === 'Escape') close() }}
     >
-      <div className="modal" role="dialog" aria-modal="true" aria-label="编辑记忆">
+      <div className="modal" role="dialog" aria-modal="true" aria-label={item ? '编辑记忆' : '新增记忆'}>
         <div className="modal__head">
-          <span>编辑记忆</span>
+          <span>{item ? '编辑记忆' : '新增记忆'}</span>
           <button className="icon-btn" onClick={close} aria-label="关闭" disabled={saving}>
             <IconClose size={14} />
           </button>
         </div>
+        {!item && scopeHint && <p className="modal__msg">{scopeHint}</p>}
 
         <div className="modal__body">
           <label className="field">

@@ -45,6 +45,11 @@ export default defineConfig({
       },
       rollupOptions: {
         onwarn: onRollupWarn,
+        // cpu-features（ssh2 的可选原生依赖）与 onnxruntime-node（@huggingface/transformers
+        // 的原生后端）一律 external：原生 .node 进不了 rollup 产物，须留 require 字面量到运行期。
+        // onnxruntime-web 是 wasm 后端，embed.ts 靠 require.resolve 定位其 dist 目录，同样不许进包。
+        // 运行时 ssh2 自带 try/catch 降级、embed.ts 自带 module._load 劫持（onnxruntime-node 走 wasm）。
+        external: ['cpu-features', 'onnxruntime-node', 'onnxruntime-web'],
       },
     },
   },

@@ -15,7 +15,9 @@ import { api, onMcpTestState } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { EmptyState } from '@/components/common/EmptyState'
 import { DetailDialog } from '@/components/common/DetailDialog'
-import { Notice, useNotice } from '@/components/common/Notice'
+import { Notice } from '@/components/common/Notice'
+import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
+import { toast } from '@/components/common/Toast'
 import { Select } from '@/components/common/Select'
 import { ScopeRow } from '@/components/common/ScopeRow'
 import {
@@ -94,7 +96,6 @@ export function McpPanel() {
   const [tests, setTests] = useState<Record<string, TestState>>({})
   /** 结果键 = `${scope}::${name}`（主进程状态口径） */
   const keyOf = (name: string): string => `${scope === 'global' || !projectPath ? 'global' : projectConfigKey(projectPath)}::${name}`
-  const [notice, setNotice] = useNotice()
 
   // 测试状态：挂载拉一次进程级快照 + 事件持续同步（切换切片/重开面板不丢结果）。
   // try/catch 包裹：API 缺席时 wrap 同步抛，裸 .catch 接不住
@@ -128,6 +129,8 @@ export function McpPanel() {
   const projectServers = projectPath ? (projectMaps[projectConfigKey(projectPath)] ?? projectMaps[projectPath] ?? {}) : {}
   const activeMap: Record<string, McpServerEntry> = scope === 'global' ? globalMap : projectServers
   const rows: ServerRow[] = Object.entries(activeMap).map(([name, entry]) => ({ name, entry }))
+  // server 卡片分页：切配置域回第一页
+  const paged = usePaged(rows, PAGE_SIZE, scope)
 
   /** 整表写回当前域（下一条消息生效）：项目域走主进程 RMW（setProjectMcpServers，读最新盘上状态），
    *  避免渲染层 mount 快照整表覆写把其他窗口/项目的新改动抹掉 */
@@ -155,10 +158,15 @@ export function McpPanel() {
   const onDelete = async (row: ServerRow): Promise<void> => {
     const ok = await showConfirm('删除 MCP server', `确定删除「${row.name}」？不会删除磁盘上的 server 程序。`)
     if (ok !== true) return
-    const next = { ...activeMap }
-    delete next[row.name]
-    await persistScope(next)
-    setTests((t) => { const n = { ...t }; delete n[keyOf(row.name)]; return n })
+    try {
+      const next = { ...activeMap }
+      delete next[row.name]
+      await persistScope(next)
+      setTests((t) => { const n = { ...t }; delete n[keyOf(row.name)]; return n })
+      toast.ok('已删除 server', `「${row.name}」已从${scope === 'global' ? '全局域' : '项目域'}移除。`)
+    } catch (e) {
+      toast.err('删除失败', String(e))
+    }
   }
 
   const onTest = async (row: ServerRow): Promise<void> => {
@@ -176,35 +184,43 @@ export function McpPanel() {
   const onSaveEdit = async (original: string | null, name: string, entry: McpServerEntry): Promise<void> => {
     const clean = name.trim()
     const kind = entryKind(entry)
-    if (!clean) { setNotice({ kind: 'err', text: '名称不能为空' }); return }
-    if (kind === 'stdio' && !entry.command?.trim()) { setNotice({ kind: 'err', text: 'stdio 型需要启动命令' }); return }
+    if (!clean) { toast.err('无法保存', '名称不能为空'); return }
+    if (kind === 'stdio' && !entry.command?.trim()) { toast.err('无法保存', 'stdio 型需要启动命令'); return }
     if (kind === 'streamableHttp' && !/^https?:\/\//i.test(entry.url ?? '')) {
-      setNotice({ kind: 'err', text: 'HTTP 型需要 http/https 端点 URL' }); return
+      toast.err('无法保存', 'HTTP 型需要 http/https 端点 URL'); return
     }
     if (!/^[a-zA-Z0-9_-]+$/.test(clean)) {
-      setNotice({ kind: 'err', text: '名称仅允许字母/数字/下划线/连字符（会进工具命名空间）' }); return
+      toast.err('无法保存', '名称仅允许字母/数字/下划线/连字符（会进工具命名空间）'); return
     }
     if (FORBIDDEN_KEYS.has(clean)) {
-      setNotice({ kind: 'err', text: '名称「' + clean + '」是保留字，不能用作 server 名' }); return
+      toast.err('无法保存', `名称「${clean}」是保留字，不能用作 server 名`); return
     }
     // 改名落点与已有条目重合 = 覆盖对方配置，必须显式拦（新建与改名同口径）。
     // hasOwnProperty 排除原型链（toString/constructor 等 Object.prototype 成员会被误判已存在）
     if (Object.prototype.hasOwnProperty.call(activeMap, clean) && clean !== original) {
-      setNotice({ kind: 'err', text: `名称「${clean}」在本域已存在` }); return
+      toast.err('无法保存', `名称「${clean}」在本域已存在`); return
     }
-    const next = { ...activeMap }
-    if (original && original !== clean) delete next[original]
-    next[clean] = entry
-    await persistScope(next)
-    setEditing(null)
-    setNotice({ kind: 'ok', text: '已保存——下一条消息生效（连接池按新表就地重建）' })
+    try {
+      const next = { ...activeMap }
+      if (original && original !== clean) delete next[original]
+      next[clean] = entry
+      await persistScope(next)
+      setEditing(null)
+      toast.ok('已保存', '下一条消息生效（连接池按新表就地重建）')
+    } catch (e) {
+      toast.err('保存失败', String(e))
+    }
   }
 
   /** JSON 导入：导入到当前域；接受 {mcpServers:{…}} / {servers:{…}} / 裸 map；同域同名覆盖 */
   const onImportJson = async (parsed: Record<string, McpServerEntry>): Promise<void> => {
-    await persistScope({ ...activeMap, ...parsed })
-    setImporting(false)
-    setNotice({ kind: 'ok', text: `已导入 ${Object.keys(parsed).length} 个 server 到${scope === 'global' ? '全局域' : '项目域'}——下一条消息生效` })
+    try {
+      await persistScope({ ...activeMap, ...parsed })
+      setImporting(false)
+      toast.ok('导入完成', `已导入 ${Object.keys(parsed).length} 个 server 到${scope === 'global' ? '全局域' : '项目域'}——下一条消息生效`)
+    } catch (e) {
+      toast.err('导入失败', String(e))
+    }
   }
 
   return (
@@ -252,8 +268,6 @@ export function McpPanel() {
           </span>
         </div>
 
-        <Notice notice={notice} />
-
         {!loaded ? (
           <div className="skills-panel__loading">加载中…</div>
         ) : rows.length === 0 ? (
@@ -267,8 +281,9 @@ export function McpPanel() {
             }
           />
         ) : (
+          <>
           <div className="mcp-panel__list" role="list" aria-label="MCP 服务器列表">
-            {rows.map((row) => {
+            {paged.slice.map((row) => {
               const t = tests[keyOf(row.name)]
               const active = isActive(row.entry)
               return (
@@ -318,6 +333,8 @@ export function McpPanel() {
               )
             })}
           </div>
+          <Pager page={paged.page} pageCount={paged.pageCount} total={paged.total} onPage={paged.setPage} />
+          </>
         )}
 
         {viewing && (

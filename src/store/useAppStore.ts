@@ -3,6 +3,7 @@
  * UI 偏好经 localStorage 持久化；业务配置经后端 config.json 持久化。
  */
 import { create } from 'zustand'
+import { toast } from '@/components/common/Toast'
 import { persist } from 'zustand/middleware'
 import { api, isDesktop } from '@/services/desktop'
 import { SECRET_KEY } from '@/services/ai'
@@ -65,7 +66,7 @@ interface DialogChoice {
 }
 
 interface DialogRequest {
-  kind: 'prompt' | 'confirm' | 'alert' | 'choice'
+  kind: 'prompt' | 'confirm' | 'choice'
   title: string
   message?: string
   value?: string
@@ -183,7 +184,6 @@ interface AppState {
   clearStartupCommands: (projectPath: string) => Promise<void>
   showPrompt: (title: string, value?: string) => Promise<string | null>
   showConfirm: (title: string, message?: string, checks?: DialogCheck[], opts?: { holdOpen?: boolean; confirmingText?: string; confirmLabel?: string }) => Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>
-  showAlert: (title: string, message?: string) => Promise<void>
   /** 多选项对话框：返回被选中的 choice id，取消返回 null */
   showChoices: (title: string, message: string, choices: DialogChoice[]) => Promise<string | null>
   resolveDialog: (v: string | boolean | null | { confirmed: boolean; checks: Record<string, boolean> }) => void
@@ -363,7 +363,7 @@ export const useAppStore = create<AppState>()(
             await get().openProjectWithChoice(picked)
           } catch (e) {
             console.error('打开项目失败：', e)
-            void get().showAlert('无法打开项目', String(e))
+            toast.err('无法打开项目', String(e))
           }
         }
       },
@@ -644,11 +644,6 @@ export const useAppStore = create<AppState>()(
           } else {
             set({ dialog: { kind: 'confirm', title, message, resolve: (v) => resolve(v === true) } })
           }
-        }),
-
-      showAlert: (title, message) =>
-        new Promise<void>((resolve) => {
-          set({ dialog: { kind: 'alert', title, message, resolve: () => resolve() } })
         }),
 
       showChoices: (title, message, choices) =>

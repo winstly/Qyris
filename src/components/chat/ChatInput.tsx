@@ -3,7 +3,7 @@ import { useAppStore } from '@/store/useAppStore'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { isDesktop } from '@/services/desktop'
 import { fmtTok } from '@/utils/tokens'
-import { skillLoadInstruction } from '@/utils/skillInstruction'
+import { mergeSkills, skillLoadInstruction } from '@/utils/skillInstruction'
 import { IconSend, IconStop, IconClose } from '@/components/common/icons'
 import { useSlashCommand, SlashMenu } from './SlashMenu'
 import type { SkillMeta } from '@/types'
@@ -34,9 +34,9 @@ export function ChatInput() {
       ? '请先在设置中配置 API Key'
       : undefined
 
-  // 合并项目 Skill + 用户 Skill，项目在前
-  const allSkills = useMemo(() => [...projectSkillMetas, ...skillMetas], [projectSkillMetas, skillMetas])
-  const { slashOpen, setSlashOpen, setSlashFilter, slashIndex, setSlashIndex, filteredSkills, closeSlash } = useSlashCommand(allSkills)
+  // 合并项目 Skill + 用户 Skill，项目在前；同 id 去重（同目录挂全局+项目时双行假重复）
+  const allSkills = useMemo(() => mergeSkills(projectSkillMetas, skillMetas), [projectSkillMetas, skillMetas])
+  const { slashOpen, setSlashOpen, setSlashFilter, slashIndex, setSlashIndex, hoverSlashIndex, filteredSkills, closeSlash } = useSlashCommand(allSkills)
 
   const resize = () => {
     const ta = taRef.current
@@ -150,8 +150,14 @@ export function ChatInput() {
       }
       if (e.key === 'Escape') {
         e.preventDefault()
+        // 关菜单并把「/过滤词」从输入框里退掉，恢复暂存原文——留着 '/xxx' 下次回车
+        // 会把 skill 名当消息正文发出去（误带入聊天的入口之一）
+        const restored = savedTextRef.current
         savedTextRef.current = ''
         closeSlash()
+        setText(restored)
+        prevTextRef.current = restored
+        requestAnimationFrame(resize)
         return
       }
       // Enter 在 doSend 中处理
@@ -164,14 +170,15 @@ export function ChatInput() {
 
   return (
     <div className="chat__inputwrap">
-      {/* Slash 命令菜单 */}
+      {/* Slash 命令菜单（向上浮出：不挤占消息列表布局，也不被短窗口裁剪） */}
       {slashOpen && (
         <SlashMenu
           filteredSkills={filteredSkills}
           slashIndex={slashIndex}
           selectedIds={new Set(selectedSkills.map((s) => s.id))}
           onSelect={selectSkill}
-          onHoverIndex={setSlashIndex}
+          onHoverIndex={hoverSlashIndex}
+          className="slash-menu--chat"
         />
       )}
 

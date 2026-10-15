@@ -1,6 +1,6 @@
 /**
  * UI 组件运行时冒烟（jsdom + react-dom 真渲染）：结构/交互契约不再靠源码字符串钉。
- * 覆盖共享原语：Notice/useNotice（提示条 + 自动收口）、TabStrip（切页契约）、
+ * 覆盖共享原语：Notice（静态提示条）、Toast（操作反馈冒泡）、TabStrip（切页契约）、
  * ScopeRow（目录/配置域行）、MemoryItemRow（.card 基座组合）。
  * 运行：npm run smoke:ui
  */
@@ -8,7 +8,8 @@ import './ui-env'
 import { domWindow } from './ui-env'
 import { createRoot, type Root } from 'react-dom/client'
 import { act, type ReactElement } from 'react'
-import { Notice, useNotice, type NoticeState } from '../src/components/common/Notice'
+import { Notice } from '../src/components/common/Notice'
+import { ToastHost, toast, useToastStore } from '../src/components/common/Toast'
 import { TabStrip } from '../src/components/common/TabStrip'
 import { ScopeRow } from '../src/components/common/ScopeRow'
 import { MemoryItemRow } from '../src/components/memory/MemoryItemRow'
@@ -73,22 +74,25 @@ async function main(): Promise<void> {
     unmount(none.root, none.container)
   }
 
-  console.log('useNotice（自动收口——提示条不许粘屏）：')
+  console.log('Toast（push 上屏 / 堆叠 / 点击即关——操作反馈统一出口）：')
   {
-    const held: { snap: NoticeState | null; set: ((n: NoticeState | null) => void) | null } = { snap: null, set: null }
-    function Probe() {
-      const [notice, setNotice] = useNotice(5)
-      held.snap = notice
-      held.set = setNotice
-      return <Notice notice={notice} />
-    }
-    const { container, root } = mount(<Probe />)
-    act(() => { held.set!({ kind: 'ok', text: '动态提示' }) })
-    assert(held.snap?.text === '动态提示' && container.querySelector('.notice') !== null, 'setNotice 即时上屏')
-    // 异步 act：等定时器在 act 壳内 fire（否则 setState 在 act 外触发，React 出警告噪音）
-    await act(async () => { await sleep(30) })
-    assert(held.snap === null && container.querySelector('.notice') === null, '超时后自动收口（DOM 一并移除）')
+    useToastStore.setState({ items: [] }) // 模块级 store：用例间清场
+    const { container, root } = mount(<ToastHost />)
+    assert(container.querySelector('.toast-stack') === null, '空队列不渲染')
+    act(() => { toast.ok('已保存', '内容已更新') })
+    assert(container.querySelector('.toast--ok')?.textContent?.includes('已保存') === true, 'ok toast 上屏')
+    act(() => { toast.err('失败', '原因') })
+    assert(container.querySelectorAll('.toast').length === 2, '多条堆叠')
+    // 点击整卡即关（toast 是反馈不是弹窗）
+    const okCard = container.querySelector('.toast--ok')!
+    act(() => { okCard.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true })) })
+    assert(container.querySelectorAll('.toast').length === 1, '点击整卡关闭对应条目')
+    // 关闭钮同样收口
+    const closeBtn = container.querySelector('.toast--err .toast__close')!
+    act(() => { closeBtn.dispatchEvent(new domWindow.MouseEvent('click', { bubbles: true })) })
+    assert(container.querySelector('.toast-stack') === null, '全部关闭后容器移除')
     unmount(root, container)
+    useToastStore.setState({ items: [] })
   }
 
   console.log('TabStrip（tablist 语义 + 激活态 + 切换回调）：')

@@ -16,6 +16,7 @@ import { useFileStore } from '@/store/useFileStore'
 import { useBuildStore } from '@/store/useBuildStore'
 import { useChatStore, selectCurrentChat, patchSlice } from '@/store/useChatStore'
 import { useAgentStore } from '@/store/useAgentStore'
+import { mergeSkills } from '@/utils/skillInstruction'
 import type { SlotState } from '@/store/useBuildStore'
 import type { SubTask } from './subagent'
 import { joinPath } from '@/utils/path'
@@ -388,7 +389,7 @@ export async function executeTool(name: string, args: Record<string, unknown>, c
             return { ok: false, result: `错误：「${skillId}」是工具名，不是 Skill id——请直接调用工具 ${skillId}，无需 load_skill。`, summary: `工具名误当 Skill：${skillId}` }
           }
           const projectMetas = useAppStore.getState().projectSkillMetas
-          const known = [...projectMetas, ...skillMetas].map((m) => m.id).join('、')
+          const known = mergeSkills(projectMetas, skillMetas).map((m) => m.id).join('、')
           return {
             ok: false,
             result: known

@@ -4,6 +4,7 @@
  * 万级文件项目也不会一次性全量扫描。
  */
 import { create } from 'zustand'
+import { toast } from '@/components/common/Toast'
 import { api } from '@/services/desktop'
 import { basename } from '@/utils/path'
 import type { TreeNode } from '@/types'
@@ -476,8 +477,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
     try {
       const versions = await api.snapshotVersions(rootPath, path)
       if (versions.length === 0) {
-        const { useAppStore } = await import('./useAppStore')
-        void useAppStore.getState().showAlert('快照历史', '该文件没有可回退的快照。')
+        toast.info('快照历史', '该文件没有可回退的快照。')
         return
       }
       set({ snapshotHistory: { path, versions } })
@@ -497,8 +497,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
       await get().loadSnapshots()
       set({ snapshotHistory: null })
     } catch (e) {
-      const { useAppStore } = await import('./useAppStore')
-      void useAppStore.getState().showAlert('回退失败', String(e))
+      toast.err('回退失败', String(e))
     }
   },
 
@@ -553,8 +552,7 @@ export const useFileStore = create<FileState>()((set, get) => ({
       if (srcDir !== destDir) await get().loadChildren(destDir)
       await get().refreshExpanded()
     } catch (e) {
-      const { useAppStore } = await import('./useAppStore')
-      void useAppStore.getState().showAlert('粘贴失败', String(e))
+      toast.err('粘贴失败', String(e))
     }
   },
 

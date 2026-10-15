@@ -1,7 +1,7 @@
 /**
  * 用户记忆（跨工程全局记忆）：左侧面板的「🧠 记忆」区域。
  * 只显示 project_key='global' 的条目，与项目记忆（工作区 Tab）互不干扰。
- * 功能：搜索 + 列表（编辑走 MemoryEditModal）+ ⋯ 菜单（导出全部/导入/清空，IPC 复用主进程原生对话框）+ 统计。
+ * 功能：搜索 + 列表（新增/编辑走 MemoryEditModal）+ ⋯ 菜单（导出全部/导入/清空，IPC 复用主进程原生对话框）+ 统计。
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -12,8 +12,9 @@ import { MemoryItemRow, memoryDetailRows } from './MemoryItemRow'
 import { DetailDialog } from '@/components/common/DetailDialog'
 import { MemoryEditModal } from './MemoryEditModal'
 import { EmptyState } from '@/components/common/EmptyState'
-import { Notice, useNotice } from '@/components/common/Notice'
-import { IconAlert, IconLayers, IconSearch, IconClose } from '@/components/common/icons'
+import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
+import { toast } from '@/components/common/Toast'
+import { IconAlert, IconLayers, IconPlus, IconSearch, IconClose } from '@/components/common/icons'
 import type { MemoryItem, MemoryHit } from '@/types'
 import type { MemoryUpdatePatch } from '@/store/useMemoryStore'
 
@@ -23,8 +24,8 @@ export function UserMemorySection() {
   const update = useMemoryStore((s) => s.update)
   const remove = useMemoryStore((s) => s.remove)
   const clear = useMemoryStore((s) => s.clear)
+  const create = useMemoryStore((s) => s.create)
   const showConfirm = useAppStore((s) => s.showConfirm)
-  const showAlert = useAppStore((s) => s.showAlert)
   const projectPath = useAppStore((s) => s.projectPath)
   const projectName = useAppStore((s) => s.projectName)
   const extractingProjects = useMemoryStore((s) => s.extractingProjects)
@@ -34,8 +35,9 @@ export function UserMemorySection() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [input, setInput] = useState('')
-  /** 编辑弹窗目标（打开时以该条目快照初始化草稿，弹窗自持） */
+  /** 编辑弹窗目标（打开时以该条目快照初始化草稿，弹窗自持）；creating=true = 新增模式 */
   const [editingItem, setEditingItem] = useState<MemoryItem | null>(null)
+  const [creating, setCreating] = useState(false)
   const [viewingItem, setViewingItem] = useState<MemoryItem | null>(null)
 
   /** ⋯ 菜单：portal + fixed 定位（照 Select 惯例，摆脱滚动容器 overflow 裁剪） */
@@ -46,8 +48,6 @@ export function UserMemorySection() {
   /** 导出/导入运行态（导入含嵌入可能秒级；二者互斥防并发弹框） */
   const [exporting, setExporting] = useState(false)
   const [importing, setImporting] = useState(false)
-  /** 操作结果提示（ok/err，6s 自清） */
-  const [notice, setNotice] = useNotice()
 
   /** 整理中（任意工程在蒸馏）→ 禁用写操作：用户记忆是跨工程全局，任何工程蒸馏都可能写它 */
   const busy = extractingProjects.size > 0
@@ -177,14 +177,12 @@ export function UserMemorySection() {
   const onExport = async () => {
     if (exporting || importing) return
     setExporting(true)
-    setNotice(null)
     try {
       const r = await api.memoryExport('global')
-      if (r.ok) setNotice({ kind: 'ok', text: `已导出 ${r.count ?? 0} 条用户记忆：${r.path ?? ''}` })
-      else if (isCancelled(r.error)) setNotice(null)
-      else setNotice({ kind: 'err', text: r.error || '导出失败，请稍后重试。' })
+      if (r.ok) toast.ok('导出完成', `已导出 ${r.count ?? 0} 条用户记忆：\n${r.path ?? ''}`)
+      else if (!isCancelled(r.error)) toast.err('导出失败', r.error || '导出失败，请稍后重试。')
     } catch (e) {
-      setNotice({ kind: 'err', text: String(e) })
+      toast.err('导出失败', String(e))
     } finally {
       setExporting(false)
     }
@@ -194,18 +192,38 @@ export function UserMemorySection() {
   const onImport = async () => {
     if (exporting || importing || busy) return
     setImporting(true)
-    setNotice(null)
     try {
       const r = await api.memoryImport()
       if (r.ok) {
-        setNotice({ kind: 'ok', text: `导入完成：新增 ${r.imported ?? 0} 条，跳过 ${r.skipped ?? 0} 条。` })
+        toast.ok('导入完成', `新增 ${r.imported ?? 0} 条，跳过 ${r.skipped ?? 0} 条。`)
         await refreshAfterWrite()
-      } else if (isCancelled(r.error)) setNotice(null)
-      else setNotice({ kind: 'err', text: r.error || '导入失败，请稍后重试。' })
+      } else if (!isCancelled(r.error)) toast.err('导入失败', r.error || '导入失败，请稍后重试。')
     } catch (e) {
-      setNotice({ kind: 'err', text: String(e) })
+      toast.err('导入失败', String(e))
     } finally {
       setImporting(false)
+    }
+  }
+
+  /** 手动新增一条用户记忆：create 模式弹窗，保存走 store.create（global 档）。
+   *  同题活跃条目已存在时主进程折叠/取代（folded=true）——列表条数不涨，toast 说明避免「像失败」 */
+  const onCreateSave = async (patch: MemoryUpdatePatch): Promise<boolean> => {
+    try {
+      const { folded } = await create({
+        global: true,
+        tier: 'long',
+        category: patch.category ?? 'fact',
+        title: patch.title ?? '',
+        content: patch.content ?? '',
+        importance: patch.importance,
+      })
+      await refreshAfterWrite()
+      if (folded) toast.info('已合并到既有记忆', `已有同分类同标题的活跃记忆「${patch.title}」，内容已更新进去（旧版本归档留痕）。`)
+      else toast.ok('已新增用户记忆', `「${patch.title}」已保存为跨工程用户记忆。`)
+      return true
+    } catch (e) {
+      toast.err('新增记忆失败', String(e))
+      return false
     }
   }
 
@@ -218,31 +236,37 @@ export function UserMemorySection() {
       await clear('global', null)
       setInput('')
       await loadGlobal()
+      toast.ok('已清空用户记忆', '全部跨工程用户记忆已删除。')
     } catch (e) {
-      void showAlert('清空用户记忆失败', String(e))
+      toast.err('清空用户记忆失败', String(e))
     }
   }
 
   const visible = useMemo(() => hits ?? items, [hits, items])
+  const paged = usePaged(visible, PAGE_SIZE, input)
 
-  /** 弹窗保存：成功刷新列表并返回 true（弹窗自关），失败静默返回 false（弹窗保留草稿） */
+  /** 弹窗保存：成功刷新列表并返回 true（弹窗自关），失败弹错误（弹窗保留草稿可重试） */
   const onSave = async (id: string, patch: MemoryUpdatePatch): Promise<boolean> => {
     try {
       await update(id, patch)
       await loadGlobal()
+      toast.ok('已保存记忆', `「${patch.title}」已更新。`)
       return true
-    } catch { /* 静默 */ }
+    } catch (e) {
+      toast.err('保存记忆失败', String(e))
+    }
     return false
   }
 
-  /** 删除：确认 + 失败落错误条（与工作区记忆 Tab 同口径，删除是危险操作不能免确认） */
+  /** 删除：确认 + 失败弹窗告知（删除是危险操作不能免确认） */
   const onDelete = async (id: string, title: string) => {
     if ((await showConfirm('删除记忆', `确定删除「${title}」？删除后不可恢复。`)) !== true) return
     try {
       await remove(id)
       await loadGlobal()
+      toast.ok('已删除记忆', `「${title}」已删除。`)
     } catch (e) {
-      setError(String(e))
+      toast.err('删除记忆失败', String(e))
     }
   }
 
@@ -254,8 +278,9 @@ export function UserMemorySection() {
     try {
       await api.memoryMoveScope(id, 'project', projectPath)
       await loadGlobal()
+      toast.ok('已转为项目记忆', `「${title}」已转入工程「${projectName}」。`)
     } catch (e) {
-      setError(String(e))
+      toast.err('转换失败', String(e))
     }
   }
 
@@ -279,6 +304,15 @@ export function UserMemorySection() {
           )}
         </div>
         <div className="user-mem__menu-wrap" ref={moreRef}>
+          <button
+            className="icon-btn user-mem__more"
+            onClick={() => { setMenuOpen(false); setCreating(true) }}
+            aria-label="新增用户记忆"
+            title="新增用户记忆"
+            disabled={busy}
+          >
+            <IconPlus size={12} />
+          </button>
           <button
             className="icon-btn user-mem__more"
             onClick={openMenu}
@@ -325,9 +359,6 @@ export function UserMemorySection() {
         </div>
       </div>
 
-      {/* 操作结果提示 */}
-      <Notice notice={notice} />
-
       {/* 列表 */}
       <div className="user-mem__list">
         {loading ? (
@@ -340,10 +371,10 @@ export function UserMemorySection() {
           <EmptyState
             icon={<IconLayers size={18} />}
             title="暂无用户记忆"
-            text="跨工程的偏好和知识会自动沉淀在这里"
+            text="跨工程的偏好和知识会自动沉淀在这里，也可点 + 手动新增"
           />
         ) : (
-          visible.map((it) => (
+          paged.slice.map((it) => (
             <MemoryItemRow
               key={it.id}
               item={it}
@@ -358,6 +389,8 @@ export function UserMemorySection() {
           ))
         )}
       </div>
+
+      <Pager page={paged.page} pageCount={paged.pageCount} total={paged.total} onPage={paged.setPage} />
 
       {/* 统计 */}
       <div className="user-mem__status">
@@ -381,6 +414,15 @@ export function UserMemorySection() {
           item={editingItem}
           onSave={(patch) => onSave(editingItem.id, patch)}
           onClose={() => setEditingItem(null)}
+          readOnly={busy}
+        />
+      )}
+      {creating && (
+        <MemoryEditModal
+          item={null}
+          scopeHint="保存为跨工程用户记忆（长期档，所有工程都能检索到）"
+          onSave={onCreateSave}
+          onClose={() => setCreating(false)}
           readOnly={busy}
         />
       )}

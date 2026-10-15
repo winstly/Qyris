@@ -11,6 +11,7 @@ import { useDesktopEvents, useThemeSync, usePetChatStatus } from '@/hooks/useDes
 import { ProjectsTab } from '@/components/workspace/ProjectsTab'
 import { ChatPanel } from '@/components/chat/ChatPanel'
 import { Dialogs } from '@/components/common/Dialogs'
+import { ToastHost } from '@/components/common/Toast'
 import { CreateProjectDialog } from '@/components/workspace/CreateProjectDialog'
 import 'remixicon/fonts/remixicon.css'
 import '@/styles/tokens.css'
@@ -64,10 +65,12 @@ function PetPanelApp() {
   return (
     <div className="pet-panel">
       {/* 创建项目对话框（ProjectsTab「创建项目」按钮写 store，此处渲染）——须在 <Dialogs /> 之前，
-          否则创建/克隆失败的 showAlert 弹窗会被本对话框的遮罩盖住（同 z-index 按 DOM 顺序取胜） */}
+          否则创建/克隆失败的确认弹窗会被本对话框的遮罩盖住（同 z-index 按 DOM 顺序取胜） */}
       <CreateProjectDialog />
-      {/* 全局弹窗（showConfirm / showAlert / showPrompt 所在）——面板无此组件则编辑重发等功能永久挂起 */}
+      {/* 全局弹窗（showConfirm / showPrompt 所在）——面板无此组件则编辑重发等功能永久挂起 */}
       <Dialogs />
+      {/* 操作反馈 toast（新增/删除/编辑/失败提示的统一出口） */}
+      <ToastHost />
       {/* 标题栏：可拖拽 + 关闭 */}
       <div className="pet-panel__titlebar">
         <div className="pet-panel__titlebar-drag" />

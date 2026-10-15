@@ -4,6 +4,7 @@
  */
 import type { AppConfig, ChatMessage, ChatMessagePatch, CliAgentEventPayload, GitStatus, McpServerEntry, MemoryHit, MemoryItem, MemoryLastTidy, MemoryPatch, MemoryStats, PreviewConsoleEntry } from '@/types'
 import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
+import type { CloneProgress } from '../../shared/ipc-types'
 import type { DesktopAPI } from '../../shared/desktop-api'
 import type { McpTestResult } from '../../shared/ipc-types'
 
@@ -169,8 +170,11 @@ export const api = {
     wrap((d) => d.memoryMoveScope(id, target, projectRoot)) as Promise<MemoryItem>,
   memoryClear: (scope: 'project' | 'global' | 'all', projectRoot?: string) =>
     wrap((d) => d.memoryClear(scope, projectRoot)),
-  memoryStats: () => wrap((d) => d.memoryStats()) as Promise<MemoryStats>,
-  memoryLastTidy: () => wrap((d) => d.memoryLastTidy()) as Promise<MemoryLastTidy | null>,
+  memoryStats: (projectRoot?: string | null) => wrap((d) => d.memoryStats(projectRoot)) as Promise<MemoryStats>,
+  memoryLastTidy: (projectRoot?: string | null) => wrap((d) => d.memoryLastTidy(projectRoot)) as Promise<MemoryLastTidy | null>,
+  memoryCreate: (input: { projectRoot?: string | null; global?: boolean; tier?: 'long' | 'short'; category: string; title: string; content: string; importance?: number }) =>
+    wrap((d) => d.memoryCreate(input)) as Promise<{ folded: boolean; id: string }>,
+  memoryResetDistillTokens: () => wrap((d) => d.memoryResetDistillTokens()) as Promise<void>,
   // 记忆管线 P2
   memorySessionContext: (projectRoot: string, sessionId: string) =>
     wrap((d) => d.memorySessionContext(projectRoot, sessionId)) as Promise<{ summary: string | null }>,
@@ -284,7 +288,7 @@ export function onConfigChanged(cb: (affectedKeys: string[]) => void): () => voi
   return window.desktopAPI.onConfigChanged(cb)
 }
 
-export function onCloneProgress(cb: (p: { index: number; total: number; name: string; stage: string; pct: number | null }) => void): () => void {
+export function onCloneProgress(cb: (p: CloneProgress) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onCloneProgress(cb)
 }

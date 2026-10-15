@@ -12,6 +12,7 @@ import { EmptyState } from '@/components/common/EmptyState'
 import { DeployTab } from './DeployTab'
 import { ServiceList } from './ServiceList'
 import { ErrorDetail } from './ErrorDetail'
+import { toast } from '@/components/common/Toast'
 
 const PHASE_LABEL: Record<string, string> = {
   idle: '未运行', building: '编译中', deploying: '部署中', running: '运行中', error: '异常',
@@ -39,7 +40,6 @@ export function PreviewTab() {
   const openProjectDialog = useAppStore((s) => s.openProjectDialog)
   const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
   const hasApiKey = useAppStore((s) => s.hasApiKey)
-  const showAlert = useAppStore((s) => s.showAlert)
   const showConfirm = useAppStore((s) => s.showConfirm)
   const startupCommands = useStartupStore((s) => s.startupCommands)
   const updateStartCommand = useStartupStore((s) => s.updateStartCommand)
@@ -210,7 +210,7 @@ export function PreviewTab() {
     if (!projectPath) return
     const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
     if (!hasApiKey && !cliMode) {
-      void showAlert('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
+      toast.info('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
       return
     }
     if (hasCommands) {
@@ -218,7 +218,7 @@ export function PreviewTab() {
     }
     const curChat = selectCurrentChat(useChatStore.getState())
     if (curChat.status !== 'idle' && curChat.status !== 'error') {
-      void showAlert('AI 正忙', '上一条消息还在处理中，请稍候。')
+      toast.info('AI 正忙', '上一条消息还在处理中，请稍候。')
       return
     }
     const prompt = cliMode
@@ -231,7 +231,7 @@ export function PreviewTab() {
   const requestToolchainInstall = () => {
     if (!slot) return
     const curChat = selectCurrentChat(useChatStore.getState())
-    if (curChat.status !== 'idle' && curChat.status !== 'error') { void showAlert('AI 正忙', '请等待当前任务完成。'); return }
+    if (curChat.status !== 'idle' && curChat.status !== 'error') { toast.info('AI 正忙', '请等待当前任务完成。'); return }
     void useChatStore.getState().send(
       `启动服务「${slot.name}」失败：${slot.errorText} 我已授权你自动安装缺失的工具链：请安装缺失的命令，安装完成后先验证工具可用，再用原命令重新启动服务「${slot.name}」。`,
     )

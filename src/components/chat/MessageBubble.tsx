@@ -8,6 +8,8 @@ import { AskUserCard } from './AskUserCard'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 import { useAppStore } from '@/store/useAppStore'
 import { useSlashCommand, SlashMenu } from './SlashMenu'
+import { mergeSkills } from '@/utils/skillInstruction'
+import { userTextOf } from '@/utils/chatHistory'
 
 // memo：流式增量只替换末条消息对象，历史气泡引用不变即可跳过重渲染（长会话滚动保帧关键）
 export const MessageBubble = memo(function MessageBubble({ msg }: { msg: ChatMessage }) {
@@ -75,35 +77,18 @@ function ReasoningBlock({ content }: { content: string }) {
   )
 }
 
-/** 从消息 content 提取用户文字：剥掉 Skill 指令前缀和元素注入前缀（这两段对 AI 可见但用户只看卡片）。
- *  不含前缀的消息整段都是用户文字，原样返回。 */
-function extractUserText(content: string): string {
-  let rest = content
-  // 剥 Skill 指令前缀：匹配「请先用 load_skill ...，再执行。」或「请先用 load_skill 依次加载 ...全部加载后再执行：...」
-  const skillMatch = rest.match(/^请先用 load_skill[\s\S]*?再执行[：:]\s*\S*|^请先用 load_skill[\s\S]*?再执行[。.]\s*/)
-  if (skillMatch) {
-    rest = rest.slice(skillMatch[0].length)
-  }
-  // 剥元素注入前缀
-  if (rest.startsWith('[用户选中的预览页元素]')) {
-    const idx = rest.indexOf('\n\n', rest.indexOf(']'))
-    rest = idx >= 0 ? rest.slice(idx + 2) : ''
-  }
-  return rest.trim()
-}
-
 /** 用户消息：hover 出「编辑」，编辑态可改后重发；编辑非末条时有回退提醒 */
 function UserMessage({ msg }: { msg: ChatMessage }) {
   const citations = msg.meta?.citations ?? []
   const hasMeta = !!(msg.meta?.skills?.length || msg.meta?.projectStart || msg.meta?.deployStart || msg.meta?.element || citations.length > 0)
-  const userText = hasMeta ? (msg.meta?.projectStart || msg.meta?.deployStart ? null : extractUserText(msg.content) || null) : null
+  const userText = hasMeta ? (msg.meta?.projectStart || msg.meta?.deployStart ? null : userTextOf(msg.content) || null) : null
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(msg.content)
   const [editSkills, setEditSkills] = useState(msg.meta?.skills ?? [])
   const skillMetas = useAppStore((s) => s.skillMetas)
   const projectSkillMetas = useAppStore((s) => s.projectSkillMetas)
-  const allSkills = useMemo(() => [...projectSkillMetas, ...skillMetas], [projectSkillMetas, skillMetas])
-  const { slashOpen, setSlashOpen, setSlashFilter, slashIndex, setSlashIndex, filteredSkills, closeSlash } = useSlashCommand(allSkills)
+  const allSkills = useMemo(() => mergeSkills(projectSkillMetas, skillMetas), [projectSkillMetas, skillMetas])
+  const { slashOpen, setSlashOpen, setSlashFilter, slashIndex, setSlashIndex, hoverSlashIndex, filteredSkills, closeSlash } = useSlashCommand(allSkills)
   const hasLater = useChatStore((s) => {
     const msgs = selectCurrentChat(s).messages
     const i = msgs.findIndex((m) => m.id === msg.id)
@@ -114,13 +99,17 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
     return st !== 'idle' && st !== 'error'
   })
 
-  const editableText = msg.meta?.projectStart || msg.meta?.deployStart ? '' : extractUserText(msg.content)
+  const editableText = msg.meta?.projectStart || msg.meta?.deployStart ? '' : userTextOf(msg.content)
   const originalSkills = msg.meta?.skills ?? []
+  /** 打开 slash 菜单前的草稿快照：选完/关掉菜单后恢复——把「/过滤词」留在草稿里
+   *  会随消息一起重发出去（skill 名误带入聊天的编辑态入口） */
+  const editSavedRef = useRef('')
 
-  /** 编辑态选/取消 skill（toggle）：已选的再选=移除；只剥掉 / 前缀保留原文 */
+  /** 编辑态选/取消 skill（toggle）：已选的再选=移除；退掉 / 过滤词恢复暂存原文 */
   const selectSkill = (skill: SkillMeta) => {
     closeSlash()
-    setDraft((prev) => prev.startsWith('/') ? prev.slice(1) : prev)
+    setDraft(editSavedRef.current)
+    editSavedRef.current = ''
     setEditSkills((prev) =>
       prev.some((s) => s.id === skill.id)
         ? prev.filter((s) => s.id !== skill.id)
@@ -199,10 +188,11 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
               const val = e.target.value
               setDraft(val)
               if (val.startsWith('/') && !slashOpen && allSkills.length > 0) {
+                editSavedRef.current = draft
                 setSlashOpen(true)
                 setSlashFilter('')
               } else if (slashOpen) {
-                if (!val.startsWith('/')) { closeSlash() }
+                if (!val.startsWith('/')) { editSavedRef.current = ''; closeSlash() }
                 else {
                   const afterSlash = val.slice(1)
                   setSlashFilter(afterSlash.length <= 20 && !afterSlash.includes('，') ? afterSlash : '')
@@ -213,7 +203,14 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
               if (slashOpen) {
                 if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIndex((i) => Math.min(i + 1, filteredSkills.length - 1)); return }
                 if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex((i) => Math.max(i - 1, 0)); return }
-                if (e.key === 'Escape') { e.preventDefault(); closeSlash(); return }
+                if (e.key === 'Escape') {
+                  e.preventDefault()
+                  // 与主输入框同口径：退掉「/过滤词」恢复暂存原文
+                  setDraft(editSavedRef.current)
+                  editSavedRef.current = ''
+                  closeSlash()
+                  return
+                }
               }
               if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault()
@@ -232,7 +229,7 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
               slashIndex={slashIndex}
               selectedIds={new Set(editSkills.map((s) => s.id))}
               onSelect={selectSkill}
-              onHoverIndex={setSlashIndex}
+              onHoverIndex={hoverSlashIndex}
               className="slash-menu--edit"
             />
           )}
