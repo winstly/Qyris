@@ -29,6 +29,7 @@
 
 - **三层记忆模型**：工作记忆（当前会话窗口 + 滚动摘要）、短期记忆（会话内事件）、长期记忆（跨会话知识）
 - **混合检索**：FTS5 全文检索（中文 trigram 分词）+ sqlite-vec 向量 KNN → RRF 融合排序，每轮对话零 LLM 调用
+- **对话召回**：每轮按最后一条用户消息检索 top-6 长期记忆注入 system（每条带新鲜度标注，归档不参与），命中以「引用 N 条记忆」chip 回标在该消息上
 - **本地嵌入**：BGE-small-zh-v1.5（transformers.js WASM），离线运行、记忆不出机；模型加载失败自动降级 FTS-only
 - **蒸馏管线**：headless 单轮 LLM 调用，从对话增量 transcript 提取长期记忆；滚动触发（≥6 轮）+ 会话收尾触发 + 手动触发
 - **原子去重**：`createOrFoldAtomic` 同步事务内完成查重+写入，部分唯一索引兜底
@@ -58,6 +59,8 @@
 - **创建空项目 / 从远端克隆**（支持多仓库）
 - 克隆前「测试连接」：验证仓库有效性并列出全部分支
 - **分支选择**（支持搜索），按指定分支克隆
+- **多仓库并行克隆**（3 路并发）：每行独立进度（排队 / 阶段 + 百分比 / 成败终态），单仓失败不拖死整批
+- **失败可重试**：再次克隆只跑未成功的仓库；目标目录名冲突在开跑前拦截
 - 文件树右键**切换 Git 分支**：本地 + 远端分支统一列表，checkout 后文件树自动刷新
 
 ### 预览
@@ -193,11 +196,12 @@ npm run typecheck   # 类型检查（渲染层 + 主进程 + scripts 三配置�
 npm run dist        # 构建 + 打包安装包
 
 # 冒烟测试（全量：任一改动后至少跑相关域）
-npm run smoke:ui            # UI 组件运行时（jsdom：Notice/TabStrip/ScopeRow/详情弹窗/面板集成）
+npm run smoke:ui            # UI 组件运行时（jsdom：Notice/Toast/TabStrip/ScopeRow/详情弹窗/面板集成）
 npm run smoke:protocol      # AI CLI 协议原语（序列化 / Skill 反解 / 连接测试拆分）
 npm run smoke:memory        # 消息持久化 + 记忆检索（FTS / vec / RRF / 迁移）
 npm run smoke:memory-agent  # 蒸馏管线（LLM mock + 游标 / 去重 / 转录护栏 / 空窗快路径）
 npm run smoke:mcp-client    # 外部 MCP 客户端（握手 / tools / 权限 / 取消 / 分域池 / 热重载）
+npm run smoke:clone         # 批量克隆契约（并行池 / 逐仓成败隔离 / 重名拦截 / 取消）
 npm run smoke:build-hints   # 构建输出启发式（vite/next/webpack/CRA + 降级零误判）
 npm run smoke:skill-desc    # Skill frontmatter 解析 + 渲染/统型 CSS 契约
 npm run smoke:workspace-tools / smoke:host-proxy / smoke:web / smoke:runner-mcp
