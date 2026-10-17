@@ -3242,14 +3242,15 @@
 .files-diff__line { padding: 0 var(--space-4); white-space: pre; color: var(--fg-2); }
 .files-diff__line--add { background: color-mix(in oklab, var(--success), transparent 88%); color: var(--success); }
 .files-diff__line--del { background: color-mix(in oklab, var(--danger), transparent 88%); color: var(--danger); }
-.files-diff__line--hunk { color: var(--muted); background: var(--bg-fill-tertiary); padding: 2px var(--space-4); }
+/* meta 行仍被 SnapshotHistoryDialog 的快照 diff 使用 */
 .files-diff__line--meta { color: var(--muted); }
 
 /* ── 分栏 diff（左旧右新，逐行对齐） ── */
-.files-diff__split { display: flex; flex-direction: column; min-width: fit-content; }
+/* min-width 必须 0：fit-content 会让分栏随长行撑破 body 出 x 滚动条，右列被顶到屏外
+ * （看起来"分栏没了"）；列宽由 cell(min-width:0)+cell-text(ellipsis) 收进容器宽 */
+.files-diff__split { display: flex; flex-direction: column; min-width: 0; }
 .files-diff__row { display: flex; }
 .files-diff__row > .files-diff__cell { flex: 1 1 50%; min-width: 0; }
-.files-diff__row--hunk > .files-diff__cell { flex: 1 1 100%; }
 .files-diff__cell {
   display: flex;
   padding: 0 var(--space-2) 0 0;
@@ -3261,11 +3262,6 @@
 .files-diff__cell--blank { background: var(--bg-fill-tertiary); }
 .files-diff__cell--add { background: color-mix(in oklab, var(--success), transparent 88%); color: var(--success); }
 .files-diff__cell--del { background: color-mix(in oklab, var(--danger), transparent 88%); color: var(--danger); }
-.files-diff__cell--hunk {
-  color: var(--muted);
-  background: var(--bg-fill-tertiary);
-  padding: 2px var(--space-4);
-}
 .files-diff__num {
   flex-shrink: 0;
   width: 42px;
@@ -3276,7 +3272,7 @@
   font-size: 11px;
   line-height: inherit;
 }
-.files-diff__cell-text { overflow: hidden; text-overflow: ellipsis; }
+.files-diff__cell-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .files-diff__empty {
   padding: var(--space-6);
   text-align: center;
@@ -3315,7 +3311,8 @@
 
 .gitpanel {
   flex-shrink: 0;
-  min-height: 140px; /* 高度由内联 style（gitPanelRatio）驱动，grip 拖拽可调 */
+  /* 高度由内联 style（gitPanelRatio）驱动；不设 min-height——store 钳制下限（0.2）全权接管，
+   * CSS min-height 会制造「比例在变、像素顶住」的拖动死区 */
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--edge);
@@ -3336,20 +3333,32 @@
 .gitpanel__grip:hover,
 .gitpanel__grip:active { background: color-mix(in oklab, var(--accent), transparent 78%); }
 
+/* 头部容器：折叠开关 + 全局批量（ops hover/focus 显现——VS Code Changes 头模式） */
 .gitpanel__head {
   display: flex;
   align-items: center;
   gap: 6px;
   width: 100%;
-  padding: 7px 10px;
+  padding: 7px 10px 7px 4px;
+  font-size: var(--text-xs);
+  color: var(--fg-2);
+}
+.gitpanel__head:hover { background: var(--accent-dim); }
+.gitpanel__head-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
   border: none;
   background: transparent;
   cursor: pointer;
-  font-size: var(--text-xs);
-  color: var(--fg-2);
+  font: inherit;
+  color: inherit;
   text-align: left;
 }
-.gitpanel__head:hover { background: var(--accent-dim); }
+.gitpanel__head-ops { display: flex; gap: 2px; }
 .gitpanel__chevron { flex-shrink: 0; color: var(--muted); transition: transform var(--motion-fast) var(--ease-standard); }
 .gitpanel__chevron--open { transform: rotate(90deg); }
 .gitpanel__title { font-weight: var(--font-weight-ui); color: var(--fg-2); }
@@ -3381,11 +3390,18 @@
 }
 
 /* 同步操作条 / 提交动作条：窄栏换行不裁切（body overflow:hidden 会把超出的按钮直接切掉） */
+/* 同步操作条：纯图标钮，极窄时允许换行（wrap）而不是裁掉 */
 .gitpanel__sync { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .gitpanel__sync .btn,
 .gitpanel__commit-actions .btn,
 .gitpanel__row .icon-btn { flex-shrink: 0; }
 .gitpanel__spacer { flex: 1; }
+/* 窄面板（ResizeObserver 驱动 gitpanel--narrow，<260px）：变更列表行内图标与目录批量钮
+ * 整体隐藏（窄面板倾向看信息不操作，暂存全部/提交仍可达），头部分支/计数收紧走 title */
+.gitpanel--narrow .gitpanel__row .icon-btn,
+.gitpanel--narrow .gitpanel__dirops,
+.gitpanel--narrow .gitpanel__dircount,
+.gitpanel--narrow .gitpanel__branch { display: none; }
 
 .gitpanel__files {
   flex: 1 1 auto; /* 吃掉面板剩余高度：面板拖多高，列表就多高 */
@@ -3411,6 +3427,44 @@
   border-bottom: 1px solid color-mix(in oklab, var(--edge), transparent 55%);
 }
 .gitpanel__row:last-child { border-bottom: none; }
+
+/* 目录分组行：折叠头（button）+ 批量操作钮组（hover/focus 才显，主交互是折叠） */
+.gitpanel__dirrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 6px;
+  font-size: var(--text-xs);
+  color: var(--fg-1);
+}
+.gitpanel__dirrow:hover { color: var(--accent); }
+.gitpanel__dirhead {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.gitpanel__dirname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 子树文件计数：徽标形态（与行级状态徽标同族） */
+.gitpanel__dircount {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: var(--text-micro);
+  background: var(--bg-fill-tertiary);
+  color: var(--fg-2);
+}
+/* 批量操作钮常驻；窄面板隐藏（.gitpanel--narrow，避免与折叠头挤在一行） */
+.gitpanel__dirops { display: flex; gap: 2px; }
 .gitpanel__row--active { background: var(--accent-dim); }
 
 .gitpanel__badge {
@@ -3434,18 +3488,23 @@
 
 .gitpanel__path {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
   white-space: nowrap;
   cursor: pointer;
   color: var(--fg-2);
 }
 .gitpanel__path:hover { color: var(--accent); }
-.gitpanel__renamed { color: var(--muted); }
+.gitpanel__renamed {
+  color: var(--muted);
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .gitpanel__discard:hover { color: var(--danger); }
-.gitpanel__unstage-icon { transform: rotate(270deg); }
-
 .gitpanel__commit { flex: 0 0 auto; display: flex; flex-direction: column; gap: 6px; }
 .gitpanel__msg {
   width: 100%;
@@ -3461,17 +3520,12 @@
 }
 .gitpanel__msg:focus { outline: none; border-color: var(--selected); }
 
-.gitpanel__commit-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-/* 计数提示让位（省略号）而不是把「暂存全部/提交」挤出栏外 */
-.gitpanel__staged-hint {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: var(--text-micro);
-  color: var(--muted);
-}
+/* 提交区单一职责：textarea + 全宽主 CTA（批量操作在面板头部，不挤提交区） */
+.gitpanel__commit-actions { display: flex; }
+.gitpanel__commit-btn { flex: 1 1 auto; justify-content: center; }
+
+/* 不可逆的全局丢弃：窄面板隐藏（暂存全部保留——它是窄态唯一暂存入口） */
+.gitpanel--narrow .gitpanel__discard-all { display: none; }
 
 
 .filetree-wrap--empty {

@@ -49,6 +49,9 @@ function translateGitError(detail: string): string | null {
   if (/not a git repository/i.test(detail)) {
     return '该目录不是 Git 仓库'
   }
+  if (/could not resolve HEAD/i.test(detail)) {
+    return '仓库还没有任何提交，没有可还原的基线'
+  }
   return null
 }
 
@@ -151,8 +154,24 @@ export async function gitStatus(dir: string): Promise<GitStatus> {
   return { isRepo: true, branch, ahead, behind, files }
 }
 
-/** 查看改动 diff：staged=true 看暂存区（--cached），path 省略看全部；超长截断 */
-export async function gitDiff(dir: string, path?: string, staged?: boolean): Promise<string> {
+/** diff 超长截断（常规与 no-index 共用） */
+function truncateDiff(out: string): string {
+  return out.length > MAX_DIFF_CHARS ? out.slice(0, MAX_DIFF_CHARS) + '\n…（diff 过长，已截断）' : out
+}
+
+/** 查看改动 diff：staged=true 看暂存区（--cached），path 省略看全部；
+ *  untracked=true 时 path 与 /dev/null 做 --no-index 比较（git diff 天然不渲染未跟踪文件），
+ *  no-index 模式退出码 1 = 存在差异，视为成功 */
+export async function gitDiff(dir: string, path?: string, staged?: boolean, untracked?: boolean): Promise<string> {
+  if (untracked && !staged && path) {
+    // --no-index 按文件系统路径比较：相对路径以 dir 为基准拼绝对路径（no-index 不吃 -C 语义）
+    const abs = /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('/') ? path : `${dir.replace(/[\\/]+$/, '')}/${path}`
+    const r = await runGit(['diff', '--no-color', '--no-ext-diff', '--no-index', '--', '/dev/null', abs], 15_000)
+    if (r.code !== 0 && r.code !== 1) {
+      throw new Error(`git diff 失败：${(r.stderr || r.stdout).slice(0, 300)}`)
+    }
+    return truncateDiff(r.stdout)
+  }
   const args = ['-C', dir, 'diff', '--no-color', '--no-ext-diff']
   if (staged) args.push('--cached')
   args.push('--')
@@ -161,8 +180,13 @@ export async function gitDiff(dir: string, path?: string, staged?: boolean): Pro
   if (r.code !== 0) {
     throw new Error(`git diff 失败：${(r.stderr || r.stdout).slice(0, 300)}`)
   }
-  const out = r.stdout
-  return out.length > MAX_DIFF_CHARS ? out.slice(0, MAX_DIFF_CHARS) + '\n…（diff 过长，已截断）' : out
+  return truncateDiff(r.stdout)
+}
+
+/** 路径是否已被 git 跟踪（在 index 中）：untracked 兜底判定用 */
+export async function gitIsTracked(dir: string, path: string): Promise<boolean> {
+  const r = await runGit(['-C', dir, 'ls-files', '--', path], 10_000)
+  return r.code === 0 && r.stdout.trim().length > 0
 }
 
 /** git add：paths 省略/为空 = 全部改动（-A） */
@@ -218,10 +242,14 @@ export async function gitMerge(dir: string, branch: string): Promise<string> {
   return (await runGitOrThrow(['-C', dir, 'merge', '--no-edit', branch], 60_000, '合并分支')).trim()
 }
 
-/** 丢弃指定文件的全部改动（暂存区 + 工作区都还原到 HEAD）：git restore --staged --worktree。
- *  只对已跟踪文件有效；untracked 文件不属于「丢弃改动」范畴（删除走文件树的删除） */
-export async function gitDiscard(dir: string, paths: string[]): Promise<void> {
-  const list = paths.filter((p) => p && !p.startsWith('-'))
-  if (list.length === 0) throw new Error('未指定要丢弃改动的文件')
-  await runGitOrThrow(['-C', dir, 'restore', '--source=HEAD', '--staged', '--worktree', '--', ...list], 30_000, '丢弃改动')
+/** 丢弃改动（暂存区 + 工作区都还原到 HEAD）：git restore --staged --worktree。
+ *  paths 省略/为空 = 整棵工作树（restore 不吃空 pathspec，显式传 `-- .`，-C dir 下即仓库根）；
+ *  只对已跟踪文件有效，untracked 文件不属于「丢弃改动」范畴（删除走文件树的删除） */
+export async function gitDiscard(dir: string, paths?: string[]): Promise<void> {
+  const list = (paths ?? []).filter((p) => p && !p.startsWith('-'))
+  await runGitOrThrow(
+    ['-C', dir, 'restore', '--source=HEAD', '--staged', '--worktree', '--', ...(list.length ? list : ['.'])],
+    30_000,
+    '丢弃改动',
+  )
 }

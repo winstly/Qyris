@@ -97,6 +97,8 @@ interface AppState {
   filesSplitRatio: number
   /** 文件 Tab 内 Git 工作区面板高度占左栏比例 */
   gitPanelRatio: number
+  /** Git 工作区面板展开态（钳制需要知道它是否占预算；原为 GitPanel 本地 state） */
+  gitPanelOpen: boolean
   /** 文件 Tab 内搜索面板高度占左栏比例 */
   searchPanelRatio: number
 
@@ -148,6 +150,7 @@ interface AppState {
   setFilesSplitRatio: (r: number) => void
   setGitPanelRatio: (r: number) => void
   setSearchPanelRatio: (r: number) => void
+  setGitPanelOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean) => void
   setModelCfgOpen: (open: boolean) => void
   setCreateProjectOpen: (open: boolean) => void
@@ -208,6 +211,7 @@ export const useAppStore = create<AppState>()(
       splitRatio: 0.74,
       filesSplitRatio: 0.26,
       gitPanelRatio: 0.45,
+      gitPanelOpen: false,
       searchPanelRatio: 0.35,
       projectPath: null,
       projectName: '',
@@ -231,13 +235,22 @@ export const useAppStore = create<AppState>()(
 
       setTab: (t) => set({ activeTab: t }),
       toggleMemorySidebar: () => set((s) => ({ memorySidebarOpen: !s.memorySidebarOpen })),
-      toggleSearch: () => set((s) => ({ searchOpen: !s.searchOpen })),
+      // 左栏两个纵向面板展开互斥：同时展开会挤掉文件树（用户要求一次只看一个），联动关闭对方
+      toggleSearch: () => set((s) => ({ searchOpen: !s.searchOpen, ...(s.searchOpen ? {} : { gitPanelOpen: false }) })),
       toggleChatPanel: () => set((s) => ({ chatPanelCollapsed: !s.chatPanelCollapsed })),
       toggleFileTree: () => set((s) => ({ fileTreeCollapsed: !s.fileTreeCollapsed })),
       setSplitRatio: (r) => set({ splitRatio: Math.min(0.85, Math.max(0.5, r)) }),
       setFilesSplitRatio: (r) => set({ filesSplitRatio: Math.min(0.5, Math.max(0.15, r)) }),
-      setGitPanelRatio: (r) => set({ gitPanelRatio: Math.min(0.75, Math.max(0.2, r)) }),
-      setSearchPanelRatio: (r) => set({ searchPanelRatio: Math.min(0.75, Math.max(0.15, r)) }),
+      // 左栏三区（文件树 flex:1 + 搜索 + Git）共享 100% 高度：拖动钳制必须感知另一个面板——
+      // 各自独立钳 [下限,0.75] 时两面板可同时拉满 150%，shrink:0 强制溢出互踩（文件树被挤没）。
+      // 折叠的面板 height 归零不占预算，钳制时从预算中剔除
+      setGitPanelRatio: (r) => set((s) => ({
+        gitPanelRatio: Math.min(0.75, Math.max(0.2, Math.min(r, 1 - (s.searchOpen ? s.searchPanelRatio : 0)))),
+      })),
+      setSearchPanelRatio: (r) => set((s) => ({
+        searchPanelRatio: Math.min(0.75, Math.max(0.15, Math.min(r, 1 - (s.gitPanelOpen ? s.gitPanelRatio : 0)))),
+      })),
+      setGitPanelOpen: (open) => set({ gitPanelOpen: open, ...(open ? { searchOpen: false } : {}) }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
       setModelCfgOpen: (open) => set({ modelCfgOpen: open }),
       setCreateProjectOpen: (open) => set({ createProjectOpen: open }),

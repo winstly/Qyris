@@ -90,6 +90,18 @@ export interface CliToolResultPayload {
   projectRoot?: string
 }
 
+/** CLI 通道交互提问（askUserQuestion 经主进程代行通道 → 渲染层 AskUserCard 交互回填） */
+export interface CliAskPayload {
+  requestId: string
+  /** 提问对应的工具卡 id（cli-tool-event 建卡同源）；null = 极端竞态未捕获，渲染层回退绑最新 ask 卡 */
+  callId: string | null
+  /** 回填凭据：渲染层 answerCliAsk(askId, answer) 按它对上主进程挂起的代行调用 */
+  askId: string
+  question: string
+  options: string[] | null
+  projectRoot?: string
+}
+
 /** CLI 子 agent 事件（electron ai-cli 转发 → 渲染层聊天流） */
 export interface CliAgentEventPayload {
   requestId: string

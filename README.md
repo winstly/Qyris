@@ -109,7 +109,7 @@
   - 子 agent **独立 token 记账**，总额自动汇总到主对话
   - 失败自动重试（模型类错误），完成 / 取消自动清理出列表
 - 内置工具（ToolRegistry 统一注册，API 模式由 runner 直调 / CLI 模式经 MCP 挂载）：`list_dir` / `search_files` / `glob` / `grep` / `read_file` / `write_file` / `edit_file` / `run_command` / `report_start_commands` / `update_start_command` / `run_project` / `get_build_status` / `stop_project` / `verify_start` / `git_status` / `git_diff` / `git_add` / `git_commit` / `load_skill` / `memory_search` / `memory_save` / `memory_archive` / `preview_open` / `preview_console` / `remote_exec` / `remote_upload` / `update_server_tags` / `web_search` / `web_fetch`
-- 编排/交互工具：`dispatch_subtasks`（子任务派发，CLI 模式经主进程代行通道执行，面板事件不丢） / `askUserQuestion`（仅 API 模式；CLI 通道不可用，模型改为在回复中向用户提问）
+- 编排/交互工具：`dispatch_subtasks`（子任务派发，CLI 模式经主进程代行通道执行，面板事件不丢） / `askUserQuestion`（API 模式由渲染层 askUser 流程挂起；CLI 模式经主进程代行桥回填——claude-cli 的 MCP 往返原地等 `AskUserCard` 的回答）
 - 真取消：「停止生成」在网络层硬中断请求，连同在途子 agent 请求一并取消
 - **端口冲突自动检测**——服务启动失败时自动查询占用进程（PID + 进程名），注入解决建议（停服务 / 换端口）
 - **消息持久化**：SQLite 存储，keyset 分页（最新 50 条 + 向上翻页），稳定点 write-through（user 发送 / assistant 收尾 / toolResult 追加）

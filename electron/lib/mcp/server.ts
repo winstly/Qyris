@@ -26,7 +26,7 @@
  *   · 未知 request → -32601 Method not found；未知 notification → 静默忽略（无 id 不可回错）。
  *
  * 安全（权限档必须透传，不许默认放开）：
- *   · 暴露面 = toolsForPermission(permission) − 交互型工具（isDeferredTool）；
+ *   · 暴露面 = toolsForPermission(permission)，交互型 askUserQuestion 随代行通道门控（HOST_ONLY）；
  *     主进程专属工具（proxy.HOST_ONLY_TOOLS：编排/预览/配置记忆写入）仅在主进程代行通道
  *     （proxy.ts，env 注入）存在时暴露——它们的执行与事件出口必须留在主进程 run 上，
  *     子进程本地执行会丢卡片/转录（见 proxy.ts 文件头）。
@@ -44,7 +44,7 @@
  *   代理，让 proc.checkUrlHealthy / secrets.safeStorage 这类调用点响亮降级而不是 Module not found。
  */
 import type { ToolCtx, ToolPermission, ToolResult } from '../model/types'
-import { clampToolResult, executeTool, isDeferredTool, toolsForPermission } from '../tools'
+import { clampToolResult, executeTool, toolsForPermission } from '../tools'
 import { readFileSync } from 'node:fs'
 import {
   callHostTool,
@@ -200,10 +200,11 @@ export function createMcpCore(cfg: McpServerConfig, io: McpIo): McpCore {
   if (cfg.hostProxy != null && externalStubs.length > 0) {
     adoptRemoteStubs(externalStubs, (name, input, signal) => callHostTool(cfg.hostProxy!, name, input, signal), cfg.projectRoot)
   }
-  // excludeTools：本 session 再剔除（子 session 剔 dispatch_subtasks 防嵌套派发）。
+  // excludeTools：本 session 再剔除（子 session 剔 dispatch_subtasks/askUserQuestion，防嵌套派发与子任务内提问）。
   // includeTools：正向白名单（非空时只暴露名单内工具——蒸馏等窄面场景，权限档约束之上再收口）。
+  // askUserQuestion 不再按 isDeferredTool 硬剔：它已入 HOST_ONLY_TOOLS，跟随代行通道门控——
+  // 有通道即暴露（CLI 档经 ask-bridge 回填），无通道不暴露（fail-closed，与编排工具同规）。
   const surface = toolsForPermission(cfg.permission, cfg.projectRoot)
-    .filter((t) => !isDeferredTool(t.name))
     .filter((t) => !isHostRoutedTool(t.name) || cfg.hostProxy != null)
     .filter((t) => !(cfg.excludeTools ?? []).includes(t.name))
     .filter((t) => (cfg.includeTools ?? []).length === 0 || (cfg.includeTools ?? []).includes(t.name))

@@ -10,6 +10,7 @@
  * 测试连接是独立建连（不进连接池）——看到的工具面 = 下次启动后会话可达面。
  */
 import { useEffect, useState } from 'react'
+import { IconChevron } from '@/components/common/icons'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { api, onMcpTestState } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
@@ -94,6 +95,8 @@ export function McpPanel() {
   const [viewing, setViewing] = useState<{ name: string; entry: McpServerEntry } | null>(null)
   const [importing, setImporting] = useState(false)
   const [tests, setTests] = useState<Record<string, TestState>>({})
+  // 工具列表折叠态（key 同 tests）：默认收起——大 server 的工具列表全展开会把面板撑成无限长
+  const [toolsOpen, setToolsOpen] = useState<Record<string, boolean>>({})
   /** 结果键 = `${scope}::${name}`（主进程状态口径） */
   const keyOf = (name: string): string => `${scope === 'global' || !projectPath ? 'global' : projectConfigKey(projectPath)}::${name}`
 
@@ -297,13 +300,26 @@ export function McpPanel() {
                       {entryTarget(row.entry) || row.entry.description || '—'}
                     </code>
                     <span className="mcp-panel__perm">{PERMISSION_LABEL[row.entry.permission ?? 'exec'] ?? '完全'}</span>
-                    <span className="mcp-panel__status">
-                      {!active ? '已停用'
-                        : t?.testing ? '测试中…'
-                        : t == null ? '未测试'
-                        : t.ok ? `已连接 · ${t.tools.length} 工具`
-                        : '测试失败'}
-                    </span>
+                    {t?.ok && t.tools.length > 0 ? (
+                      /* 连接成功 + 有工具：状态徽章即折叠开关（默认收起，点开看全列表） */
+                      <button
+                        type="button"
+                        className={`mcp-panel__status mcp-panel__tools-toggle ${toolsOpen[keyOf(row.name)] ? 'mcp-panel__tools-toggle--open' : ''}`}
+                        onClick={(e) => { e.stopPropagation(); setToolsOpen((m) => ({ ...m, [keyOf(row.name)]: !m[keyOf(row.name)] })) }}
+                        aria-expanded={!!toolsOpen[keyOf(row.name)]}
+                        title={toolsOpen[keyOf(row.name)] ? '收起工具列表' : '展开工具列表'}
+                      >
+                        <IconChevron size={10} /> 已连接 · {t.tools.length} 工具
+                      </button>
+                    ) : (
+                      <span className="mcp-panel__status">
+                        {!active ? '已停用'
+                          : t?.testing ? '测试中…'
+                          : t == null ? '未测试'
+                          : t.ok ? '已连接'
+                          : '测试失败'}
+                      </span>
+                    )}
                     <div className="mcp-panel__actions">
                       <button className="btn btn--ghost btn--sm" disabled={t?.testing} onClick={(e) => { e.stopPropagation(); void onTest(row) }}>测试</button>
                       <button className="btn btn--ghost btn--sm" onClick={(e) => { e.stopPropagation(); setEditing({ name: row.name, entry: { ...row.entry } }) }}>编辑</button>
@@ -319,7 +335,7 @@ export function McpPanel() {
                   {t && !t.ok && !t.testing && !!t.error && (
                     <div className="mcp-panel__error">{t.error}</div>
                   )}
-                  {t?.ok && t.tools.length > 0 && (
+                  {t?.ok && t.tools.length > 0 && toolsOpen[keyOf(row.name)] && (
                     <div className="mcp-panel__tools">
                       {t.tools.map((tool) => (
                         <div key={tool.name} className="mcp-panel__tool" title={tool.description}>

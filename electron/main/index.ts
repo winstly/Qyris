@@ -45,6 +45,7 @@ import * as ssh from '../lib/ssh'
 import * as ptymgr from '../lib/pty'
 import { emitToWindow } from '../lib/emitter'
 import * as ai from '../lib/ai'
+import { answerCliAsk } from '../lib/tools/ask-bridge'
 import type { McpServerEntry } from '../lib/mcp/client'
 import * as snapshot from '../lib/snapshot'
 import * as inspect from '../lib/inspect'
@@ -458,7 +459,7 @@ function registerIpc(): void {
   // Git 工作区
   handle('git_status', (_e, p) => git.gitStatus(p.dir))
   handle('git_is_repo_root', (_e, p) => git.gitIsRepoRoot(p.dir))
-  handle('git_diff', (_e, p) => git.gitDiff(p.dir, p.path, p.staged === true))
+  handle('git_diff', (_e, p) => git.gitDiff(p.dir, p.path, p.staged === true, p.untracked === true))
   handle('git_add', (_e, p) => git.gitAdd(p.dir, p.paths))
   handle('git_unstage', (_e, p) => git.gitUnstage(p.dir, p.paths ?? []))
   handle('git_commit', (_e, p) => git.gitCommit(p.dir, String(p.message ?? '')))
@@ -486,6 +487,8 @@ function registerIpc(): void {
 
   // AI（windowId 绑定到发起请求的窗口，用于事件定向路由；opts 透传 CLI 记忆反哺通道——
   //  sessionSummary/memoryBlock，缺此一跳 CLI 模式的记忆注入会整体断供）
+  // CLI 档交互提问回填：渲染层 AskUserCard 提交 → 主进程挂起的代行调用收口（tools/ask-bridge.ts）
+  handle('cli_ask_answer', (_e, p) => answerCliAsk(String(p.askId ?? ''), String(p.answer ?? '')))
   handle('ai_chat_stream', (e, p) =>
     Promise.resolve(
       ai.aiChatStream(p.requestId, p.provider, p.baseUrl, p.model, p.messages, p.tools, p.dispatchMode, p.projectRoot, e.sender.id, p.opts ?? undefined),

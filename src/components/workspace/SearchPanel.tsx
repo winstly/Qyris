@@ -9,6 +9,7 @@ import { api } from '@/services/desktop'
 import { useAppStore } from '@/store/useAppStore'
 import { useFileStore } from '@/store/useFileStore'
 import { basename, joinPath } from '@/utils/path'
+import { beginPanelGripDrag } from '@/utils/panelGrip'
 import { setGlobalSearchFocus } from '@/services/commands'
 import { getEditorInstance } from '@/components/workspace/EditorPane'
 import { IconSearch, IconClose, IconChevron } from '@/components/common/icons'
@@ -69,25 +70,9 @@ export function SearchPanel() {
   const rootRef = useRef<HTMLDivElement>(null)
   const seqRef = useRef(0)
 
-  /** 顶部 grip 拖拽调高（与 GitPanel 同构） */
-  const onGripDown = (e: React.MouseEvent) => {
-    e.preventDefault()
-    const parent = rootRef.current?.parentElement
-    if (!parent) return
-    const rect = parent.getBoundingClientRect()
-    const onMove = (ev: MouseEvent) => {
-      useAppStore.getState().setSearchPanelRatio((rect.bottom - ev.clientY) / rect.height)
-    }
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove)
-      window.removeEventListener('mouseup', onUp)
-      document.body.style.cursor = ''
-      document.body.style.userSelect = ''
-    }
-    document.body.style.cursor = 'ns-resize'
-    document.body.style.userSelect = 'none'
-    window.addEventListener('mousemove', onMove)
-    window.addEventListener('mouseup', onUp)
+  /** 顶部 grip 拖拽调高（与 GitPanel 共享实现，见 utils/panelGrip）：实时写 store，钳制在 useAppStore 里 */
+  const onGripDown = (e: React.PointerEvent<HTMLDivElement>): void => {
+    beginPanelGripDrag(e, rootRef.current, (r) => useAppStore.getState().setSearchPanelRatio(r))
   }
 
   // Ctrl+Shift+F 聚焦回调

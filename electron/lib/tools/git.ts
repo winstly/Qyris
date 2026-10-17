@@ -4,7 +4,7 @@
  * 本层只做：工程根校验、路径越界防护（pathsafety.ensureInside）、结果格式化。
  */
 import { ensureInside } from '../pathsafety'
-import { gitAdd, gitCommit, gitDiff, gitStatus, type GitStatus } from '../git'
+import { gitAdd, gitCommit, gitDiff, gitIsTracked, gitStatus, type GitStatus } from '../git'
 import type { Tool, ToolCtx } from '../model/types'
 
 // ---------- 入参校验 ----------
@@ -97,7 +97,7 @@ const diff: Tool = {
   name: 'git_diff',
   description:
     '查看 Git diff（无颜色）。staged=true 看暂存区改动（--cached），否则看工作区。' +
-    'path 省略看全部改动；diff 过长会截断。',
+    'path 省略看全部改动；未跟踪文件以新增文件形式展示 diff；diff 过长会截断。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -113,7 +113,11 @@ const diff: Tool = {
     const staged = optBool(rec, 'staged') ?? false
     const target = rel ? await safePath(projectRoot, rel) : undefined
 
-    const out = await gitDiff(projectRoot, target, staged)
+    let out = await gitDiff(projectRoot, target, staged)
+    // 未跟踪文件常规 diff 恒为空：判定未被跟踪时改走 no-index 与 /dev/null 比较，展示为新增
+    if (!staged && target && !out.trim() && !(await gitIsTracked(projectRoot, target))) {
+      out = await gitDiff(projectRoot, target, false, true)
+    }
     const head = `[git_diff] ${staged ? '暂存区' : '工作区'}${rel ? ` · ${rel}` : ''}`
     if (!out.trim()) return { content: `${head}\n（无改动）` }
     return { content: `${head}\n${out}` }

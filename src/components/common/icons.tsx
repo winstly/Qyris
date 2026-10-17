@@ -36,6 +36,7 @@ export function IconGear(p: P) { return ri('ri-settings-3-line', p) }
 export function IconSearch(p: P) { return ri('ri-search-line', p) }
 export function IconClose(p: P) { return ri('ri-close-line', p) }
 export function IconPlus(p: P) { return ri('ri-add-line', p) }
+export function IconMinus(p: P) { return ri('ri-subtract-line', p) }
 export function IconTrash(p: P) { return ri('ri-delete-bin-line', p) }
 export function IconPencil(p: P) { return ri('ri-edit-line', p) }
 export function IconCopy(p: P) { return ri('ri-file-copy-line', p) }
@@ -45,6 +46,10 @@ export function IconAlert(p: P) { return ri('ri-alert-line', p) }
 export function IconTerminal(p: P) { return ri('ri-terminal-box-line', p) }
 export function IconLink(p: P) { return ri('ri-links-line', p) }
 export function IconBranch(p: P) { return ri('ri-git-branch-line', p) }
+export function IconMerge(p: P) { return ri('ri-git-merge-line', p) }
+export function IconArrowDown(p: P) { return ri('ri-arrow-down-line', p) }
+export function IconArrowUp(p: P) { return ri('ri-arrow-up-line', p) }
+export function IconDownload(p: P) { return ri('ri-download-2-line', p) }
 export function IconExternal(p: P) { return ri('ri-external-link-line', p) }
 export function IconEye(p: P) { return ri('ri-eye-line', p) }
 export function IconTarget(p: P) { return ri('ri-focus-3-line', p) }

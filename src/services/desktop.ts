@@ -123,6 +123,7 @@ export const api = {
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
     wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode, cliCommand)),
   aiCancel: (requestId: string) => wrap((d) => d.aiCancel(requestId)),
+  answerCliAsk: (askId: string, answer: string) => wrap((d) => d.answerCliAsk(askId, answer)),
 
   // Skills 目录
   scanSkills: (dirs: string[]) => wrap((d) => d.scanSkills(dirs)),
@@ -145,7 +146,8 @@ export const api = {
   // Git 工作区
   gitStatus: (dir: string) => wrap((d) => d.gitStatus(dir)) as Promise<GitStatus>,
   gitIsRepoRoot: (dir: string) => wrap((d) => d.gitIsRepoRoot(dir)),
-  gitDiff: (dir: string, path?: string, staged?: boolean) => wrap((d) => d.gitDiff(dir, path, staged)),
+  gitDiff: (dir: string, path?: string, staged?: boolean, untracked?: boolean) =>
+    wrap((d) => d.gitDiff(dir, path, staged, untracked)),
   gitAdd: (dir: string, paths?: string[]) => wrap((d) => d.gitAdd(dir, paths)),
   gitUnstage: (dir: string, paths: string[]) => wrap((d) => d.gitUnstage(dir, paths)),
   gitCommit: (dir: string, message: string) => wrap((d) => d.gitCommit(dir, message)),
@@ -153,7 +155,7 @@ export const api = {
   gitFetch: (dir: string) => wrap((d) => d.gitFetch(dir)),
   gitPush: (dir: string) => wrap((d) => d.gitPush(dir)),
   gitMerge: (dir: string, branch: string) => wrap((d) => d.gitMerge(dir, branch)),
-  gitDiscard: (dir: string, paths: string[]) => wrap((d) => d.gitDiscard(dir, paths)),
+  gitDiscard: (dir: string, paths?: string[]) => wrap((d) => d.gitDiscard(dir, paths)),
   pickParentDir: () => wrap((d) => d.pickParentDir()),
 
   // 记忆（分层记忆系统 P1）
@@ -254,6 +256,11 @@ export function onCliToolResult(cb: (payload: { requestId: string; id: string; c
 export function onCliAgentEvent(cb: (payload: CliAgentEventPayload) => void): () => void {
   if (!isDesktop || !window.desktopAPI) return () => {}
   return window.desktopAPI.onCliAgentEvent(cb)
+}
+
+export function onCliAsk(cb: (payload: { requestId: string; callId: string | null; askId: string; question: string; options: string[] | null; projectRoot?: string }) => void): () => void {
+  if (!isDesktop || !window.desktopAPI) return () => {}
+  return window.desktopAPI.onCliAsk(cb)
 }
 
 export function onMemoryExtractState(cb: (payload: { projectRoot: string; extracting: boolean }) => void): () => void {

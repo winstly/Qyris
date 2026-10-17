@@ -130,6 +130,22 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 工具列表折叠开关：状态徽章同款视觉的按钮，chevron 指示展开方向 */
+.mcp-panel__tools-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: none;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: var(--muted);
+  cursor: pointer;
+}
+.mcp-panel__tools-toggle:hover { color: var(--accent); }
+.mcp-panel__tools-toggle svg { flex-shrink: 0; transition: transform var(--motion-fast) var(--ease-standard); }
+.mcp-panel__tools-toggle--open svg { transform: rotate(90deg); }
 .mcp-panel__actions {
   display: flex;
   align-items: center;

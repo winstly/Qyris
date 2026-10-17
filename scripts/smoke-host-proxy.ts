@@ -116,6 +116,7 @@ async function main(): Promise<void> {
     noProxy.line(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
     const list1 = (io.sent[0]?.result as { tools: Array<{ name: string }> })?.tools ?? []
     assert(!list1.some((t) => t.name === 'dispatch_subtasks'), '无通道 → 暴露面不含 dispatch_subtasks')
+    assert(!list1.some((t) => t.name === 'askUserQuestion'), '无通道 → 暴露面不含 askUserQuestion（fail-closed）')
 
     const io2 = collector()
     const withProxy = createMcpCore(
@@ -125,7 +126,7 @@ async function main(): Promise<void> {
     withProxy.line(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }))
     const list2 = (io2.sent[0]?.result as { tools: Array<{ name: string }> })?.tools ?? []
     assert(list2.some((t) => t.name === 'dispatch_subtasks'), '有通道 → 暴露面含 dispatch_subtasks')
-    assert(!list2.some((t) => t.name === 'askUserQuestion'), '交互型工具仍不暴露')
+    assert(list2.some((t) => t.name === 'askUserQuestion'), '有通道 → 暴露面含 askUserQuestion（CLI 档交互提问）')
   }
 
   console.log('⑦ MCP tools/call 走代行：')

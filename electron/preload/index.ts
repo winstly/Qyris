@@ -15,7 +15,7 @@ import type { PreviewConsoleEntry } from '../../shared/ipc-types'
 import type { FileContent } from '../lib/fsops'
 import type { ChatMirrorPayload, SnapshotVersion } from '../../shared/types'
 import type {
-  AiDeltaPayload, AiReasoningPayload, CliAgentEventPayload, CliToolEventPayload, CliToolResultPayload,
+  AiDeltaPayload, AiReasoningPayload, CliAgentEventPayload, CliAskPayload, CliToolEventPayload, CliToolResultPayload,
   CloneProgress, CloneResult,
 } from '../../shared/ipc-types'
 import type { DesktopAPI } from '../../shared/desktop-api'
@@ -214,8 +214,13 @@ const desktopAPI: DesktopAPI = {
   gitCheckout: (dir: string, branch: string) => ipcRenderer.invoke('git_checkout', { dir, branch }),
   gitStatus: (dir: string) => ipcRenderer.invoke('git_status', { dir }),
   gitIsRepoRoot: (dir: string) => ipcRenderer.invoke('git_is_repo_root', { dir }) as Promise<boolean>,
-  gitDiff: (dir: string, path?: string, staged?: boolean) =>
-    ipcRenderer.invoke('git_diff', { dir, path: path ?? null, staged: staged === true }) as Promise<string>,
+  gitDiff: (dir: string, path?: string, staged?: boolean, untracked?: boolean) =>
+    ipcRenderer.invoke('git_diff', {
+      dir,
+      path: path ?? null,
+      staged: staged === true,
+      untracked: untracked === true,
+    }) as Promise<string>,
   gitAdd: (dir: string, paths?: string[]) => ipcRenderer.invoke('git_add', { dir, paths: paths ?? null }),
   gitUnstage: (dir: string, paths: string[]) => ipcRenderer.invoke('git_unstage', { dir, paths }),
   gitCommit: (dir: string, message: string) => ipcRenderer.invoke('git_commit', { dir, message }) as Promise<string>,
@@ -223,7 +228,7 @@ const desktopAPI: DesktopAPI = {
   gitFetch: (dir: string) => ipcRenderer.invoke('git_fetch', { dir }) as Promise<string>,
   gitPush: (dir: string) => ipcRenderer.invoke('git_push', { dir }) as Promise<string>,
   gitMerge: (dir: string, branch: string) => ipcRenderer.invoke('git_merge', { dir, branch }) as Promise<string>,
-  gitDiscard: (dir: string, paths: string[]) => ipcRenderer.invoke('git_discard', { dir, paths }),
+  gitDiscard: (dir: string, paths?: string[]) => ipcRenderer.invoke('git_discard', { dir, paths }),
   pickParentDir: () => ipcRenderer.invoke('pick_parent_dir') as Promise<string | null>,
 
   // AI
@@ -232,6 +237,8 @@ const desktopAPI: DesktopAPI = {
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
     ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api', cliCommand }),
   aiCancel: (requestId: string) => ipcRenderer.invoke('ai_cancel', { requestId }),
+  answerCliAsk: (askId: string, answer: string) =>
+    ipcRenderer.invoke('cli_ask_answer', { askId, answer }) as Promise<boolean>,
 
   // 窗口
   pickDirectory: () => ipcRenderer.invoke('pick_directory'),
@@ -307,6 +314,8 @@ const desktopAPI: DesktopAPI = {
     subscribe('cli-tool-event', cb),
   onCliToolResult: (cb: (payload: CliToolResultPayload) => void): Unsubscribe =>
     subscribe('cli-tool-result', cb),
+  onCliAsk: (cb: (payload: CliAskPayload) => void): Unsubscribe =>
+    subscribe('cli-ask', cb),
   onCliAgentEvent: (cb: (payload: CliAgentEventPayload) => void): Unsubscribe =>
     subscribe('cli-agent-event', cb),
   onMemoryExtractState: (cb: (payload: { projectRoot: string; extracting: boolean }) => void): Unsubscribe =>

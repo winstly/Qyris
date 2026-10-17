@@ -113,6 +113,8 @@ interface ChatState {
   appendReasoning: (requestId: string, delta: string, projectRoot?: string) => void
   handleCliToolEvent: (requestId: string, id: string, name: string, phase: 'start' | 'stop', argumentsStr: string, projectRoot?: string) => void
   handleCliToolResult: (requestId: string, id: string, content: string, isError: boolean, tokens?: { input: number; output: number }, projectRoot?: string) => void
+  /** CLI 通道交互提问：主进程代行桥挂起 → 本切片复用 pendingAsk 契约挂起 AskUserCard */
+  handleCliAsk: (requestId: string, callId: string | null, askId: string, question: string, options: string[] | null, projectRoot?: string) => void
   handleCliAgentEvent: (p: CliAgentEventPayload) => void
   /** 镜像管道：接入另一窗口刚发出的用户消息（不落库，发起窗口负责持久化） */
   receiveMirroredUserMessage: (projectRoot: string, message: ChatMessage) => void
@@ -280,6 +282,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     // 并清掉工程级 Map 残留（cancelSources / reasoningPersistTs 的本工程条目）
     askResolvers.get(path)?.('（项目已关闭）')
     askResolvers.delete(path)
+    // CLI 档交互提问：工程关闭 = 回填通道消失，主进程挂起的代行调用按取消收口
+    const closingBridgeAskId = cliAskBridges.get(path)
+    if (closingBridgeAskId) {
+      cliAskBridges.delete(path)
+      void api.answerCliAsk(closingBridgeAskId, '').catch(() => {})
+    }
     cancelSources.delete(path)
     // 键是纯 msgId（无工程前缀）：按本工程消息 id 集合匹配清理
     if (cur) {
@@ -490,6 +498,43 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     if (updated) persistAfterSettled(project, updated.id)
   },
 
+  /** CLI 通道交互提问：代行桥已在主进程挂起（MCP 往返原地等），本切片复用 API 档的
+   *  pendingAsk 契约挂起 AskUserCard（它只认 pendingAsk.id === call.id + awaiting-user）。
+   *  callId 缺席（极端竞态下 tool-progress 未先到）回退绑本切片最新一张 ask 卡 */
+  handleCliAsk: (requestId, callId, askId, question, options, projectRoot) => {
+    const project = resolveProjectForEvent(projectRoot, requestId)
+    if (!project) return
+    if (getSlice(project)?.cancelled) return
+    let target = callId
+    let applied = false
+    useChatStore.setState((s) => {
+      const cur = s.byProject[project]
+      if (!cur || cur.cancelled) return s
+      if (!target) {
+        // 主循环内提问串行（单 MCP 往返挂起），最多一张 ask 卡在途，倒序找即最新
+        for (let i = cur.messages.length - 1; i >= 0; i--) {
+          const hit = cur.messages[i].toolCalls?.find(
+            (tc) => tc.name === 'askUserQuestion' || tc.name.endsWith('__askUserQuestion'),
+          )
+          if (hit) {
+            target = hit.id
+            break
+          }
+        }
+      }
+      if (!target) return s
+      applied = true
+      return {
+        byProject: {
+          ...s.byProject,
+          [project]: { ...cur, status: 'awaiting-user', pendingAsk: { id: target, question, options } },
+        },
+      }
+    })
+    // 卡片真挂上了才登记回填凭据：被 cancelled/无卡吃掉的 cli-ask 不留悬空桥接
+    if (applied) cliAskBridges.set(project, askId)
+  },
+
   /** CLI 子 agent 实时转录：按 parentId 找到派发卡对应线程，文本/工具/结果分别入账。
    *  ⚠️ 线程 finish 只由 cli-tool-result（Agent 工具结果）驱动——子 agent 执行工具期间
    *  CLI 不发任何事件，静默 >300ms 是常态，不能作为完成信号（debounce 方案已证伪）。 */
@@ -553,6 +598,12 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const s = getSlice(project)
     if (!s || !s.pendingAsk) return
     const askId = s.pendingAsk.id
+    // CLI 档：答案同时回传主进程代行桥（claude-cli 的 MCP 往返在等它）；API 档无凭据自然跳过
+    const bridgeAskId = cliAskBridges.get(project)
+    if (bridgeAskId) {
+      cliAskBridges.delete(project)
+      void api.answerCliAsk(bridgeAskId, answer).catch(() => {})
+    }
     patchSlice(project, {
       answers: { ...s.answers, [askId]: answer },
       pendingAsk: null,
@@ -583,6 +634,14 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     const s = getSlice(project)
     if (s && s.status === 'awaiting-user' && s.pendingAsk) {
       const askId = s.pendingAsk.id
+      // CLI 档：挂起的代行调用显式收口（空回答 = 取消），并硬取消主 run——
+      // CLI 工具循环住在主进程/claude-cli，本地 resolve 拦不住它继续跑
+      const bridgeAskId = cliAskBridges.get(project)
+      if (bridgeAskId) {
+        cliAskBridges.delete(project)
+        void api.answerCliAsk(bridgeAskId, '').catch(() => {})
+        if (s.activeRequestId) void api.aiCancel(s.activeRequestId).catch(() => {})
+      }
       patchSlice(project, {
         answers: { ...s.answers, [askId]: '（已取消）' },
         pendingAsk: null,
@@ -982,6 +1041,10 @@ function sleepInterruptible(project: string, ms: number): Promise<boolean> {
 
 /** project → ask 的挂起 resolver（多工程并存时各自独立） */
 const askResolvers = new Map<string, (v: string) => void>()
+
+/** CLI 档交互提问的回填凭据（工程 → cli-ask 的 askId）：
+ *  answerAsk/cancelProject/closeProject 提交时回传主进程代行桥（answerCliAsk） */
+const cliAskBridges = new Map<string, string>()
 
 // ---------- 记忆上下文（P2）：会话摘要 + 长期记忆检索，防抖为每个 runAgentLoop 一次 ----------
 

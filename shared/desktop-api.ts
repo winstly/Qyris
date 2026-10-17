@@ -3,7 +3,7 @@
  * 渲染层经 desktop-api.d.ts 的全局声明消费。载荷类型全部出自 shared/ 纯类型模块。
  */
 import type {
-  AiCompletion, AiDeltaPayload, AiReasoningPayload, ChatMessage, CliAgentEventPayload, CloneProgress, CloneResult, McpTestResult,
+  AiCompletion, AiDeltaPayload, AiReasoningPayload, ChatMessage, CliAgentEventPayload, CliAskPayload, CloneProgress, CloneResult, McpTestResult,
   CliToolEventPayload, CliToolResultPayload, FileContent, GitStatus, MemoryHit, MemoryItem, MemoryLastTidy, MemoryPatch,
   MemoryStats, MessageMeta, PreviewConsoleEntry, SkillMeta, ToolCall, ToolResultEntry, TreeNode,
 } from './ipc-types'
@@ -112,7 +112,7 @@ export interface DesktopAPI {
   gitCheckout: (dir: string, branch: string) => Promise<void>
   gitStatus: (dir: string) => Promise<GitStatus>
   gitIsRepoRoot: (dir: string) => Promise<boolean>
-  gitDiff: (dir: string, path?: string, staged?: boolean) => Promise<string>
+  gitDiff: (dir: string, path?: string, staged?: boolean, untracked?: boolean) => Promise<string>
   gitAdd: (dir: string, paths?: string[]) => Promise<void>
   gitUnstage: (dir: string, paths: string[]) => Promise<void>
   gitCommit: (dir: string, message: string) => Promise<string>
@@ -121,13 +121,15 @@ export interface DesktopAPI {
   gitPush: (dir: string) => Promise<string>
   /** 合并分支到当前分支（git merge --no-edit）：返回合并结果摘要 */
   gitMerge: (dir: string, branch: string) => Promise<string>
-  gitDiscard: (dir: string, paths: string[]) => Promise<void>
+  gitDiscard: (dir: string, paths?: string[]) => Promise<void>
   pickParentDir: () => Promise<string | null>
 
   // AI
   aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string }) => Promise<AiCompletion>
   aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) => Promise<string>
   aiCancel: (requestId: string) => Promise<void>
+  /** CLI 通道交互提问回填：answer 空串 = 用户取消挂起（主进程按 isError 收口） */
+  answerCliAsk: (askId: string, answer: string) => Promise<boolean>
 
   // 记忆（分层记忆系统 P1；projectRoot=null 表示仅全局）
   memoryList: (projectRoot: string | null, includeArchived?: boolean) => Promise<{ items: MemoryItem[] }>
@@ -245,6 +247,8 @@ setPetHidden: (hidden: boolean) => void
   onCliToolEvent: DesktopEventSub<CliToolEventPayload>
   onCliToolResult: DesktopEventSub<CliToolResultPayload>
   onCliAgentEvent: DesktopEventSub<CliAgentEventPayload>
+  /** CLI 通道交互提问（askUserQuestion 经代行桥挂起，渲染层弹 AskUserCard 后按 askId 回填） */
+  onCliAsk: DesktopEventSub<CliAskPayload>
   onMemoryExtractState: DesktopEventSub<{ projectRoot: string; extracting: boolean }>
   /** 记忆数据变更广播（any 写路径完成后主进程发，all=true 表示 clear('all') 等全库变更） */
   onMemoryChanged: DesktopEventSub<{ all: boolean; projectKeys: string[] }>

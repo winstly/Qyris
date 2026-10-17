@@ -26,12 +26,15 @@ import type { ToolResult } from '../model/types'
 
 /** 只能由主进程执行的工具：执行、事件出口或主进程单例状态必须留在主进程 run 上。
  *  dispatch_subtasks = 编排事件出口；preview_* = 预览面板/控制台缓冲单例；
+ *  askUserQuestion = 交互提问（执行体在渲染层 AskUserCard，只有主进程能 emit cli-ask
+ *  并等 cli_ask_answer 回填，见 tools/ask-bridge.ts）；
  *  update_server_tags / memory_save / memory_update / memory_archive = 落盘后要 fire 本进程
  *  配置/记忆变更事件（memory_update 还要主进程 embedder 重嵌，子进程无嵌入管线） */
 export const HOST_ONLY_TOOLS: readonly string[] = [
   'dispatch_subtasks',
   'preview_open',
   'preview_console',
+  'askUserQuestion',
   'update_server_tags',
   'memory_save',
   'memory_update',

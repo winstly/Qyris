@@ -46,6 +46,8 @@
  *      两套工具同名，双跑是真事故）——所以只交回「主进程不执行」的那一类。这与旧 CLI 链路
  *      「常规工具不进 completion、活动走 cli-tool-event」的口径一致；交互型走的是旧 API 链路
  *      「completion.toolCalls → 渲染层 askUser 挂起 → 答案作 tool 消息回喂」的原形状。
+ *      CLI 档的 askUserQuestion 另有一条活路：经 HOST_ONLY 代行通道回主进程，emit cli-ask
+ *      让渲染层挂起、cli_ask_answer 回填（tools/ask-bridge.ts），claude-cli 的 MCP 往返原地等答案。
  */
 import { activeMcpServers, getConfig, isMcpEnabled, type AppConfig } from './config'
 import { CONTEXT_SUMMARY_HEADING, CONTEXT_SUMMARY_PREFIX, MEMORY_BLOCK_PREFIX, SESSION_SUMMARY_HEADING } from '../../shared/prompt-contract'
@@ -73,9 +75,12 @@ import { runAgent, type RunnerEvent } from './model/runner'
 import { setAgentRunContext } from './model/run-context'
 import { resolveChatProvider } from './model/provider-resolve'
 import { isHostRoutedTool, openHostToolProxy, type HostToolProxyEndpoint } from './mcp/proxy'
+import { parseMcpToolName } from './mcp/server'
 import { executeTool, isDeferredTool, toolsForPermission } from './tools'
+import { cancelAsksOf, registerCliAsk } from './tools/ask-bridge'
 import { ensureExternalTools, externalPoolStatus } from './mcp/external'
-import type { ContentPart, Message, ModelProvider, Tool, ToolPermission, Usage } from './model/types'
+import type { ContentPart, Message, ModelProvider, Tool, ToolPermission, ToolResult, Usage } from './model/types'
+import { randomUUID } from 'node:crypto'
 
 /** 补全结果 / 工具调用载荷（唯一定义在 shared/ipc-types，此处再导出供主进程消费） */
 import type { AiCompletion, AiToolCall } from '../../shared/ipc-types'
@@ -134,14 +139,14 @@ export async function aiChatStream(
   // 否则 agent_suggest。蒸馏档由 memory/agent 自带 distill，不走这里
   const toolOrigin: MemoryOrigin = inferToolOrigin(messages)
 
+  // 工具名 → askUserQuestion 判别：claude 侧经 MCP 调用时带 mcp__qyris-tools__ 前缀
+  const isAskToolCall = (name: string): boolean => name === 'askUserQuestion' || parseMcpToolName(name) === 'askUserQuestion'
+  // 交互提问对应的工具卡 id（claude tool_use）：tool-progress 建卡时捕获，cli-ask 事件带它回渲染层对卡
+  let pendingAskCallId: string | null = null
+
   // 编排工具（dispatch_subtasks）的事件出口挂在本 run 上，CLI 通道只能经 MCP 调工具——
   // 拉起主进程代行通道让 MCP 子进程把编排调用送回本进程执行（见 mcp/proxy.ts）
   let hostProxy: HostToolProxyEndpoint | null = null
-  if (dispatchMode === 'claude-cli' && wantTools) {
-    hostProxy = await openHostToolProxy((name, input) =>
-      executeTool(name, input, { projectRoot, signal: controller.signal, permission, origin: toolOrigin }),
-    )
-  }
 
   // 外部 MCP 工具：两档都接入。连接池按工程分域（幂等）——API 档 runner 直调；
   // CLI 档经 hostProxy 代行回来执行（mcp-server 子进程每次补全新拉起，不能在那边建连）。
@@ -157,17 +162,56 @@ export async function aiChatStream(
   // provider 句柄留到 finally 释放（try 块内别名 modelProvider 供正文使用）
   let providerHandle: ModelProvider | null = null
   try {
+    // 代行通道在 try 内建：executor 闭包要引用下方 try 块内的 emit（cli-ask 事件出口）
+    if (dispatchMode === 'claude-cli' && wantTools) {
+      hostProxy = await openHostToolProxy((name, input) => {
+        // 交互提问：主进程挂起等渲染层回填（tools/ask-bridge.ts），MCP 往返原地等答案；
+        // 不走 executeTool——ask.ts 的 execute 是延迟语义的响亮报错哨兵
+        if (isAskToolCall(name)) {
+          const askId = randomUUID()
+          const rec = (input ?? {}) as { question?: unknown; options?: unknown }
+          const question = typeof rec.question === 'string' && rec.question.trim() ? rec.question : '请回答'
+          const options = Array.isArray(rec.options)
+            ? rec.options.map((o) => String(o)).filter((s) => s.length > 0)
+            : null
+          return new Promise<ToolResult>((resolve) => {
+            // settle 统一出口：注销挂起登记 + 摘除 abort 监听（正常回答路径不留孤儿监听）
+            const onAbort = (): void => settle({ content: '已取消', isError: true })
+            const settle = (r: ToolResult): void => {
+              controller.signal.removeEventListener('abort', onAbort)
+              unregister()
+              resolve(r)
+            }
+            const unregister = registerCliAsk(askId, requestId, settle)
+            if (controller.signal.aborted) {
+              onAbort()
+              return
+            }
+            controller.signal.addEventListener('abort', onAbort, { once: true })
+            emit('cli-ask', {
+              requestId,
+              callId: pendingAskCallId,
+              askId,
+              question,
+              options: options && options.length > 0 ? options : null,
+            })
+          })
+        }
+        return executeTool(name, input, { projectRoot, signal: controller.signal, permission, origin: toolOrigin })
+      })
+    }
     providerHandle = await resolveChatProvider({
       dispatchMode, provider, baseUrl, model, projectRoot, cfg, permission, wantTools, hostProxy, toolOrigin,
     })
     const modelProvider = providerHandle
     // 提示词工具面 = 通道实际可达面（与 MCP 暴露面 / runner 执行面同源，不许提示词多说一个字）
-    // isHostRoutedTool（HOST_ONLY ∪ 外部 mcp__*）在 CLI 档依赖代行通道，通道缺席就不进面
+    // isHostRoutedTool（HOST_ONLY ∪ 外部 mcp__*）在 CLI 档依赖代行通道，通道缺席就不进面；
+    // askUserQuestion 已入 HOST_ONLY（交互回填走代行桥），同样随通道门控——有通道即进面
     const surfaceTools = wantTools
       ? toolsForPermission(permission, projectRoot).filter(
           (t) =>
             dispatchMode !== 'claude-cli' ||
-            (!isDeferredTool(t.name) && (hostProxy != null || !isHostRoutedTool(t.name))),
+            (hostProxy != null || (!isDeferredTool(t.name) && !isHostRoutedTool(t.name))),
         )
       : []
     const store = new ConversationStore({ provider: modelProvider.id })
@@ -206,6 +250,8 @@ export async function aiChatStream(
           // MCP 模式：工具发起（CLI 吐出 tool_use，MCP 往返执行中）——立即出「执行中」卡片。
           // 这是长命令执行期（npm install 数分钟）唯一的活体反馈，没有它聊天窗体感假死
           toolEvents++
+          // 交互提问：记下工具卡 id，cli-ask 事件按它让渲染层把 AskUserCard 置为可交互
+          if (isAskToolCall(e.name)) pendingAskCallId = e.id
           emit('cli-tool-event', {
             requestId, id: e.id, name: e.name, phase: 'start',
             arguments: typeof e.input === 'string' ? e.input : JSON.stringify(e.input ?? {}),
@@ -314,6 +360,8 @@ export async function aiChatStream(
   } finally {
     inflight.delete(requestId)
     if (windowId != null) unregisterRequestWindow(requestId)
+    // run 收尾：仍未被回答的交互提问按取消结案（渲染层已关闭时防 MCP 往返永久悬挂）
+    cancelAsksOf(requestId)
     hostProxy?.close()
     void providerHandle?.dispose?.()
   }
@@ -394,8 +442,9 @@ function buildToolRealityBlock(tools: readonly Tool[]): string {
       '上表是唯一可用清单：不在上表的工具名（含历史提示里的其他旧名）一律不可用，不要请求。',
     '声明工具调用时只用本通道原生的工具调用通道（工具协议说明会随请求注入）；不要在正文里写围栏块/自创标签/裸 JSON 冒充调用——正文里的调用语法不会被执行。',
   ]
-  // 交互型工具被通道裁掉时（CLI/MCP 通道不暴露 askUserQuestion）必须给出替代行为，
+  // 交互型工具被通道裁掉时（如无代行通道的窄面场景）必须给出替代行为，
   // 否则渲染层人格还在教它「调用 askUserQuestion」——又一个提示词越权的坑
+  // （CLI 档有代行通道时 askUserQuestion 在面上，不走此分支，由 ask-bridge 回填）
   if (!names.has('askUserQuestion')) {
     lines.push(
       'askUserQuestion 在本通道不可用：需要用户做选择或补充信息时，直接在回复中向用户提问并结束本轮，等用户回复后再继续；不要臆测用户意图硬做决定。',

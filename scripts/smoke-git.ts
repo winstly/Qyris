@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { gitStatus, gitAdd, gitCommit, gitDiff, gitUnstage, gitDiscard, gitMerge } from '../electron/lib/git'
+import { gitStatus, gitAdd, gitCommit, gitDiff, gitIsTracked, gitUnstage, gitDiscard, gitMerge } from '../electron/lib/git'
 
 let failures = 0
 function assert(cond: boolean, label: string): void {
@@ -68,6 +68,20 @@ async function main(): Promise<void> {
     const stagedDiff = await gitDiff(dir, 'a.txt', true)
     assert(stagedDiff.includes('-one') && stagedDiff.includes('+two'), '暂存 diff = HEAD vs index（-one +two）')
 
+    console.log('gitDiff（untracked）：')
+    const untrackedDiff = await gitDiff(dir, 'with spaces.txt', false, true)
+    assert(
+      untrackedDiff.includes('new file mode') && untrackedDiff.includes('+x'),
+      'untracked 工作区 diff = no-index 新增（new file mode +x）',
+    )
+    assert(await gitDiff(dir, 'with spaces.txt') === '', 'untracked 常规 diff 为空（exit 0 不报错）')
+    assert(await gitDiff(dir, 'with spaces.txt', true) === '', 'untracked 暂存 diff 为空（exit 0 不报错）')
+    assert(await gitIsTracked(dir, 'a.txt'), 'gitIsTracked：已跟踪文件=true')
+    assert(!(await gitIsTracked(dir, 'with spaces.txt')), 'gitIsTracked：未跟踪文件=false')
+    // agent 工具链路传的是 ensureInside 归一的绝对路径——ls-files 的绝对 pathspec 必须能匹配
+    const absA = path.join(dir, 'a.txt')
+    assert(await gitIsTracked(dir, absA), 'gitIsTracked：绝对路径（工具链路真实入参）=true')
+
     console.log('add / commit：')
     await gitAdd(dir)
     const out = await gitCommit(dir, 'test commit')
@@ -86,6 +100,17 @@ async function main(): Promise<void> {
     // Windows core.autocrlf 可能写入 CRLF：还原语义等价判断，不做字节级比较
     const restored = readFileSync(path.join(dir, 'renamed.txt'), 'utf8').replace(/\r\n/g, '\n')
     assert(restored === 'moved\n', 'discard 后还原为 HEAD 内容')
+
+    console.log('discard 全部（空 paths = 整棵工作树）：')
+    writeFileSync(path.join(dir, 'a.txt'), 'dirty\n')
+    writeFileSync(path.join(dir, 'keep-untracked.txt'), 'x\n')
+    sh('git add a.txt', dir) // 制造暂存+工作区双态，验证 restore --staged --worktree 全清
+    await gitDiscard(dir)
+    const st5 = await gitStatus(dir)
+    assert(
+      st5.files.length === 1 && st5.files[0].path === 'keep-untracked.txt' && st5.files[0].status === 'untracked',
+      `空 paths 丢弃全部：已跟踪改动全还原、untracked 保留（实际 ${JSON.stringify(st5.files.map((f) => f.path))}）`,
+    )
 
     console.log('边界：')
     const nonRepo = mkdtempSync(path.join(os.tmpdir(), 'qyris-git-norepo-'))

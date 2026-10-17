@@ -166,8 +166,12 @@ async function main(): Promise<void> {
     await act(async () => { await sleep(10) })
     assert(container.querySelectorAll('.card.mcp-panel__row').length === 1, 'server 行渲染（组合 .card 基座）')
     assert(container.querySelectorAll('.skills-panel__dir').length === 2, '配置域行 ×2 经 ScopeRow 渲染')
-    // 持久化契约：进程级既有结果挂载即显（切换切片/重开面板不回「未测试」）
-    assert(container.querySelector('.mcp-panel__status')?.textContent === '已连接 · 2 工具', '挂载即显进程级测试结果（不回未测试）')
+    // 持久化契约：进程级既有结果挂载即显（切换切片/重开面板不回「未测试」）。
+    // 成功态徽章是折叠开关按钮（含 chevron，textContent 带图标占位空白）——按语义子串断言
+    assert(
+      container.querySelector('.mcp-panel__status')?.textContent?.includes('已连接 · 2 工具') === true,
+      '挂载即显进程级测试结果（不回未测试）',
+    )
     const btn = [...container.querySelectorAll('button')].find((b) => b.textContent === '测试')
     click(btn!)
     await act(async () => { await sleep(10) })

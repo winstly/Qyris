@@ -17,7 +17,7 @@ import { basename } from '@/utils/path'
 import {
   api,
   onBuildOutput, onBuildExit, onAiDelta, onAiReasoning,
-  onCliToolEvent, onCliToolResult, onCliAgentEvent,
+  onCliToolEvent, onCliToolResult, onCliAgentEvent, onCliAsk,
   onChatMirror, onChatRequestDone,
   onFsChanged as subscribeFsChanged,
   onElementPicked,
@@ -73,6 +73,7 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
       onAiReasoning((p) => bufferChunk(reasoningBuf, p.requestId, p.delta, p.projectRoot)),
       onCliToolEvent((p) => useChatStore.getState().handleCliToolEvent(p.requestId, p.id, p.name, p.phase, p.arguments, p.projectRoot)),
       onCliToolResult((p) => useChatStore.getState().handleCliToolResult(p.requestId, p.id, p.content, p.isError, p.tokens, p.projectRoot)),
+      onCliAsk((p) => useChatStore.getState().handleCliAsk(p.requestId, p.callId, p.askId, p.question, p.options, p.projectRoot)),
       onCliAgentEvent((p) => useChatStore.getState().handleCliAgentEvent(p)),
       // 镜像管道：另一窗口（桌宠面板 ↔ 主窗口）的对话稳定点推送与本端请求收场广播
       onChatMirror(mirrorDispatch),

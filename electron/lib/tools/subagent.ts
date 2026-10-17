@@ -86,7 +86,9 @@ async function resolveSubProvider(tier: string, ctx: ToolCtx): Promise<{ provide
     permission: ctx.permission,
     wantTools: true,
     hostProxy: getAgentRunContext(ctx)?.hostProxy ?? null,
-    excludeTools: ['dispatch_subtasks'],
+    // CLI 档 MCP 面剔除：嵌套派发与子任务内提问都禁止（askUserQuestion 的交互回填
+    // 只属于发起对话的主 run；子任务要澄清就在结果里写明假设）
+    excludeTools: ['dispatch_subtasks', 'askUserQuestion'],
     // 子 agent 轮界独立于主对话：CLI 落为 --max-turns，API 落为 runner 轮界
     maxTurns: cfg.aiSubagentMaxTurns ?? SUBAGENT_MAX_TURNS,
   })
