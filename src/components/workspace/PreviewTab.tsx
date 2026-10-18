@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { useStartupStore } from '@/store/useStartupStore'
 import { useBuildStore, selectSlotState, selectCurrentBuild } from '@/store/useBuildStore'
@@ -13,6 +13,7 @@ import { DeployTab } from './DeployTab'
 import { ServiceList } from './ServiceList'
 import { ErrorDetail } from './ErrorDetail'
 import { toast } from '@/components/common/Toast'
+import { aiCompileAllOpen } from '@/services/ai-compile'
 
 const PHASE_LABEL: Record<string, string> = {
   idle: '未运行', building: '编译中', deploying: '部署中', running: '运行中', error: '异常',
@@ -39,7 +40,6 @@ export function PreviewTab() {
   const projectPath = useAppStore((s) => s.projectPath)
   const openProjectDialog = useAppStore((s) => s.openProjectDialog)
   const setCreateProjectOpen = useAppStore((s) => s.setCreateProjectOpen)
-  const hasApiKey = useAppStore((s) => s.hasApiKey)
   const showConfirm = useAppStore((s) => s.showConfirm)
   const startupCommands = useStartupStore((s) => s.startupCommands)
   const updateStartCommand = useStartupStore((s) => s.updateStartCommand)
@@ -59,7 +59,6 @@ export function PreviewTab() {
 
   const chat = useChatStore(selectCurrentChat)
   const chatStatus = chat.status
-  const chatMessages = chat.messages
 
   const [logSlot, setLogSlot] = useState<string | null>(null)
   const logSt = logSlot ? slots[logSlot] : undefined
@@ -183,13 +182,6 @@ export function PreviewTab() {
   }, [showIframe, deviceMode, activeTab, memorySidebarOpen])
 
   const chatBusy = chatStatus !== 'idle' && chatStatus !== 'error'
-  const compiling = useMemo(() => {
-    if (!chatBusy) return false
-    for (let i = chatMessages.length - 1; i >= 0; i--) {
-      if (chatMessages[i].role === 'user') return chatMessages[i].meta?.projectStart === true
-    }
-    return false
-  }, [chatBusy, chatMessages])
   const hasCommands = startupCommands.length > 0
 
   /** 服务列表合并视图 */
@@ -205,26 +197,20 @@ export function PreviewTab() {
     })
   })()
 
-  /** AI 编译：调模型探测技术栈 + 识别启动命令并存档 */
-  const aiCompile = async () => {
-    if (!projectPath) return
-    const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
-    if (!hasApiKey && !cliMode) {
-      toast.info('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
-      return
-    }
-    if (hasCommands) {
-      if (await useAppStore.getState().showConfirm('AI 重新编译', '将重新调用 AI 识别启动命令，已识别的命令会被覆盖。继续？') !== true) return
-    }
-    const curChat = selectCurrentChat(useChatStore.getState())
-    if (curChat.status !== 'idle' && curChat.status !== 'error') {
-      toast.info('AI 正忙', '上一条消息还在处理中，请稍候。')
-      return
-    }
-    const prompt = cliMode
-      ? '这是 AI 编译阶段：请探测当前项目的技术栈，需要时安装依赖 / 验证编译，然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），逐个验证启动命令能真正启动（验证通过即停止进程），全部通过后在回复最后一行用 [[START_COMMANDS: [{"name":"portal","run":"npm run dev","url":"http://localhost:5173"}]]] 格式提交。'
-      : '这是 AI 编译阶段：请探测当前项目的技术栈，需要时用 run_once 安装依赖 / 验证编译，然后为每个需要长期运行的服务取一个简短英文服务名（各不重复），逐个用 verify_start 验证启动命令能真正启动，全部通过后用 report_start_commands 提交启动命令清单。'
-    void useChatStore.getState().send(prompt, { projectStart: true })
+  // 全部编译进行中：按钮 loading 态 + 防重复点击（串行循环在后台跑，逐工程 Toast 汇报）
+  const [compilingAll, setCompilingAll] = useState(false)
+
+  /** AI 全部编译：串行编译所有已打开工程 */
+  const aiCompileAll = (): void => {
+    if (!projectPath || compilingAll) return
+    setCompilingAll(true)
+    void aiCompileAllOpen().finally(() => setCompilingAll(false))
+  }
+
+  /** 服务列表刷新：从 config 重读全量存档并重投影当前工程。
+   *  兜底后台编译（目标≠当前工程）等投影不同步场景——数据在 map 里，重读即现。 */
+  const refreshStartupCommands = (): void => {
+    useStartupStore.getState().reloadFromConfig(projectPath).catch((e) => toast.err('刷新失败', String(e)))
   }
 
   /** 工具链缺失：授权 AI 自动安装 */
@@ -276,33 +262,48 @@ export function PreviewTab() {
         <DeployTab />
       ) : (
       <>
-      {/* 启动工具栏 */}
+      {/* 启动工具栏：单工程 AI 编译入口在文件树根目录右键（accent 标识），工具栏只留批量与运行 */}
       <div className="preview__bar">
-        <button className="btn btn--ghost btn--sm" disabled={!projectPath || chatBusy} onClick={() => void aiCompile()}
-          title={hasCommands ? '重新调用 AI 识别启动命令' : '由 AI 探测技术栈、装依赖并识别启动命令'}>
-          {compiling ? 'AI 编译中…' : 'AI 编译'}
+        <button
+          className="btn btn--ghost btn--sm"
+          disabled={!projectPath || compilingAll}
+          aria-busy={compilingAll}
+          onClick={() => aiCompileAll()}
+          title="逐个对所有已打开工程调用 AI 识别启动命令（串行执行，忙的工程自动跳过；单工程编译在文件树根目录右键）"
+        >
+          {compilingAll ? '全部编译中…' : 'AI 全部编译'}
         </button>
         <button className="btn btn--primary btn--sm" disabled={!projectPath || !hasCommands} onClick={() => void runAll()}
-          title={hasCommands ? '直接运行已识别的全部启动命令' : '请先点击「AI 编译」识别启动命令'}>
+          title={hasCommands ? '直接运行已识别的全部启动命令' : '请先点击「AI 全部编译」识别启动命令'}>
           <IconPlay size={12} /> 全部运行
         </button>
         <button className="btn btn--danger-ghost btn--sm" disabled={!anyAlive} onClick={() => void stopAll(projectPath ?? undefined)} title="停止全部服务进程">
           <IconStop size={12} /> 全部停止
         </button>
         <span className="preview__hint">
-          {hasCommands ? `已识别 ${startupCommands.length} 个服务，点「全部运行」直接启动` : '先「AI 编译」识别启动命令，之后「全部运行」不再调用 AI'}
+          {hasCommands
+            ? `已识别 ${startupCommands.length} 个服务，点「全部运行」直接启动`
+            : '单工程编译：文件树根目录右键「AI 编译」；「AI 全部编译」逐个编译所有已打开工程；识别完成后「全部运行」零 AI 启动'}
         </span>
         <div className="preview__spacer" />
+        <button
+          className="icon-btn"
+          disabled={!projectPath}
+          onClick={() => void refreshStartupCommands()}
+          aria-label="刷新服务列表"
+          title="刷新服务列表（从配置重读已识别的启动命令）"
+        >
+          <IconRefresh size={12} />
+        </button>
       </div>
 
       {/* 服务列表 */}
       <ServiceList
         serviceRows={serviceRows} activeSlot={activeSlot} logSlot={logSlot} setLogSlot={setLogSlot}
-        projectPath={projectPath} hasCommands={hasCommands} startupCommands={startupCommands}
-        aiCompile={aiCompile} runAll={runAll} stopAll={stopAll} selectSlot={selectSlot}
+        projectPath={projectPath} selectSlot={selectSlot}
         start={start} stop={stop} removeSlot={removeSlot}
         updateStartCommand={updateStartCommand} deleteStartCommand={deleteStartCommand}
-        showConfirm={showConfirm} compiling={compiling} anyAlive={anyAlive} chatBusy={chatBusy}
+        showConfirm={showConfirm}
       />
 
       {/* 节点日志台 */}
@@ -424,10 +425,10 @@ export function PreviewTab() {
           <EmptyState icon={<IconPlay size={22} />} title="待启动"
             text={hasCommands
               ? `已识别 ${startupCommands.length} 个服务的启动命令，点击「全部运行」直接启动。`
-              : '不需要 AI 探测时，可直接在上方「添加服务」手动定义启动命令；也可以点「AI 编译」由 AI 自动识别。'}
+              : '可直接在上方「添加服务」手动定义启动命令；也可在文件树根目录右键选「AI 编译」由 AI 自动识别。'}
             action={hasCommands
               ? <button className="btn btn--primary" onClick={() => void runAll()}><IconPlay size={14} /> 全部运行</button>
-              : <button className="btn btn--primary" disabled={chatBusy} onClick={() => void aiCompile()}>{compiling ? 'AI 编译中…' : 'AI 编译'}</button>}
+              : undefined}
           />
         ) : (
           <EmptyState icon={<IconTerminal size={22} />}

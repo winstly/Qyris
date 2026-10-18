@@ -2,10 +2,11 @@ import { useEffect, useState } from 'react'
 import { useAppStore } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
 import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
-import { IconClock, IconClose, IconFolder, IconPlus, IconTrash } from '@/components/common/icons'
+import { IconClock, IconClose, IconFolder, IconPlus, IconRefresh, IconTrash } from '@/components/common/icons'
 import { basename } from '@/utils/path'
 import { timeAgo } from '@/utils/time'
 import { toast } from '@/components/common/Toast'
+import { aiCompileProject } from '@/services/ai-compile'
 
 /** 项目 Tab：顶栏「创建/打开项目」+ 分「当前项目」（本会话驻留/运行中）与「历史项目」（持久化记录）两段。 */
 export function ProjectsTab() {
@@ -162,6 +163,14 @@ export function ProjectsTab() {
                         <span className="history__item-name">{basename(p)}</span>
                         <span className="history__item-path mono">{p}</span>
                       </div>
+                      <button
+                        className="history__item-newwin"
+                        onClick={(e) => { e.stopPropagation(); void aiCompileProject(p) }}
+                        aria-label={`AI 编译 ${basename(p)}`}
+                        title="AI 编译此项目（识别启动命令并存档，不打断当前工作区）"
+                      >
+                        <IconRefresh size={12} />
+                      </button>
                       <button
                         className="history__item-newwin"
                         onClick={(e) => { e.stopPropagation(); void closeProject(p) }}

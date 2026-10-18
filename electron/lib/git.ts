@@ -4,6 +4,8 @@
  * git 一律 spawn 直连可执行文件（不走 shell），引用/路径入参做 `-` 前缀守卫防 CLI 选项注入。
  */
 import { spawn } from 'node:child_process'
+import path from 'node:path'
+import { diffLines } from 'diff'
 import { errorMessage } from './util'
 import { buildChildEnv } from './proc-env'
 
@@ -14,7 +16,9 @@ import type { GitFileEntry, GitStatus } from '../../shared/ipc-types'
 const MAX_DIFF_CHARS = 200_000
 const MAX_STATUS_ENTRIES = 2000
 
-/** 执行 git 命令（不走 shell，windowsHide 防控制台闪烁），超时强杀；spawn 异常抛错 */
+/** 执行 git 命令（不走 shell，windowsHide 防控制台闪烁），超时强杀；spawn 异常抛错。
+ *  输出按 Buffer 收集、收口时一次性转 utf8——chunk-wise toString 会把跨块的多字节
+ *  中文切成 U+FFFD 乱码（gutter 基线文本受害：逐行虚假失配 → 标记位置漂移） */
 function runGit(args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const child = spawn('git', args, {
@@ -23,11 +27,15 @@ function runGit(args: string[], timeoutMs: number): Promise<{ code: number | nul
       windowsHide: true,
       env: buildChildEnv(),
     })
-    let stdout = ''
-    let stderr = ''
-    child.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
-    child.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
-    child.on('close', (code) => resolve({ code, stdout, stderr }))
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    child.stdout?.on('data', (d: Buffer) => { stdoutChunks.push(d) })
+    child.stderr?.on('data', (d: Buffer) => { stderrChunks.push(d) })
+    child.on('close', (code) => resolve({
+      code,
+      stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+      stderr: Buffer.concat(stderrChunks).toString('utf8'),
+    }))
     child.on('error', (e) => reject(new Error(`git 启动失败：${errorMessage(e)}`)))
   })
 }
@@ -232,6 +240,76 @@ export async function gitPush(dir: string): Promise<string> {
       return (await runGitOrThrow(['-C', dir, 'push', '-u', 'origin', 'HEAD'], 60_000, '推送')).trim()
     }
     throw e
+  }
+}
+
+// ---------- 编辑器 gutter：文件行级变更（实时版） ----------
+
+/** 行级变更标记（1-based 行号，编辑器 gutter 色条用） */
+export interface FileChangeLines {
+  added: number[]
+  modified: number[]
+  deleted: number[]
+}
+
+/** gutter 标记上限：防病态大文件拖爆装饰层（超限截断如实少标） */
+const MAX_CHANGE_LINES = 5000
+
+/** 编辑器 gutter 行级变更【实时】：渲染层传编辑器当前内存内容，主进程拉 git 基线文本
+ *  （vs HEAD；无提交历史回退 index；两者皆无 = 未跟踪 → 空基线全行新增）用 jsdiff 现算。
+ *  不等保存，编辑即反映（VS Code gutter 同款口径）。
+ *  行号语义：added/modified = 当前内容行号；deleted = 删除点前的保留行（VS Code 删除标记同位）。
+ *  非仓库 / 路径越界返回 null（消费侧无装饰即静默）。 */
+export async function gitChangeLinesLive(projectRoot: string, filePath: string, currentContent: string): Promise<FileChangeLines | null> {
+  try {
+    // 文件必须位于工程内：防 IPC 侧传任意路径把仓库探测打到工程外
+    const rel = path.relative(projectRoot, filePath)
+    if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null
+    const top = await runGit(['-C', path.dirname(filePath), 'rev-parse', '--show-toplevel'], 10_000)
+    if (top.code !== 0 || !top.stdout.trim()) return null
+    const toplevel = top.stdout.trim()
+    const relPath = path.relative(toplevel, filePath).replace(/\\/g, '/')
+    if (!relPath || relPath.startsWith('..')) return null
+
+    let baseline = ''
+    let r = await runGit(['-C', toplevel, 'show', `HEAD:${relPath}`], 15_000)
+    if (r.code !== 0) r = await runGit(['-C', toplevel, 'show', `:${relPath}`], 15_000)
+    if (r.code === 0) baseline = r.stdout
+
+    // 行尾归一化：仓库内 LF vs 工作区 CRLF（Windows 常态）会让 jsdiff 逐行判异 → 全文件
+    // 误标 modified。diff 只关心行内容，行号不受行尾影响，双侧剥 \r 后再算
+    const norm = (s: string): string => s.replace(/\r\n/g, '\n')
+    const out: FileChangeLines = { added: [], modified: [], deleted: [] }
+    let cur = 1 // 当前内容已消费行数的下一行号
+    let pendingRemoved = 0
+    // 悬空纯删除落位：标记在删除点前的保留行（VS Code 删除标记同位；git +start 同值）。
+    // jsdiff 场景：unchanged(r1)→removed(r2) 落位时 cur=2 → 标 1；EOF 删除 cur-1=0 → 钳到首行
+    const settleRemoved = (): void => {
+      if (pendingRemoved > 0 && out.deleted.length < MAX_CHANGE_LINES) out.deleted.push(Math.max(cur - 1, 1))
+      pendingRemoved = 0
+    }
+    for (const part of diffLines(norm(baseline), norm(currentContent))) {
+      const n = part.count ?? 0
+      if (part.removed) { pendingRemoved += n; continue }
+      if (part.added) {
+        const m = Math.min(pendingRemoved, n)
+        for (let i = 0; i < m && out.modified.length < MAX_CHANGE_LINES; i++) out.modified.push(cur + i)
+        for (let i = m; i < n && out.added.length < MAX_CHANGE_LINES; i++) out.added.push(cur + i)
+        if (pendingRemoved > n) {
+          // 旧行比新行多：差额按纯删除落位（新增块之后）
+          for (let i = 0; i < pendingRemoved - n && out.deleted.length < MAX_CHANGE_LINES; i++) out.deleted.push(cur + n)
+        }
+        pendingRemoved = 0
+        cur += n
+      } else {
+        settleRemoved()
+        cur += n
+      }
+    }
+    settleRemoved()
+    return out
+  } catch {
+    return null
   }
 }
 

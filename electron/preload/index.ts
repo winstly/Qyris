@@ -38,10 +38,11 @@ const desktopAPI: DesktopAPI = {
     ipcRenderer.invoke('list_dir_batch', { projectRoot, dirs }) as Promise<Record<string, { name: string; path: string; kind: 'file' | 'folder' }[]>>,
   searchFiles: (projectRoot: string, query: string) =>
     ipcRenderer.invoke('search_files', { projectRoot, query }) as Promise<{ files: string[]; truncated: boolean }>,
-  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean }) =>
+  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; excludeGlobs?: string[]; maxResults?: number; caseSensitive?: boolean; literal?: boolean }) =>
     ipcRenderer.invoke('grep_files', {
       projectRoot, pattern,
-      glob: opts?.glob ?? null, maxResults: opts?.maxResults ?? null, caseSensitive: opts?.caseSensitive === true,
+      glob: opts?.glob ?? null, excludeGlobs: opts?.excludeGlobs ?? null,
+      maxResults: opts?.maxResults ?? null, caseSensitive: opts?.caseSensitive === true, literal: opts?.literal === true,
     }) as Promise<{ matches: { path: string; line: number; text: string }[]; fileCount: number; truncated: boolean }>,
   readTextFile: (projectRoot: string, filePath: string) =>
     ipcRenderer.invoke('read_text_file', { projectRoot, path: filePath }) as Promise<FileContent>,
@@ -195,7 +196,7 @@ const desktopAPI: DesktopAPI = {
   scanSkills: (dirs: string[]) => ipcRenderer.invoke('scan_skills', { dirs }) as Promise<{ id: string; name: string; description: string; triggers: string[] }[]>,
   readSkill: (dirs: string[], skillId: string) => ipcRenderer.invoke('read_skill', { dirs, skillId }) as Promise<string | null>,
   pickSkillsDir: () => ipcRenderer.invoke('pick_skills_dir') as Promise<string | null>,
-  projectSkillImportZip: (dir: string, zipPath: string) => ipcRenderer.invoke('project_skill_import_zip', { dir, zipPath }) as Promise<{ ok: boolean; name?: string; error?: string }>,
+  projectSkillImportZip: (dir: string, zipPath: string) => ipcRenderer.invoke('project_skill_import_zip', { dir, zipPath }) as Promise<{ ok: boolean; name?: string; count?: number; error?: string }>,
   projectSkillImportDir: (dir: string, srcDir: string) => ipcRenderer.invoke('project_skill_import_dir', { dir, srcDir }) as Promise<{ ok: boolean; name?: string; count?: number; error?: string }>,
   projectSkillDelete: (dir: string, skillId: string) => ipcRenderer.invoke('project_skill_delete', { dir, skillId }) as Promise<{ ok: boolean; error?: string }>,
   projectSkillPickZip: () => ipcRenderer.invoke('project_skill_pick_zip') as Promise<string | null>,
@@ -228,6 +229,8 @@ const desktopAPI: DesktopAPI = {
   gitFetch: (dir: string) => ipcRenderer.invoke('git_fetch', { dir }) as Promise<string>,
   gitPush: (dir: string) => ipcRenderer.invoke('git_push', { dir }) as Promise<string>,
   gitMerge: (dir: string, branch: string) => ipcRenderer.invoke('git_merge', { dir, branch }) as Promise<string>,
+  gitChangeLines: (projectRoot: string, filePath: string, content: string) =>
+    ipcRenderer.invoke('git_change_lines', { projectRoot, filePath, content }) as Promise<{ added: number[]; modified: number[]; deleted: number[] } | null>,
   gitDiscard: (dir: string, paths?: string[]) => ipcRenderer.invoke('git_discard', { dir, paths }),
   pickParentDir: () => ipcRenderer.invoke('pick_parent_dir') as Promise<string | null>,
 

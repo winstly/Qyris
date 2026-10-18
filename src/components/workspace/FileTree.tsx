@@ -10,6 +10,7 @@ import { ContextMenu, type ContextMenuItem } from '@/components/common/ContextMe
 import { SnapshotHistoryDialog } from '@/components/workspace/SnapshotHistoryDialog'
 import { Select } from '@/components/common/Select'
 import { IconChevron, IconFolder, IconFolderOpen, IconFile, IconPlus, IconFolderPlus, IconPencil, IconTrash, IconRefresh, IconSearch, IconClose, IconBranch, IconUndo, IconCopy, IconScissors, IconCheck, IconSend, IconTarget } from '@/components/common/icons'
+import { aiCompileProject } from '@/services/ai-compile'
 import { focusGitCommit } from '@/components/workspace/GitPanel'
 import { toast } from '@/components/common/Toast'
 
@@ -661,6 +662,15 @@ function buildTreeMenuItems(
             icon: <IconFolder size={13} />,
             run: () => useFileStore.getState().collapseAll(target.path),
           },
+          // 工程级 AI 入口：只在根目录出现（accent 色标识 AI 能力类操作）
+          ...(isRoot
+            ? [{
+                label: 'AI 编译',
+                icon: <IconTarget size={13} />,
+                accent: true,
+                run: () => void aiCompileProject(target.path),
+              }]
+            : []),
         ]
       : []),
     { label: '在资源管理器中打开', icon: <IconFolder size={13} />, run: () => void api.openInExplorer(target.path) },

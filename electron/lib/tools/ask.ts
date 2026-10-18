@@ -19,7 +19,12 @@ import type { Tool } from '../model/types'
 
 export const askUserQuestion: Tool = {
   name: 'askUserQuestion',
-  description: '当需要用户做选择或补充信息时，向用户提问并等待回答',
+  description:
+    '向用户提出结构化问题并等待回答（弹出问题卡片，用户点选或自由输入）。需要用户决策时必须优先用本工具，不要在回复正文里文字提问后干等：' +
+    '① 存在多个合理方案/技术选型需要用户拍板；② 缺少关键信息（路径、名称、端口、偏好等）无法继续；' +
+    '③ 下一步方向分叉、做错代价高；④ 即将执行破坏性/不可逆操作需确认。' +
+    'question 写清背景与问题本身；options 给 2-4 个互斥的短选项（用户始终可以自由输入，无合适固定选项时不传 options）。' +
+    '不要用它问只有一种合理答案、或你自己查一下就能解决的问题。',
   inputSchema: {
     type: 'object',
     properties: {

@@ -25,7 +25,7 @@ export function buildSystemPrompt(projectPath: string | null, skillMetas: SkillM
     '端口冲突（EADDRINUSE）：错误信息含占用进程的 PID 和名称——① 若是本项目其他已运行服务 → stop_project(name) 停止后重试；② 若是残留进程 → stop_project(name) 强杀后重试；③ 若是外部进程 → 修改启动命令换端口：Windows `set PORT=新端口 && 原命令`，Linux/macOS `PORT=新端口 原命令`，然后 update_start_command。换端口后同步检查前端代理配置（vite.config proxy、.env API_URL 等）。',
     '工具链缺失（报「未找到 X」）：说明未安装或不在 PATH。先告知用户安装命令并征得同意（预览面板点「授权 AI 自动安装」即已授权）；同意后 run_once 安装（Windows 优先 winget，macOS brew，Linux 包管理器）；安装后验证可用再重试原命令。严禁未经授权静默安装。',
     // ── 交互 ──
-    '需要用户做选择或补充信息时，调用 askUserQuestion。不要猜测用户意图——如果信息不足以做出正确决定，先问。',
+    '向用户提问必须用 askUserQuestion 工具（弹出结构化问题卡片，用户点选或输入），不要在回复正文里文字提问。触发时机：有多个合理方案需要用户拍板、缺关键信息无法继续、下一步方向分叉做错代价高、或即将执行破坏性操作。不要猜测用户意图——信息不足以做出正确决定时，先问再做。',
   ]
   if (projectPath) {
     lines.push(`当前项目：${projectPath}。工具的 path/dir 参数传项目内相对路径（如 "src/main.tsx"），绝对路径也可以。`)

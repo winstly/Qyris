@@ -12,11 +12,6 @@ interface Props {
   logSlot: string | null
   setLogSlot: React.Dispatch<React.SetStateAction<string | null>>
   projectPath: string | null
-  hasCommands: boolean
-  startupCommands: { name: string; run: string; url?: string }[]
-  aiCompile: () => void
-  runAll: () => void
-  stopAll: (path?: string) => void
   selectSlot: (name: string) => void
   start: (name: string, cmd: string, path?: string) => void
   stop: (name: string, path?: string) => void
@@ -24,9 +19,6 @@ interface Props {
   updateStartCommand: (name: string, cmd: { run: string }, path: string) => void
   deleteStartCommand: (name: string, path: string) => void
   showConfirm: (title: string, msg?: string) => Promise<boolean | { confirmed: boolean; checks: Record<string, boolean> }>
-  compiling: boolean
-  anyAlive: boolean
-  chatBusy: boolean
 }
 
 /** 服务列表：已识别服务 + 手动添加 + 全部运行/停止 */

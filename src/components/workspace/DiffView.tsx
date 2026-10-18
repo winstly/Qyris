@@ -1,12 +1,15 @@
 /**
  * Git diff 全面板视图：以覆盖层铺满编辑器区域（FilesTab 第二窗格内 absolute）。
- * 头部：文件路径 + 工作区/暂存区视图切换 + 分栏/统一切换 + 关闭。
+ * 头部：文件路径 + 打开文件 + 工作区/暂存区视图切换 + 分栏/统一切换 + 关闭。
  * 正文：分栏（默认，左旧右新逐行对齐）/ 统一 diff 两种渲染。
  */
 import { useMemo, useState } from 'react'
+import { api } from '@/services/desktop'
 import { useFileStore } from '@/store/useFileStore'
 import { useGitStore } from '@/store/useGitStore'
-import { IconClose } from '@/components/common/icons'
+import { joinPath } from '@/utils/path'
+import { toast } from '@/components/common/Toast'
+import { IconClose, IconFile } from '@/components/common/icons'
 
 function lineClass(line: string): string {
   if (line.startsWith('+')) return 'files-diff__line files-diff__line--add'
@@ -106,11 +109,33 @@ export function DiffView() {
   }, [diff?.text])
   if (!diff || !rootPath) return null
 
+  // 跳转编辑器打开该文件：绝对路径必须 join diff.dir（多仓库时 diff.dir 是子仓库根，
+  // 不能退回工程根）；deleted 等磁盘不存在的文件就地提示，不静默失败。
+  // 打开成功后收起 diff 覆盖层——它的使命（看变更）已由编辑器接棒，留着只挡视线
+  const openTargetFile = async () => {
+    const abs = joinPath(diff.dir, diff.path)
+    if (!(await api.pathExists(abs))) {
+      toast.err('无法打开', '该文件已不在磁盘上（如已删除的文件），无法打开')
+      return
+    }
+    await useFileStore.getState().revealPath(abs)
+    await useFileStore.getState().openFile(abs)
+    useGitStore.getState().close()
+  }
+
   return (
     <div className="files-diff" role="region" aria-label={`diff 查看：${diff.path}`}>
       <div className="files-diff__head">
         <span className="files-diff__tag">diff</span>
         <span className="files-diff__path mono" title={diff.path}>{diff.path}</span>
+        <button
+          className="icon-btn"
+          onClick={() => void openTargetFile()}
+          aria-label="在编辑器中打开此文件"
+          title="在编辑器中打开此文件"
+        >
+          <IconFile size={13} />
+        </button>
         <div className="files-diff__mode" role="radiogroup" aria-label="diff 视图">
           <button
             role="radio"

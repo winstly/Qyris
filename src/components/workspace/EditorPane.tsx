@@ -3,7 +3,7 @@
  * 语法高亮 + 行号 + 基本编辑 + Ctrl/Cmd+F 搜索（Monaco 内置 FindWidget，见 useKeyboardShortcuts）；
  * Ctrl/Cmd+S 由全局快捷键保存。Markdown 文件支持侧栏预览。
  */
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // Monaco no-op worker
 ;(self as any).MonacoEnvironment = {
@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as monaco from 'monaco-editor'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { api } from '@/services/desktop'
 import { useFileStore } from '@/store/useFileStore'
 import { basename, extOf, relativePath } from '@/utils/path'
 import { ContextMenu, type ContextMenuItem } from '@/components/common/ContextMenu'
@@ -28,6 +29,15 @@ let activeEditor: monaco.editor.IStandaloneCodeEditor | null = null
 /** 当前挂载的编辑器实例；无挂载（未打开文件）时为 null */
 export function getEditorInstance(): monaco.editor.IStandaloneCodeEditor | null {
   return activeEditor
+}
+
+// gutter 刷新器注册：commit / 切分支 / 合并只改 diff 基线不改文件内容，
+// store 内容链路不会触发刷新，git 写盘动作完成后需此入口主动重算
+let gutterRefresher: ((path: string | null) => void) | null = null
+
+/** 主动刷新当前编辑器的 git gutter 标记（基线变更而内容未变的场景） */
+export function refreshEditorGutter(): void {
+  gutterRefresher?.(useFileStore.getState().activePath)
 }
 
 // ---------- 语言映射 ----------
@@ -230,6 +240,9 @@ export function EditorPane() {
   const [menu, setMenu] = useState<{ path: string; x: number; y: number } | null>(null)
   const editorRef = useRef<monaco.editor.IStandaloneCodeEditor | null>(null)
   const applyingRef = useRef(false)
+  // git gutter：行级变更装饰集合 + 请求序号（过期结果丢弃）
+  const gutterDecoRef = useRef<monaco.editor.IEditorDecorationsCollection | null>(null)
+  const gutterSeqRef = useRef(0)
   // 当前 model 对应的文件路径，用于判断是否需要切换
   const modelPathRef = useRef<string | null>(null)
   // 回调 ref：host 真实挂载后再建 editor
@@ -278,6 +291,7 @@ export function EditorPane() {
     })
     editorRef.current = editor
     activeEditor = editor
+    gutterDecoRef.current = editor.createDecorationsCollection([])
     requestAnimationFrame(() => editor.layout())
 
     // 如果创建时已有 activePath，立即加载对应文件
@@ -324,6 +338,7 @@ export function EditorPane() {
       if (model) model.dispose()
       editor.dispose()
       editorRef.current = null
+      gutterDecoRef.current = null
       if (activeEditor === editor) activeEditor = null
     }
   }, [hostEl])
@@ -416,6 +431,59 @@ export function EditorPane() {
       applyingRef.current = false
     }
   }, [contentForEditor])
+
+  // ---- git gutter：行级变更色条（打开/内容落定后刷新，400ms debounce 收口打字抖动） ----
+  const gutterTimerRef = useRef<number | null>(null)
+  const refreshGutter = useCallback((filePath: string | null) => {
+    const editor = editorRef.current
+    const deco = gutterDecoRef.current
+    if (!editor || !deco) return
+    const seq = ++gutterSeqRef.current
+    if (gutterTimerRef.current !== null) window.clearTimeout(gutterTimerRef.current)
+    if (!filePath || !rootPath) {
+      deco.set([])
+      return
+    }
+    gutterTimerRef.current = window.setTimeout(() => {
+      gutterTimerRef.current = null
+      void (async () => {
+        let res: { added: number[]; modified: number[]; deleted: number[] } | null = null
+        try {
+          // 传编辑器当前内存内容：基线 diff 在主进程现算，未保存的编辑也实时反映
+          res = await api.gitChangeLines(rootPath, filePath, editorRef.current?.getValue() ?? '')
+        } catch { res = null }
+        if (seq !== gutterSeqRef.current) return // 期间已切文件/发起新请求，过期结果丢弃
+        const model = editorRef.current?.getModel()
+        if (!model || modelPathRef.current !== filePath) return
+        const lineCount = model.getLineCount()
+        const decos: monaco.editor.IModelDeltaDecoration[] = []
+        const push = (lines: number[], cls: string): void => {
+          for (const l of lines) {
+            if (l < 1) continue
+            // EOF 差额删除（改后行数变少）行号会越界 → 钳到末行，删除标记不丢
+            const line = Math.min(l, lineCount)
+            decos.push({ range: new monaco.Range(line, 1, line, 1), options: { linesDecorationsClassName: cls } })
+          }
+        }
+        push(res?.added ?? [], 'editor-gutter--added')
+        push(res?.modified ?? [], 'editor-gutter--modified')
+        push(res?.deleted ?? [], 'editor-gutter--deleted')
+        deco.set(decos)
+      })()
+    }, 400)
+  }, [rootPath])
+
+  useEffect(() => {
+    refreshGutter(activePath && !isBinary ? activePath : null)
+    // hostEl 必须在 deps：editor 经 setHostEl 异步创建，首跑时 editorRef 还是 null——
+    // 不跟创建信号则首个打开的文件永远拿不到装饰
+  }, [refreshGutter, activePath, contentForEditor, isBinary, hostEl])
+
+  // 注册全局刷新入口（commit 等基线变更场景由 GitPanel 调用），卸载时摘除
+  useEffect(() => {
+    gutterRefresher = refreshGutter
+    return () => { gutterRefresher = null }
+  }, [refreshGutter])
 
   // ---- 空项目 / 未打开文件 ----
   if (!rootPath) {

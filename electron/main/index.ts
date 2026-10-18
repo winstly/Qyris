@@ -172,7 +172,8 @@ function registerIpc(): void {
   // 只回布尔，不暴露文件内容
   handle('path_exists', (_e, p) => {
     try {
-      return statSync(String(p?.path ?? ''), { throwIfNoEntry: false })?.isDirectory() === true
+      // 路径存在性（文件或目录均可）：throwIfNoEntry=false 下不存在返回 undefined
+      return statSync(String(p?.path ?? ''), { throwIfNoEntry: false }) !== undefined
     } catch {
       return false
     }
@@ -182,8 +183,10 @@ function registerIpc(): void {
   handle('grep_files', (_e, p) =>
     fsops.grepFiles(p.projectRoot, String(p?.pattern ?? ''), {
       glob: p?.glob ?? undefined,
+      excludeGlobs: Array.isArray(p?.excludeGlobs) ? p.excludeGlobs.map(String) : undefined,
       maxResults: p?.maxResults ?? undefined,
       caseSensitive: p?.caseSensitive === true,
+      literal: p?.literal === true,
     }))
   handle('read_text_file', (_e, p) => fsops.readTextFile(p.projectRoot, p.path))
   handle('write_text_file', (_e, p) =>
@@ -468,6 +471,7 @@ function registerIpc(): void {
   handle('git_push', (_e, p) => git.gitPush(p.dir))
   handle('git_merge', (_e, p) => git.gitMerge(p.dir, String(p.branch ?? '')))
   handle('git_discard', (_e, p) => git.gitDiscard(p.dir, p.paths ?? []))
+  handle('git_change_lines', (_e, p) => git.gitChangeLinesLive(String(p?.projectRoot ?? ''), String(p?.filePath ?? ''), String(p?.content ?? '')))
   handle('pick_parent_dir', async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) return null

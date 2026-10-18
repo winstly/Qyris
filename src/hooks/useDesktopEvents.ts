@@ -81,12 +81,19 @@ export function useDesktopEvents(hooks: DesktopEventHooks = {}): void {
       ...(onFsChanged ? [subscribeFsChanged((p) => onFsChanged(p))] : []),
       onElementPicked((p) => useChatStore.getState().setPendingElement(p)),
       // 多窗口配置同步：任一窗口/主进程改配置后，本窗口按变化键刷新镜像
-      onConfigChanged(() => {
+      onConfigChanged((keys) => {
         const app = useAppStore.getState()
         void app.refreshRemoteConfig()
         // 密钥增删（main 在 set/delete_secret 后补发本事件）也在此刷新——
         // 面板无 SettingsDialog，不补这条则 hasApiKey 直到重启都不会更新
         void app.refreshHasApiKey()
+        // 启动命令存档变更（AI 编译落库 / 另一窗口改动）：重读镜像并重投影当前工程。
+        // 后台工程编译只更新 map 不同步投影——不接这条，预览面板的服务列表永不自动刷新
+        if (keys.includes('startupCommands')) {
+          useStartupStore.getState()
+            .reloadFromConfig(useAppStore.getState().projectPath)
+            .catch(() => { /* 重读失败静默：手动刷新按钮兜底 */ })
+        }
       }),
       // 跨窗口项目同步：另一窗口切换项目后，本窗口静默切换（不广播，不触发远端 openProject）
       onProjectChanged((p) => {

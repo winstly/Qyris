@@ -107,7 +107,8 @@ interface ChatState {
   current: string | null
   byProject: Record<string, ChatSlice>
 
-  send: (text: string, meta?: import('@/types').MessageMeta) => Promise<boolean>
+  /** targetProject：定向发送到指定工程（后台 AI 编译用），缺省当前工程；绝不切换 current */
+  send: (text: string, meta?: import('@/types').MessageMeta, targetProject?: string) => Promise<boolean>
   setPendingElement: (el: PickedElement | null) => void
   appendDelta: (requestId: string, delta: string, projectRoot?: string) => void
   appendReasoning: (requestId: string, delta: string, projectRoot?: string) => void
@@ -304,13 +305,19 @@ export const useChatStore = create<ChatState>()((set, get) => ({
     })
   },
 
-  send: async (text, meta) => {
+  send: async (text, meta, targetProject) => {
     // 返回是否真正入列：false = early return（无项目/状态异常/空文本），
     // ChatInput 据此回填输入框，用户输入不再凭空消失（func-chat P1-2）
     let ok = false
-    let project = get().current
-    // fallback：current 为空时从 appStore 取 projectPath 兜底（面板独立窗口首次启动场景）
-    if (!project) {
+    let project: string | null = targetProject ?? get().current
+    if (targetProject) {
+      // 定向通道：无切片时静默补空切片。不能走 ensureProject——它会把 current 切过去，
+      // 后台编译会劫持用户当前工作区
+      if (!getSlice(targetProject)) {
+        set((s) => ({ byProject: { ...s.byProject, [targetProject]: emptyChatSlice() } }))
+      }
+    } else if (!project) {
+      // fallback：current 为空时从 appStore 取 projectPath 兜底（面板独立窗口首次启动场景）
       project = useAppStore.getState().projectPath ?? null
       if (project) {
         console.warn('[chat-send] current 为空，从 appStore.projectPath 兜底：', project)

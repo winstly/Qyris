@@ -26,6 +26,9 @@ interface StartupState {
   setCurrentProject: (projectPath: string | null) => void
   /** 从 config 恢复 */
   loadFromMap: (map: Record<string, StartCommand[]>) => void
+  /** 从 config 重读全量存档并重投影指定工程（缺省沿用当前投影工程）：
+   *  AI 编译落库（config:changed 事件）/ 手动刷新按钮共用的同一条链路 */
+  reloadFromConfig: (projectPath?: string | null) => Promise<void>
 }
 
 async function persistMap(map: Record<string, StartCommand[]>): Promise<void> {
@@ -86,4 +89,10 @@ export const useStartupStore = create<StartupState>()((set, get) => ({
   },
 
   loadFromMap: (map) => set({ startupCommandsMap: map }),
+
+  reloadFromConfig: async (projectPath) => {
+    const cfg = await api.getConfig()
+    get().loadFromMap(cfg.startupCommands ?? {})
+    get().setCurrentProject(projectPath !== undefined ? projectPath : get()._currentProject)
+  },
 }))

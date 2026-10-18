@@ -24,11 +24,11 @@ interface FileMatch {
 
 // ---------- 高亮工具 ----------
 
-function highlightText(text: string, query: string, caseSensitive: boolean): React.ReactNode {
+function highlightText(text: string, query: string, caseSensitive: boolean, literal: boolean): React.ReactNode {
   if (!query) return text
   try {
     const flags = caseSensitive ? 'g' : 'gi'
-    const re = new RegExp(query, flags)
+    const re = new RegExp(literal ? query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : query, flags)
     const parts: React.ReactNode[] = []
     let lastIndex = 0
     let match: RegExpExecArray | null
@@ -56,10 +56,14 @@ export function SearchPanel() {
   const searchOpen = useAppStore((s) => s.searchOpen)
   const toggleSearch = useAppStore((s) => s.toggleSearch)
   const searchPanelRatio = useAppStore((s) => s.searchPanelRatio)
+  const searchExclude = useAppStore((s) => s.searchExclude)
+  const setSearchExclude = useAppStore((s) => s.setSearchExclude)
 
   const [query, setQuery] = useState('')
   const [caseSensitive, setCaseSensitive] = useState(false)
   const [useRegex, setUseRegex] = useState(false)
+  const [showExclude, setShowExclude] = useState(false)
+  const [exclDraft, setExclDraft] = useState('')
   const [searching, setSearching] = useState(false)
   const [fileMatches, setFileMatches] = useState<FileMatch[]>([])
   const [totalMatches, setTotalMatches] = useState(0)
@@ -100,7 +104,12 @@ export function SearchPanel() {
     setSearching(true)
     setSearched(true)
     try {
-      const result = await api.grepFiles(rootPath, q, { caseSensitive, maxResults: 500 })
+      const result = await api.grepFiles(rootPath, q, {
+        caseSensitive,
+        excludeGlobs: searchExclude,
+        literal: !useRegex,
+        maxResults: 500,
+      })
       if (seq !== seqRef.current) return
       const groups = new Map<string, { line: number; text: string }[]>()
       for (const m of result.matches) {
@@ -120,7 +129,20 @@ export function SearchPanel() {
     } finally {
       if (seq === seqRef.current) setSearching(false)
     }
-  }, [query, caseSensitive, useRegex, rootPath])
+  }, [query, caseSensitive, useRegex, searchExclude, rootPath])
+
+  /** 排除后缀提交：与后端同口径归一化（剥 *. 前缀、补点、小写）+ 去重；逗号分隔可批量 */
+  const commitExclude = () => {
+    const parts = exclDraft.split(/[,，]/).map((g) => g.trim().toLowerCase().replace(/^\*\./, '').replace(/^\*/, '')).filter(Boolean)
+    setExclDraft('')
+    if (parts.length === 0) return
+    const next = [...searchExclude]
+    for (const g of parts) {
+      const ext = g.startsWith('.') ? g : `.${g}`
+      if (!next.includes(ext)) next.push(ext)
+    }
+    setSearchExclude(next)
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') { e.preventDefault(); void doSearch() }
@@ -213,7 +235,52 @@ export function SearchPanel() {
               aria-pressed={useRegex}
               title="正则表达式"
             >.*</button>
+            <button
+              className={`search-panel__opt-btn search-panel__opt-btn--wide ${showExclude ? 'search-panel__opt-btn--active' : ''}`}
+              onClick={() => setShowExclude((v) => !v)}
+              aria-pressed={showExclude}
+              aria-expanded={showExclude}
+              title={searchExclude.length > 0 ? `已生效排除：${searchExclude.join(' ')}` : '排除指定后缀的文件（如 log、tmp）'}
+            >{searchExclude.length > 0 ? `排除·${searchExclude.length}` : '排除'}</button>
           </div>
+
+          {/* 排除后缀标签：pill 展示已生效后缀（× 移除），行尾内联输入回车成标签；
+              Backspace 空值删尾标签（标签编辑器惯例）。store 持久化 */}
+          {showExclude && (
+            <div className="search-panel__excl-row">
+              {searchExclude.map((ext) => (
+                <span key={ext} className="search-panel__chip">
+                  {ext}
+                  <button
+                    className="search-panel__chip-x"
+                    onClick={() => setSearchExclude(searchExclude.filter((e) => e !== ext))}
+                    aria-label={`移除排除后缀 ${ext}`}
+                    title="移除"
+                  >
+                    <IconClose size={9} />
+                  </button>
+                </span>
+              ))}
+              <input
+                className="search-panel__excl-input"
+                type="text"
+                placeholder={searchExclude.length > 0 ? '添加…' : '如 log, tmp'}
+                value={exclDraft}
+                onChange={(e) => setExclDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') { e.preventDefault(); commitExclude() }
+                  if (e.key === 'Backspace' && exclDraft === '' && searchExclude.length > 0) {
+                    setSearchExclude(searchExclude.slice(0, -1))
+                  }
+                  if (e.key === 'Escape') setShowExclude(false)
+                }}
+                onBlur={commitExclude}
+                spellCheck={false}
+                autoComplete="off"
+                aria-label="添加排除的文件后缀"
+              />
+            </div>
+          )}
 
           {/* 结果统计 */}
           {searched && (
@@ -247,7 +314,7 @@ export function SearchPanel() {
                   >
                     <span className="search-match__line">{m.line}</span>
                     <span className="search-match__text">
-                      {highlightText(m.text, query, caseSensitive)}
+                      {highlightText(m.text, query, caseSensitive, !useRegex)}
                     </span>
                   </button>
                 ))}

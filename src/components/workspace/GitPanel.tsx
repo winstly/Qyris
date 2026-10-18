@@ -13,6 +13,7 @@ import type { GitFileEntry, GitStatus } from '@/types'
 import { basename, joinPath, relativePath } from '@/utils/path'
 import { buildGitTree, type GitTreeNode } from '@/utils/gitTree'
 import { beginPanelGripDrag } from '@/utils/panelGrip'
+import { refreshEditorGutter } from './EditorPane'
 import { Select } from '@/components/common/Select'
 import { BranchSwitchDialog, prepareBranchTarget, type BranchTarget } from './FileTree'
 import { IconChevron, IconCheck, IconMinus, IconPlus, IconTrash, IconRefresh, IconBranch, IconMerge, IconArrowDown, IconArrowUp, IconDownload } from '@/components/common/icons'
@@ -31,6 +32,22 @@ const MAX_REPO_SCAN = 50
 /** 文件树「提交」按钮聚焦用：GitPanel mount 时注册，unmount 时清除 */
 let focusCommitInput: (() => void) | null = null
 export function focusGitCommit(): void { focusCommitInput?.() }
+
+/** git 写盘动作（丢弃/切分支/合并）后同步打开中的编辑器：未 dirty 页签从盘重载（保光标）。
+ *  watcher 事件链路时有断裂（见订阅处注释），动作完成即主动推一次，不赌异步事件 */
+function reloadOpenTabs(match: (abs: string) => boolean): void {
+  const fs = useFileStore.getState()
+  const targets = fs.openTabs.filter(match)
+  if (targets.length > 0) void fs.notifyExternalChange(targets)
+  // commit 类动作不改文件内容，store 内容链路不触发 → gutter 基线刷新走独立入口
+  refreshEditorGutter()
+}
+
+/** 仓库（可带仓库内相对前缀）下的打开页签匹配器 */
+function underDir(repoDir: string, relPrefix?: string): (abs: string) => boolean {
+  const base = joinPath(repoDir, relPrefix ?? '').replace(/[\\/]+$/, '')
+  return (p) => p === base || p.startsWith(`${base}/`) || p.startsWith(`${base}\\`)
+}
 
 export function GitPanel() {
   const rootPath = useFileStore((s) => s.rootPath)
@@ -252,6 +269,7 @@ export function GitPanel() {
                   if (!ok) return
                   await runOp('丢弃目录改动', async () => {
                     await api.gitDiscard(selected!, [n.path])
+                    reloadOpenTabs(underDir(selected!, n.path))
                     const d = useGitStore.getState().diff
                     // dir 也要对上：多仓库工程下别的仓库可能有同前缀相对路径的 diff 在看
                     if (d && d.dir === selected && d.path.startsWith(`${n.path}/`)) useGitStore.getState().close()
@@ -311,6 +329,7 @@ export function GitPanel() {
             if (!ok) return
             await runOp('丢弃改动', async () => {
               await api.gitDiscard(selected!, [f.path])
+              reloadOpenTabs((p) => p === joinPath(selected!, f.path))
               const d = useGitStore.getState().diff
               // dir 也要对上：多仓库工程下别的仓库可能有同相对路径的 diff 在看（与 onDelete 同规）
               if (d?.dir === selected && d.path === f.path) useGitStore.getState().close()
@@ -411,6 +430,7 @@ export function GitPanel() {
                 if (!ok) return
                 await runOp('丢弃全部', async () => {
                   await api.gitDiscard(selected!)
+                  reloadOpenTabs(underDir(selected!))
                   const d = useGitStore.getState().diff
                   if (d?.dir === selected) useGitStore.getState().close()
                   return '已将全部改动还原为 HEAD 版本'
@@ -484,7 +504,7 @@ export function GitPanel() {
               rows={2}
               aria-label="提交信息"
             />
-            {/* 提交区单一职责：写信息 → 提交。全宽主 CTA，括号自带暂存数（原「已暂存 N/M」hint 取消） */}
+            {/* 提交区单一职责：写信息 → 提交（可连带推送）。全宽主 CTA，括号自带暂存数（原「已暂存 N/M」hint 取消） */}
             <div className="gitpanel__commit-actions">
               <button
                 className="btn btn--primary btn--sm gitpanel__commit-btn"
@@ -493,11 +513,32 @@ export function GitPanel() {
                   const out = await api.gitCommit(selected!, commitMsg)
                   setCommitMsg('')
                   git.close()
+                  refreshEditorGutter() // 基线变为新 HEAD：已提交文件的旧标记清掉
                   return out
                 })}
                 title={stagedCount === 0 ? '没有已暂存的文件' : `提交 ${stagedCount} 个已暂存文件（git commit）`}
               >
                 <IconCheck size={11} /> {stagedCount > 0 ? `提交 (${stagedCount})` : '提交'}
+              </button>
+              <button
+                className="btn btn--ghost btn--sm gitpanel__commit-btn"
+                disabled={!canCommit}
+                onClick={() => void runOp('提交并推送', async () => {
+                  const out = await api.gitCommit(selected!, commitMsg)
+                  setCommitMsg('')
+                  git.close()
+                  refreshEditorGutter() // 基线变为新 HEAD：已提交文件的旧标记清掉
+                  try {
+                    await api.gitPush(selected!)
+                    return out ? `${out}\n已推送到远端` : '已推送到远端'
+                  } catch (e) {
+                    // 提交已落地，失败只在推送侧——如实区分，别让用户以为提交也没成
+                    throw new Error(`提交成功，但推送失败：${String(e)}`)
+                  }
+                })}
+                title={stagedCount === 0 ? '没有已暂存的文件' : `提交 ${stagedCount} 个已暂存文件并推送到远端（git commit + git push）`}
+              >
+                <IconArrowUp size={11} /> 提交并推送
               </button>
             </div>
           </div>
@@ -510,10 +551,15 @@ export function GitPanel() {
           target={branchTarget}
           onClose={() => setBranchTarget(null)}
           onSwitched={() => {
+            reloadOpenTabs(underDir(selectedRef.current ?? selected!))
             void loadStatus(selectedRef.current)
             useGitStore.getState().close()
           }}
-          onMerge={(b) => runOp('合并', () => api.gitMerge(branchTarget.dir, b))}
+          onMerge={(b) => runOp('合并', async () => {
+            const out = await api.gitMerge(branchTarget.dir, b)
+            reloadOpenTabs(underDir(branchTarget.dir))
+            return out
+          })}
         />
       )}
     </div>

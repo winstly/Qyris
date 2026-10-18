@@ -6,10 +6,11 @@
  * update_server_tags 会写真实 config（~/.qyris/config.json），故只测其纯函数核，不触 IO 壳。
  * 运行：npm run smoke:workspace-tools
  */
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { initDbAt, closeDb } from '../electron/lib/db'
+import { grepFiles } from '../electron/lib/fsops'
 // 装配点：registry 的内置工具面由 tools/index 的 adoptTools() 注入——直接引子模块
 // （skill/remote 等）的消费方必须先加载装配点，否则查表为空
 import '../electron/lib/tools'
@@ -177,6 +178,38 @@ async function main(): Promise<void> {
       const missing = await loadSkill.execute({ skill_id: 'definitely-missing-skill-xyz' }, ctx)
       assert(missing.isError === true, `不存在的 Skill → isError`)
       assert(missing.content.includes('不存在'), `报错含「不存在」（${missing.content.slice(0, 50)}…）`)
+    }
+
+    console.log('⑨ grepFiles：excludeGlobs 后缀排除 + literal 字面量开关：')
+    {
+      const write = (rel: string, content: string): void => {
+        const abs = path.join(root, rel)
+        mkdirSync(path.dirname(abs), { recursive: true })
+        writeFileSync(abs, content)
+      }
+      write('src/app.txt', 'value a.b here\nfoo.bar direct\n')
+      write('src/axb.txt', 'regex dot axb\n')
+      write('logs/run.log', 'value a.b in log\n')
+      write('notes/data.LOG', 'value a.b upper\n')
+
+      const hit = async (o: { excludeGlobs?: string[]; literal?: boolean }) =>
+        (await grepFiles(root, 'a.b', o)).matches.map((m) => path.basename(m.path)).sort()
+
+      // 默认（正则语义）：a.b 命中 axb——.* 开关关闭后不再有此行为，保留回归对照
+      const re = await hit({})
+      assert(re.includes('app.txt') && re.includes('axb.txt'), `默认正则语义 a.b 命中 axb（实际 ${re}）`)
+      // literal：只命中字面量 a.b（面板 .* 开关关闭时走这里）
+      const lit = await hit({ literal: true })
+      assert(lit.includes('app.txt') && !lit.includes('axb.txt'), `literal 只命中字面量（实际 ${lit}）`)
+      // excludeGlobs：*.log 排除
+      const ex = await hit({ literal: true, excludeGlobs: ['*.log'] })
+      assert(!ex.includes('run.log') && ex.includes('app.txt'), `*.log 被排除、其余保留（实际 ${ex}）`)
+      // 归一化：'log'（无星无点）与 '*.log' 同效
+      const ex2 = await hit({ literal: true, excludeGlobs: ['log'] })
+      assert(!ex2.includes('run.log'), `裸后缀 log 归一化排除（实际 ${ex2}）`)
+      // 排除匹配大小写不敏感（.LOG 同样排除）
+      const ex3 = await hit({ literal: true, excludeGlobs: ['.LOG'] })
+      assert(!ex3.includes('data.LOG') && !ex3.includes('run.log'), `排除大小写不敏感（实际 ${ex3}）`)
     }
   } finally {
     closeDb()

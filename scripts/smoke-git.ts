@@ -8,7 +8,7 @@ import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import os from 'node:os'
 import path from 'node:path'
-import { gitStatus, gitAdd, gitCommit, gitDiff, gitIsTracked, gitUnstage, gitDiscard, gitMerge } from '../electron/lib/git'
+import { gitStatus, gitAdd, gitCommit, gitDiff, gitIsTracked, gitUnstage, gitDiscard, gitMerge, gitChangeLinesLive } from '../electron/lib/git'
 
 let failures = 0
 function assert(cond: boolean, label: string): void {
@@ -177,6 +177,59 @@ async function main(): Promise<void> {
       threw = true
     }
     assert(threw, '分支名以 - 开头被拒（选项注入守卫）')
+
+    console.log('gitChangeLinesLive（编辑器 gutter 实时行级变更）：')
+    {
+      // 基线提交：后续全部用「传入内存内容」驱动，不依赖磁盘文件状态（实时语义）
+      writeFileSync(path.join(dir, 'g-mod.txt'), 'one\n')
+      writeFileSync(path.join(dir, 'g-del.txt'), 'r1\nr2\nr3\n')
+      sh('git add g-mod.txt g-del.txt && git commit -m gutter-base', dir)
+
+      // 未跟踪（HEAD/index 均无）→ 传入内容全行 added
+      const untracked = await gitChangeLinesLive(dir, path.join(dir, 'g-never.txt'), 'l1\nl2\n')
+      assert(untracked !== null && untracked.added.length === 2 && untracked.modified.length === 0, `未跟踪文件全行 added（实际 ${JSON.stringify(untracked)}）`)
+
+      // 单行修改 → modified 含 1
+      const mod = await gitChangeLinesLive(dir, path.join(dir, 'g-mod.txt'), 'one-changed\n')
+      assert(mod !== null && mod.modified.includes(1) && mod.added.length === 0, `单行修改 → modified 含 1（实际 ${JSON.stringify(mod)}）`)
+
+      // 删中间行：'r1 r2 r3' → 'r1 r3'，deleted 语义 = 删除点前保留行（git +start；VS Code 同位）→ 标 1
+      const del = await gitChangeLinesLive(dir, path.join(dir, 'g-del.txt'), 'r1\nr3\n')
+      assert(del !== null && del.deleted.includes(1) && del.modified.length === 0, `删第 2 行 → deleted 含 1（实际 ${JSON.stringify(del)}）`)
+
+      // 追加一行 → added 含 4
+      const app = await gitChangeLinesLive(dir, path.join(dir, 'g-mod.txt'), 'one\nextra\n')
+      assert(app !== null && app.added.includes(2), `追加行 → added 含 2（实际 ${JSON.stringify(app)}）`)
+
+      // 无变化 → 三类全空
+      const same = await gitChangeLinesLive(dir, path.join(dir, 'g-mod.txt'), 'one\n')
+      assert(same !== null && same.added.length === 0 && same.modified.length === 0 && same.deleted.length === 0, `无变更全空（实际 ${JSON.stringify(same)}）`)
+
+      // CRLF 归一化：仓库 LF 基线 vs 编辑器 CRLF 内容（Windows 常态）不得误判全行 modified
+      const crlf = await gitChangeLinesLive(dir, path.join(dir, 'g-mod.txt'), 'one\r\n')
+      assert(crlf !== null && crlf.modified.length === 0 && crlf.added.length === 0 && crlf.deleted.length === 0, `CRLF 同内容不误判（实际 ${JSON.stringify(crlf)}）`)
+      // CRLF 真实变更照常识别
+      const crlfMod = await gitChangeLinesLive(dir, path.join(dir, 'g-mod.txt'), 'two\r\n')
+      assert(crlfMod !== null && crlfMod.modified.includes(1), `CRLF 真变更仍识别（实际 ${JSON.stringify(crlfMod)}）`)
+
+      // 大中文文件跨 pipe chunk（>64KB）：chunk-wise toString 会切断多字节字符 → 基线乱码
+      // → 全文虚假失配、标记漂移。改第 300 行一个词，modified 必须只含 300
+      const cnLines: string[] = []
+      for (let i = 1; i <= 800; i++) {
+        cnLines.push(i === 300 ? '第三百行：这里是一段较长的中文注释内容用于撑大输出体积' : `第${i}行：中文注释内容，包含标点与英文字母 mixed content。`)
+      }
+      writeFileSync(path.join(dir, 'g-cn.txt'), cnLines.join('\n') + '\n')
+      sh('git add g-cn.txt && git commit -m gutter-cn', dir)
+      cnLines[299] = '第300行：改过的行——修改后的中文内容 new-token'
+      const cn = await gitChangeLinesLive(dir, path.join(dir, 'g-cn.txt'), cnLines.join('\n') + '\n')
+      assert(
+        cn !== null && cn.modified.length === 1 && cn.modified[0] === 300 && cn.added.length === 0 && cn.deleted.length === 0,
+        `大中文文件单行修改只标 300（实际 ${JSON.stringify(cn)})`,
+      )
+
+      const outside = await gitChangeLinesLive(dir, path.join(path.dirname(dir), 'outside.txt'), 'x\n')
+      assert(outside === null, `工程外文件 → null（实际 ${JSON.stringify(outside)}）`)
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

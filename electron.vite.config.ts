@@ -29,9 +29,11 @@ export default defineConfig({
     //   · ssh2 —— SSH 互联（打包实测：external 时 ssh2 落在 asar.unpacked 而其传递依赖 asn1 不随包，
     //     mcp-server 加载即 MODULE_NOT_FOUND，claude --strict-mcp-config 静默放弃 MCP → 模型零工具）
     //   · ajv / ajv-formats —— MCP SDK 校验代码的运行时 require，同样不随包
+    //   · adm-zip —— Skill zip 导入（纯 JS 进 bundle，替代外调 PowerShell/unzip）
+    //   · diff —— 编辑器 gutter 实时行级 diff（jsdiff，纯 JS 进 bundle）
     // native 三件套（better-sqlite3 / node-pty / sqlite-vec）照旧 external，由 electron-builder
     // files + asarUnpack 收集；electron / transformers / onnxruntime-web 为懒加载守卫依赖，不在此列。
-    plugins: [externalizeDepsPlugin({ exclude: ['@modelcontextprotocol/sdk', 'ssh2', 'ajv', 'ajv-formats'] })],
+    plugins: [externalizeDepsPlugin({ exclude: ['@modelcontextprotocol/sdk', 'ssh2', 'ajv', 'ajv-formats', 'adm-zip', 'diff'] })],
     build: {
       lib: {
         // 双入口：index = 主进程；mcp-server = MCP stdio server 独立可执行（由 claude CLI 按

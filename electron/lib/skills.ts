@@ -24,11 +24,7 @@
  */
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
-import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
-import os from 'node:os'
-
-const execFileAsync = promisify(execFile)
+import AdmZip from 'adm-zip'
 
 export interface SkillMeta {
   /** 唯一标识：子目录名（如 "debug-react"） */
@@ -132,47 +128,71 @@ export async function readSkill(dir: string, skillId: string): Promise<string | 
   }
 }
 
-/** 从 ZIP 文件导入 Skill：解压到目标目录（ZIP 内应含一个顶层目录，内含 SKILL.md） */
-export async function importSkillFromZip(destDir: string, zipPath: string): Promise<{ ok: boolean; name?: string; error?: string }> {
+/** ZIP 系统垃圾顶层条目（macOS 压缩产物）：不剔除会破坏单顶层目录判定（__MACOSX 与真实目录并列
+ *  → 根含 SKILL.md 误判失败）；嵌套在真实目录内部的垃圾不影响结构判定，不处理 */
+const ZIP_JUNK = new Set(['__MACOSX', '.DS_Store'])
+const isZipJunk = (name: string): boolean => ZIP_JUNK.has(name) || name.startsWith('._')
+
+/** 从 ZIP 文件导入 Skill：adm-zip 进程内解压（不外调 PowerShell/unzip——外调是导入报错的最大
+ *  来源：AppLocker/受限语言模式、压缩算法不支持、深路径超 MAX_PATH、杀软锁文件 rename 竞态）。
+ *  覆盖写盘用 cp 而非 rename（同 importSkillFromDir），规避杀软实时扫描新落盘文件的 EPERM。
+ *  兼容三种结构（对齐目录导入）：
+ *    A) ZIP 根单顶层目录 → 交 importSkillFromDir（目录内含 SKILL.md → 单个；子目录含 → 批量）
+ *    B) ZIP 根直接含 SKILL.md → 整包一个 Skill（id 取 ZIP 文件名）
+ *    C) 多个顶层目录各含 SKILL.md → importSkillFromDir 结构 B 批量导入 */
+export async function importSkillFromZip(destDir: string, zipPath: string): Promise<{ ok: boolean; name?: string; count?: number; error?: string }> {
+  let tmpDir: string | null = null
   try {
+    let zip: AdmZip
+    try {
+      zip = new AdmZip(zipPath)
+    } catch {
+      return { ok: false, error: '无法读取 ZIP 文件：文件可能已损坏、被加密或不是有效的 ZIP 包' }
+    }
+    if (zip.getEntries().length === 0) {
+      return { ok: false, error: 'ZIP 包是空的，不是合法的 Skill 包' }
+    }
     await fsp.mkdir(destDir, { recursive: true })
-    const tmpDir = path.join(destDir, '__import_tmp__')
+    tmpDir = path.join(destDir, `__import_tmp_${Date.now()}__`)
     await fsp.mkdir(tmpDir, { recursive: true })
     try {
-      // 解压：Windows 用 PowerShell，macOS/Linux 用 unzip。
-      // PowerShell 单引号字符串内 ' 要写成 ''；路径走 -LiteralPath（防通配符语义）
-      const isWin = os.platform() === 'win32'
-      if (isWin) {
-        const psQuote = (s: string): string => `'${s.replace(/'/g, "''")}'`
-        await execFileAsync('powershell', ['-NoProfile', '-Command', `Expand-Archive -LiteralPath ${psQuote(zipPath)} -DestinationPath ${psQuote(tmpDir)} -Force`])
-      } else {
-        await execFileAsync('unzip', ['-o', zipPath, '-d', tmpDir])
-      }
-      // 定位解压后的 skill 目录
-      const entries = await fsp.readdir(tmpDir, { withFileTypes: true })
-      const skillSrc = entries.length === 1 && entries[0].isDirectory()
-        ? path.join(tmpDir, entries[0].name)   // ZIP 根单目录 → 直接用
-        : tmpDir                                // ZIP 根多文件 → 整个 tmpDir
-      const skillName = skillSrc === tmpDir
-        ? path.basename(zipPath, path.extname(zipPath))
-        : entries[0].name
+      zip.extractAllTo(tmpDir, true)
+    } catch {
+      return { ok: false, error: 'ZIP 解压失败：包内可能含不支持的条目（非法文件名/不受支持的压缩方式）' }
+    }
+    // 清顶层垃圾后做结构判定
+    for (const de of await fsp.readdir(tmpDir, { withFileTypes: true })) {
+      if (isZipJunk(de.name)) await fsp.rm(path.join(tmpDir, de.name), { recursive: true, force: true }).catch(() => {})
+    }
+
+    // 结构 B：ZIP 根直接含 SKILL.md → 整包一个 Skill，id 取 ZIP 文件名
+    const hasRootSkill = await fsp.access(path.join(tmpDir, SKILL_FILE)).then(() => true, () => false)
+    if (hasRootSkill) {
+      const skillName = path.basename(zipPath, path.extname(zipPath))
       // 名字不得含路径分隔符/..：拼进 destDir 会越出目标目录
       if (!skillName || /[\\/]/.test(skillName) || skillName === '..' || skillName === '.') {
-        return { ok: false, error: 'ZIP 顶层目录名不合法，不是合法的 Skill 包' }
+        return { ok: false, error: 'ZIP 文件名不合法，无法作为 Skill 名，请重命名后重试' }
       }
-      // 验证 SKILL.md 存在
-      const hasSkill = await fsp.access(path.join(skillSrc, SKILL_FILE)).then(() => true, () => false)
-      if (!hasSkill) return { ok: false, error: 'ZIP 中未找到 SKILL.md，不是合法的 Skill 包' }
-      // 移动到目标位置（覆盖已有）
       const dest = path.join(destDir, skillName)
       await fsp.rm(dest, { recursive: true, force: true }).catch(() => {})
-      await fsp.rename(skillSrc, dest)
-      return { ok: true, name: skillName }
-    } finally {
-      await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+      await fsp.cp(tmpDir, dest, { recursive: true })
+      return { ok: true, name: skillName, count: 1 }
     }
+
+    // 结构 A / C：单顶层目录或多个含 SKILL.md 的子目录 → 复用目录导入的判定与批量能力
+    const r = await importSkillFromDir(destDir, tmpDir)
+    if (!r.ok) {
+      // 只改写「未找到 SKILL.md」这一确定语义；其余（IO 异常等）原样透传
+      const notFound = (r.error ?? '').includes('未找到 SKILL.md')
+      return notFound
+        ? { ok: false, error: 'ZIP 中未找到 SKILL.md。支持的包结构：单个顶层目录内含 SKILL.md、根直接含 SKILL.md、或多个子目录各含 SKILL.md' }
+        : { ok: false, error: `导入失败：${r.error}` }
+    }
+    return { ok: true, name: r.name, count: r.count }
   } catch (e) {
-    return { ok: false, error: `导入失败：${String(e)}` }
+    return { ok: false, error: `导入失败：${e instanceof Error ? e.message : String(e)}` }
+  } finally {
+    if (tmpDir) await fsp.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
   }
 }
 

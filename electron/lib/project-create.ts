@@ -5,6 +5,7 @@
 import { promises as fsp } from 'node:fs'
 import path from 'node:path'
 import { spawn, type ChildProcess } from 'node:child_process'
+import { StringDecoder } from 'node:string_decoder'
 import { errorMessage } from './util'
 import { buildChildEnv } from './proc-env'
 import type { CloneProgress, CloneResult } from '../../shared/ipc-types'
@@ -185,15 +186,20 @@ function defaultBranchFirst(a: string, b: string): number {
   return w(a) - w(b) || a.localeCompare(b)
 }
 
-/** 执行 git 命令（不走过期 shell），超时强杀；exit≠0 抛错并附 stderr 摘要 */
+/** 执行 git 命令（不走过期 shell），超时强杀；exit≠0 抛错并附 stderr 摘要。
+ *  输出按 Buffer 收集收口时统一转 utf8——chunk-wise toString 会切断跨块多字节字符 */
 function runGit(args: string[], timeoutMs: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, { stdio: ['ignore', 'pipe', 'pipe'], timeout: timeoutMs, env: buildChildEnv() })
-    let stdout = ''
-    let stderr = ''
-    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString() })
-    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
-    proc.on('close', (code) => resolve({ code, stdout, stderr }))
+    const stdoutChunks: Buffer[] = []
+    const stderrChunks: Buffer[] = []
+    proc.stdout?.on('data', (d: Buffer) => { stdoutChunks.push(d) })
+    proc.stderr?.on('data', (d: Buffer) => { stderrChunks.push(d) })
+    proc.on('close', (code) => resolve({
+      code,
+      stdout: Buffer.concat(stdoutChunks).toString('utf8'),
+      stderr: Buffer.concat(stderrChunks).toString('utf8'),
+    }))
     proc.on('error', (e) => reject(new Error(`git 启动失败：${errorMessage(e)}`)))
   })
 }
@@ -256,8 +262,11 @@ function runGitStream(
         if (line.trim()) opts.onLine?.(line.trim())
       }
     }
-    proc.stdout?.on('data', (d: Buffer) => { feed(); const s = d.toString(); stdout += s; pumpLines(s) })
-    proc.stderr?.on('data', (d: Buffer) => { feed(); const s = d.toString(); stderr += s; pumpLines(s) })
+    // StringDecoder 逐块解码：进度行实时透传（不能攒到收口），多字节字符跨块不断裂
+    const outDec = new StringDecoder('utf8')
+    const errDec = new StringDecoder('utf8')
+    proc.stdout?.on('data', (d: Buffer) => { feed(); const s = outDec.write(d); stdout += s; pumpLines(s) })
+    proc.stderr?.on('data', (d: Buffer) => { feed(); const s = errDec.write(d); stderr += s; pumpLines(s) })
     proc.on('close', (code) => {
       if (watchdog !== null) clearTimeout(watchdog)
       if (tail.trim()) opts.onLine?.(tail.trim())

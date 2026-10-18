@@ -86,7 +86,9 @@ export function ProjectSkillsPanel() {
     try {
       const r = await api.projectSkillImportZip(selectedDir, zipPath)
       if (r.ok) {
-        toast.ok('导入完成', `已导入 Skill「${r.name}」`)
+        // 批量包（多个子目录各含 SKILL.md）报总数，与目录导入同口径
+        const msg = r.count && r.count > 1 ? `已导入 ${r.count} 个 Skill` : `已导入 Skill「${r.name}」`
+        toast.ok('导入完成', msg)
         await refreshDir()
       } else {
         toast.err('导入失败', r.error || '导入失败')

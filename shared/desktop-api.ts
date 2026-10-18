@@ -16,7 +16,7 @@ export type DesktopEventSub<T> = (cb: (payload: T) => void) => () => void
 export interface DesktopAPI {
   // 文件系统
   listDir: (projectRoot: string, dir: string) => Promise<TreeNode[]>
-  /** 绝对路径存在性检查（项目列表清理用）：目录存在回 true */
+  /** 绝对路径存在性检查（项目列表清理 / diff 跳转兜底用）：文件或目录存在回 true */
   pathExists: (path: string) => Promise<boolean>
   /** 批量目录列表：一次 IPC 取多个目录内容（主进程并发 fs.readdir） */
   listDirBatch: (projectRoot: string, dirs: string[]) => Promise<Record<string, TreeNode[]>>
@@ -96,7 +96,7 @@ export interface DesktopAPI {
   scanSkills: (dirs: string[]) => Promise<SkillMeta[]>
   readSkill: (dirs: string[], skillId: string) => Promise<string | null>
   pickSkillsDir: () => Promise<string | null>
-  projectSkillImportZip: (dir: string, zipPath: string) => Promise<{ ok: boolean; name?: string; error?: string }>
+  projectSkillImportZip: (dir: string, zipPath: string) => Promise<{ ok: boolean; name?: string; count?: number; error?: string }>
   projectSkillImportDir: (dir: string, srcDir: string) => Promise<{ ok: boolean; name?: string; count?: number; error?: string }>
   projectSkillDelete: (dir: string, skillId: string) => Promise<{ ok: boolean; error?: string }>
   projectSkillPickZip: () => Promise<string | null>
@@ -121,6 +121,8 @@ export interface DesktopAPI {
   gitPush: (dir: string) => Promise<string>
   /** 合并分支到当前分支（git merge --no-edit）：返回合并结果摘要 */
   gitMerge: (dir: string, branch: string) => Promise<string>
+  /** 编辑器 gutter 行级变更（实时）：渲染层传编辑器当前内容，主进程 vs git 基线 jsdiff 现算；非仓库回 null */
+  gitChangeLines: (projectRoot: string, filePath: string, content: string) => Promise<{ added: number[]; modified: number[]; deleted: number[] } | null>
   gitDiscard: (dir: string, paths?: string[]) => Promise<void>
   pickParentDir: () => Promise<string | null>
 

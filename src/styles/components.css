@@ -851,6 +851,9 @@
   .ctxmenu__item:disabled:hover { background: transparent; color: inherit; }
   .ctxmenu__item--danger { color: var(--red); }
   .ctxmenu__item--danger:hover { background: var(--red-bg); color: var(--red); }
+  /* AI 能力类入口的强调色标识（文件树「AI 编译」等） */
+  .ctxmenu__item--accent { color: var(--accent); }
+  .ctxmenu__item--accent:hover { background: var(--accent-dim); color: var(--accent); }
 
   /* 子菜单 */
   .ctxmenu__sub { position: relative; }
@@ -2607,6 +2610,19 @@
   flex-wrap: wrap;
 }
 
+/* 编辑器 git gutter：行号左侧变更色条（绿=新增 黄=修改 红=删除；色值随主题 token 走） */
+.editor-gutter--added,
+.editor-gutter--modified,
+.editor-gutter--deleted {
+  margin-left: 3px;
+  border-left: 2px solid;
+  width: 4px;
+  border-radius: 2px;
+}
+.editor-gutter--added { border-color: var(--success); }
+.editor-gutter--modified { border-color: var(--warn); }
+.editor-gutter--deleted { border-color: var(--danger); }
+
 /* 启动工具栏提示文字 */
 .preview__hint {
   font-size: var(--font-size-12);
@@ -3520,8 +3536,8 @@
 }
 .gitpanel__msg:focus { outline: none; border-color: var(--selected); }
 
-/* 提交区单一职责：textarea + 全宽主 CTA（批量操作在面板头部，不挤提交区） */
-.gitpanel__commit-actions { display: flex; }
+/* 提交区单一职责：textarea + 提交主 CTA + 提交并推送（批量操作在面板头部，不挤提交区） */
+.gitpanel__commit-actions { display: flex; gap: 6px; }
 .gitpanel__commit-btn { flex: 1 1 auto; justify-content: center; }
 
 /* 不可逆的全局丢弃：窄面板隐藏（暂存全部保留——它是窄态唯一暂存入口） */
@@ -4632,6 +4648,62 @@
   background: var(--accent-dim);
   border-color: color-mix(in oklab, var(--accent), transparent 60%);
 }
+/* 文字钮（排除，含生效数徽标）与排除后缀标签行：
+   容器式 tag input——chips 与输入融进同一个带边框容器（GitHub label editor 视觉） */
+.search-panel__opt-btn--wide { width: auto; padding: 0 5px; }
+.search-panel__excl-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0 10px;
+  padding: 3px 5px;
+  border: 1px solid var(--divider);
+  border-radius: var(--radius-sm);
+  background: color-mix(in oklab, var(--s3), transparent 30%);
+}
+.search-panel__chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  padding: 0 4px 0 7px;
+  border-radius: 8px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-size: 10px;
+  font-family: var(--font-mono);
+  line-height: 1;
+}
+.search-panel__chip-x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  opacity: 0.6;
+  cursor: pointer;
+  padding: 0;
+}
+.search-panel__chip:hover .search-panel__chip-x { opacity: 1; }
+.search-panel__chip-x:hover { background: color-mix(in oklab, var(--accent), transparent 75%); }
+.search-panel__excl-input {
+  flex: 1 1 64px;
+  min-width: 64px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--fg);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  padding: 0 2px;
+}
+.search-panel__excl-input::placeholder { color: var(--muted); }
+.search-panel__excl-input:focus { outline: none; }
 
 /* 结果统计 */
 .search-panel__status {

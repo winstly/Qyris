@@ -38,7 +38,7 @@ export const api = {
   pathExists: (p: string) => wrap((d) => d.pathExists(p)) as Promise<boolean>,
   listDirBatch: (projectRoot: string, dirs: string[]) => wrap((d) => d.listDirBatch(projectRoot, dirs)) as Promise<Record<string, import('@/types').TreeNode[]>>,
   searchFiles: (projectRoot: string, query: string) => wrap((d) => d.searchFiles(projectRoot, query)),
-  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean }) =>
+  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; excludeGlobs?: string[]; maxResults?: number; caseSensitive?: boolean; literal?: boolean }) =>
     wrap((d) => d.grepFiles(projectRoot, pattern, opts)),
   readTextFile: (projectRoot: string, path: string) => wrap((d) => d.readTextFile(projectRoot, path)),
   writeTextFile: (projectRoot: string, path: string, content: string, opts?: { expectedMtimeMs?: number | null; force?: boolean }) =>
@@ -155,6 +155,8 @@ export const api = {
   gitFetch: (dir: string) => wrap((d) => d.gitFetch(dir)),
   gitPush: (dir: string) => wrap((d) => d.gitPush(dir)),
   gitMerge: (dir: string, branch: string) => wrap((d) => d.gitMerge(dir, branch)),
+  gitChangeLines: (projectRoot: string, filePath: string, content: string) =>
+    wrap((d) => d.gitChangeLines(projectRoot, filePath, content)) as Promise<{ added: number[]; modified: number[]; deleted: number[] } | null>,
   gitDiscard: (dir: string, paths?: string[]) => wrap((d) => d.gitDiscard(dir, paths)),
   pickParentDir: () => wrap((d) => d.pickParentDir()),
 

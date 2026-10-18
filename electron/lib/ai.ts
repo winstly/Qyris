@@ -439,6 +439,7 @@ function buildToolRealityBlock(tools: readonly Tool[]): string {
     ...tools.map((t) => `- ${t.name}：${t.description}`),
     '旧名映射（历史提示里的这些名字已改名，请直接用新名）：list_files → list_dir（单层目录列表）；' +
       'grep_files → grep（按内容搜索）；run_once → run_command（一次性命令）。' +
+      'askUserQuestion 的实际调用名是 mcp__qyris-tools__askUserQuestion（经 MCP 代行通道）：需要用户做选择或补充信息时优先调用它，不要在正文里文字提问。' +
       '上表是唯一可用清单：不在上表的工具名（含历史提示里的其他旧名）一律不可用，不要请求。',
     '声明工具调用时只用本通道原生的工具调用通道（工具协议说明会随请求注入）；不要在正文里写围栏块/自创标签/裸 JSON 冒充调用——正文里的调用语法不会被执行。',
   ]

@@ -237,32 +237,44 @@ interface GrepResult {
 const GREP_MAX_MATCHES = 120
 const GREP_MAX_FILE_BYTES = 512 * 1024 // 单文件读入上限（超过跳过，防巨型文件卡死）
 
-/** 递归按内容搜索：JS 正则（自动转义普通文本），跳过 IGNORED 目录与二进制嗅探不通过的文件。
- *  有界遍历（命中/访问双重上限），主进程一次 IPC 完成查询。 */
+/** 递归按内容搜索：JS 正则（literal=true 走字面量文本匹配），跳过 IGNORED 目录与二进制嗅探不通过的文件。
+ *  excludeGlobs 排除指定后缀的文件（如 '*.log'）；有界遍历（命中/访问双重上限），主进程一次 IPC 完成查询。 */
 export async function grepFiles(
   projectRoot: string, pattern: string,
-  opts?: { glob?: string; maxResults?: number; caseSensitive?: boolean },
+  opts?: { glob?: string; excludeGlobs?: string[]; maxResults?: number; caseSensitive?: boolean; literal?: boolean },
 ): Promise<GrepResult> {
   const root = await ensureInside(projectRoot, projectRoot)
   const maxResults = Math.min(Math.max(opts?.maxResults ?? GREP_MAX_MATCHES, 1), 500)
+  const flags = opts?.caseSensitive ? 'g' : 'gi'
   let re: RegExp
-  try {
-    const flags = opts?.caseSensitive ? 'g' : 'gi'
-    re = new RegExp(pattern, flags)
-  } catch {
-    // 非法正则回退为字面量文本匹配
-    re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), opts?.caseSensitive ? 'g' : 'gi')
+  if (opts?.literal) {
+    // 字面量模式：不经 RegExp 语义（面板 .* 开关关闭时走这里，开关联动真实生效）
+    re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags)
+  } else {
+    try {
+      re = new RegExp(pattern, flags)
+    } catch {
+      // 非法正则回退为字面量文本匹配
+      re = new RegExp(pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags)
+    }
   }
   const globLower = opts?.glob?.toLowerCase() ?? null
+  // 排除后缀归一化：剥通配符前缀、补点、小写（'*.log'/'log' 都归一为 '.log'），按全路径后缀匹配
+  const excludes = (opts?.excludeGlobs ?? [])
+    .map((g) => g.trim().toLowerCase().replace(/^\*\./, '').replace(/^\*/, ''))
+    .filter(Boolean)
+    .map((g) => (g.startsWith('.') ? g : `.${g}`))
   const matches: GrepMatch[] = []
   const hitFiles = new Set<string>()
   let visited = 0
   let truncated = false
 
-  /** 单文件 grep（并发单元）：二进制/大文件跳过 */
+  /** 单文件 grep（并发单元）：二进制/大文件/命中排除后缀跳过 */
   async function grepOne(abs: string): Promise<void> {
     if (truncated) return
     if (globLower && !abs.toLowerCase().endsWith(globLower.replace(/^\*/, ''))) return
+    const absLower = abs.toLowerCase()
+    if (excludes.some((ext) => absLower.endsWith(ext))) return
     let stat: Stats
     try {
       stat = await fsp.stat(abs)

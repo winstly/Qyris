@@ -101,6 +101,8 @@ interface AppState {
   gitPanelOpen: boolean
   /** 文件 Tab 内搜索面板高度占左栏比例 */
   searchPanelRatio: number
+  /** 全局搜索排除的文件后缀（归一化带点，如 '.log'；chips 编辑，持久化） */
+  searchExclude: string[]
 
   projectPath: string | null
   projectName: string
@@ -150,6 +152,7 @@ interface AppState {
   setFilesSplitRatio: (r: number) => void
   setGitPanelRatio: (r: number) => void
   setSearchPanelRatio: (r: number) => void
+  setSearchExclude: (list: string[]) => void
   setGitPanelOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean) => void
   setModelCfgOpen: (open: boolean) => void
@@ -213,6 +216,7 @@ export const useAppStore = create<AppState>()(
       gitPanelRatio: 0.45,
       gitPanelOpen: false,
       searchPanelRatio: 0.35,
+      searchExclude: [],
       projectPath: null,
       projectName: '',
       settingsOpen: false,
@@ -250,6 +254,7 @@ export const useAppStore = create<AppState>()(
       setSearchPanelRatio: (r) => set((s) => ({
         searchPanelRatio: Math.min(0.75, Math.max(0.15, Math.min(r, 1 - (s.gitPanelOpen ? s.gitPanelRatio : 0)))),
       })),
+      setSearchExclude: (list) => set({ searchExclude: list }),
       setGitPanelOpen: (open) => set({ gitPanelOpen: open, ...(open ? { searchOpen: false } : {}) }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
       setModelCfgOpen: (open) => set({ modelCfgOpen: open }),
@@ -699,6 +704,7 @@ export const useAppStore = create<AppState>()(
         filesSplitRatio: s.filesSplitRatio,
         gitPanelRatio: s.gitPanelRatio,
         searchPanelRatio: s.searchPanelRatio,
+        searchExclude: s.searchExclude,
         theme: s.theme,
         chatPanelCollapsed: s.chatPanelCollapsed,
         fileTreeCollapsed: s.fileTreeCollapsed,

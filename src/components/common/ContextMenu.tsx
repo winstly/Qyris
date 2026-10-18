@@ -5,6 +5,8 @@ export interface ContextMenuItem {
   label: string
   icon?: React.ReactNode
   danger?: boolean
+  /** 强调色（AI 能力类入口的视觉标识） */
+  accent?: boolean
   disabled?: boolean
   /** 子菜单项 */
   children?: ContextMenuItem[]
@@ -88,7 +90,7 @@ export function ContextMenu({ pos, items, onClose }: {
 function MenuItem({ item, onClose }: { item: ContextMenuItem; onClose: () => void }) {
   return (
     <button
-      className={`ctxmenu__item ${item.danger ? 'ctxmenu__item--danger' : ''}`}
+      className={`ctxmenu__item ${item.danger ? 'ctxmenu__item--danger' : ''} ${item.accent ? 'ctxmenu__item--accent' : ''}`}
       role="menuitem"
       disabled={item.disabled}
       onClick={() => { onClose(); item.run?.() }}
