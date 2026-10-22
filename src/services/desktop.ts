@@ -38,7 +38,7 @@ export const api = {
   pathExists: (p: string) => wrap((d) => d.pathExists(p)) as Promise<boolean>,
   listDirBatch: (projectRoot: string, dirs: string[]) => wrap((d) => d.listDirBatch(projectRoot, dirs)) as Promise<Record<string, import('@/types').TreeNode[]>>,
   searchFiles: (projectRoot: string, query: string) => wrap((d) => d.searchFiles(projectRoot, query)),
-  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; excludeGlobs?: string[]; maxResults?: number; caseSensitive?: boolean; literal?: boolean }) =>
+  grepFiles: (projectRoot: string, pattern: string, opts?: { glob?: string; globs?: string[]; excludeGlobs?: string[]; maxResults?: number; caseSensitive?: boolean; literal?: boolean }) =>
     wrap((d) => d.grepFiles(projectRoot, pattern, opts)),
   readTextFile: (projectRoot: string, path: string) => wrap((d) => d.readTextFile(projectRoot, path)),
   writeTextFile: (projectRoot: string, path: string, content: string, opts?: { expectedMtimeMs?: number | null; force?: boolean }) =>
@@ -120,8 +120,8 @@ export const api = {
     messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null,
     opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string },
   ) => wrap((d) => d.aiChatStream(requestId, provider, baseUrl, model, messages, tools, dispatchMode, projectRoot, opts)),
-  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
-    wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode, cliCommand)),
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string, codexCommand?: string) =>
+    wrap((d) => d.aiTestConnection(provider, baseUrl, model, dispatchMode, cliCommand, codexCommand)),
   aiCancel: (requestId: string) => wrap((d) => d.aiCancel(requestId)),
   answerCliAsk: (askId: string, answer: string) => wrap((d) => d.answerCliAsk(askId, answer)),
 

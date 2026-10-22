@@ -187,14 +187,17 @@ function UserMessage({ msg }: { msg: ChatMessage }) {
             onChange={(e) => {
               const val = e.target.value
               setDraft(val)
-              if (val.startsWith('/') && !slashOpen && allSkills.length > 0) {
+              // slash 触发同主输入：词尾 /（行首或空白后），编辑原文非空也能唤起
+              const hitOf = (s: string): RegExpExecArray | null => /(^|\s)\/[^\s，]*$/.exec(s)
+              const now = hitOf(val)
+              if (now && !hitOf(draft) && allSkills.length > 0) {
                 editSavedRef.current = draft
                 setSlashOpen(true)
                 setSlashFilter('')
               } else if (slashOpen) {
-                if (!val.startsWith('/')) { editSavedRef.current = ''; closeSlash() }
+                if (!now) { editSavedRef.current = ''; closeSlash() }
                 else {
-                  const afterSlash = val.slice(1)
+                  const afterSlash = now[0].replace(/^\s*\//, '')
                   setSlashFilter(afterSlash.length <= 20 && !afterSlash.includes('，') ? afterSlash : '')
                 }
               }

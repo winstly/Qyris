@@ -76,8 +76,9 @@ export async function resolveChatProvider(opts: ResolveChatProviderOptions): Pro
   } = opts
   if (dispatchMode === 'claude-cli') {
     const cliCommand = (cfg?.aiCliCommand || 'claude').trim() || 'claude'
-    // 工具循环轮数上限：子 agent 传 aiSubagentMaxTurns 覆盖，主对话用 aiMaxTurns（getConfig 已归一）
-    const maxTurns = maxTurnsOverride ?? cfg?.aiMaxTurns ?? undefined
+    // 工具循环轮数上限：子 agent 传 aiSubagentMaxTurns 覆盖，主对话用 aiMaxTurns。
+    // 只把 undefined 当「未传」——显式 null = 不限制，不能被 ?? 吞成主配置或缺省值
+    const maxTurns = maxTurnsOverride !== undefined ? maxTurnsOverride : (cfg?.aiMaxTurns ?? null)
     // 可用性预检：自定义路径写错时给出可读提示，不让裸的 spawn ENOENT 落到用户面前
     // （detectCommand 返回 null = 超时/探测异常，同样按不可用处理）
     if ((await detectCommand(cliCommand)) !== true) {
@@ -88,8 +89,8 @@ export async function resolveChatProvider(opts: ResolveChatProviderOptions): Pro
       kind: 'claude-cli',
       cliCommand,
       maxTurns,
-      // 旧链路 CLI_TIMEOUT_MS=30 分钟：单轮补全沿用同一水位，长思考不被 10 分钟缺省掐掉
-      timeoutMs: 30 * 60_000,
+      // 单轮补全看门狗：配置了分钟数才设限；null（未配置）= 不限制，长程任务跑多久由模型决定
+      timeoutMs: cfg?.aiRequestTimeoutMin ? cfg.aiRequestTimeoutMin * 60_000 : null,
       // claude 不再扎进工程目录：cwd 下的 CLAUDE.md / .claude/ / 项目级记忆是 CLI 共享态，
       // 同工程终端里同时跑着另一个 claude 时，Qyris 的实例会捡到对方写入的上下文/指令 → 对话串味
       // （实测：工程根下跑同款 -p 命令，~/.claude/projects/<工程>/memory 的记忆索引被整份注入）。
@@ -107,6 +108,34 @@ export async function resolveChatProvider(opts: ResolveChatProviderOptions): Pro
               ...(includeTools.length > 0 ? { includeTools } : {}),
               ...(opts.toolOrigin ? { origin: opts.toolOrigin } : {}),
               // 外部 MCP 工具元数据（连接池在主进程；子进程暴露面靠它，执行代行回主进程）
+              externalTools: externalToolStubs(projectRoot),
+            },
+          }
+        : {}),
+    })
+  }
+  if (dispatchMode === 'codex-cli') {
+    const codexCommand = (cfg?.aiCodexCommand || 'codex').trim() || 'codex'
+    if ((await detectCommand(codexCommand)) !== true) {
+      throw new Error(`未找到 Codex CLI 命令「${codexCommand}」：请先安装 codex（npm i -g @openai/codex）或检查设置中的 Codex CLI 自定义命令`)
+    }
+    return resolveProvider('codex', {
+      kind: 'codex',
+      cliCommand: codexCommand,
+      timeoutMs: cfg?.aiRequestTimeoutMin ? cfg.aiRequestTimeoutMin * 60_000 : null,
+      // codex 与 claude 相反：原生工具（shell/apply_patch）依赖 cwd，agent 形态必须扎工程根；
+      // 会话文件落 ~/.codex 全局目录，不往工程里写（--ephemeral 则连会话都不落）
+      cwd: projectRoot ?? undefined,
+      ...(wantTools
+        ? {
+            mcp: {
+              permission,
+              projectRoot,
+              sshCredentials: await sshCredentialEnv(permission, projectRoot),
+              hostProxy,
+              ...(excludeTools.length > 0 ? { excludeTools } : {}),
+              ...(includeTools.length > 0 ? { includeTools } : {}),
+              ...(opts.toolOrigin ? { origin: opts.toolOrigin } : {}),
               externalTools: externalToolStubs(projectRoot),
             },
           }

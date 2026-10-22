@@ -1472,6 +1472,9 @@
     border: 1px solid var(--user-border);
     border-radius: var(--radius-bubble) 4px var(--radius-bubble) var(--radius-bubble);
     color: var(--text);
+    /* 用户消息是纯文本插值：保住输入框里的换行（HTML 默认把 \n 折叠成空格） */
+    white-space: pre-wrap;
+    word-break: break-word;
   }
 
   .msg--ai .msg__bubble {
@@ -1858,7 +1861,8 @@
 
   /* 状态修饰：running 呼吸降权，error 红接管 */
   .toolcard--running { animation: toolcard-breathe 2.4s ease-in-out infinite; }
-  .toolcard--running .toolcard__state { color: var(--text-soft); }
+  /* 运行态与主 agent 状态点同色（accent 紫）——灰系会让子 agent 执行看起来像挂起 */
+  .toolcard--running .toolcard__state { color: var(--accent); }
   .toolcard--running .toolcard__text { color: var(--text-muted); }
   .toolcard--error { border-color: var(--red); background: var(--red-bg); }
   .toolcard--error .toolcard__icon { color: var(--red); }
@@ -1970,6 +1974,24 @@
     box-shadow: var(--focus-ring);
   }
   .chat__inputbox--disabled { opacity: 0.6; }
+
+  /* 输入框顶部拖高 grip：常驻细把手，hover 提亮；向上拖增高、双击重置（96–480px 持久化） */
+  .chat__grip {
+    height: 8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: ns-resize;
+    touch-action: none;
+  }
+  .chat__grip::before {
+    content: '';
+    width: 28px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--divider);
+  }
+  .chat__grip:hover::before { background: var(--accent); }
   .chat__inputbox--drag, .chat__inputbox--drag-active { border-color: var(--accent); background: var(--accent-tint); }
 
   .chat__textarea {
@@ -2250,16 +2272,10 @@
     gap: 8px;
   }
   .agentview__scroll--embedded { flex: none; overflow: visible; padding: 6px 8px; }
-  .agentview__text {
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-size: var(--text-sm);
-    line-height: 1.6;
-    color: var(--text);
-    background: var(--accent-soft);
-    border-radius: 8px;
-    padding: 8px 10px;
-  }
+  /* 转录正文复用主对话 AI 气泡（msg--ai + Markdown，样式与主页同源）：
+     只关入场动画（转录高频入账不闪屏）、放开 90% 宽度约束（转录区窄，正文占满） */
+  .agentview__msg { animation: none; }
+  .agentview__msg .msg__bubble { max-width: 100%; }
   .agentview__empty { color: var(--text-soft); font-size: var(--text-sm); text-align: center; padding: 12px; }
 
   /* 编辑态：添加 Skill 下拉 */

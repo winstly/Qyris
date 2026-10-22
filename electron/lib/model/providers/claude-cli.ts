@@ -49,27 +49,26 @@ type Json = Record<string, any>
 const DEFAULT_CLI_TIMEOUT_MS = 10 * 60_000
 /** Windows cmd.exe 单条命令行 8191 上限，留出引号膨胀余量 */
 const WIN_CMDLINE_LIMIT = 7500
-/** CLI 自持工具循环的轮数缺省（--max-turns） */
-const DEFAULT_CLI_MAX_TURNS = 60
 
 export interface CliRunOptions {
   /** CLI 命令，允许「可执行 + 前置参数」形态（如 `npx -y xxx`）；缺省用方言默认名 */
   cliCommand?: string
-  timeoutMs?: number
+  /** 单轮补全看门狗（ms）：null=不限制；undefined=缺省水位 */
+  timeoutMs?: number | null
   /** 子进程工作目录；缺省 scratchDir（每轮临时目录）。CLI 家族都在 cwd 读工程态：
    *  claude 读 CLAUDE.md/项目记忆，codex/opencode 读 AGENTS.md 并按 cwd 落会话——
    *  扎进真实目录就会跟终端里同工程的另一个 CLI 串上下文，继承父进程 cwd 则是隐性随机（dev 从哪起就扎哪） */
   cwd?: string | null
-  /** agentic 循环轮数上限（claude 方言 = --max-turns）；缺省 DEFAULT_CLI_MAX_TURNS，设置项 aiMaxTurns 可调 */
-  maxTurns?: number
+  /** agentic 循环轮数上限（claude 方言 = --max-turns）；null=不限制（不传 flag），设置项 aiMaxTurns 可调 */
+  maxTurns?: number | null
 }
 
 /**
- * MCP 工具通道配置（claude 专属，挂在 ClaudeCliConfig.mcp）。
+ * CLI 方言的 MCP 工具通道配置（挂在各 CLI config 的 mcp 字段；claude/codex 同构复用）。
  * 存在 ⇒ capabilities.executesOwnTools=true：provider 自持工具循环，工具经 MCP 由本仓
  * ToolRegistry 执行完再以 tool-executed 事件上报，runner 只透传不执行（model/types.ts 语义分工）。
  */
-interface ClaudeMcpChannel {
+export interface CliMcpChannel {
   /** 会话权限档，透传给 MCP server 的 executeTool ctx（不许默认放开，缺省按最严档） */
   permission: ToolPermission
   /** 工程根（路径工具越界防护）；null = 未打开工程 */
@@ -95,7 +94,7 @@ interface ClaudeMcpChannel {
 
 export interface ClaudeCliConfig extends CliRunOptions {
   /** MCP 工具通道；缺省/null = 纯补全（旧口径，tools:false 走提示词降级——codex/opencode 同款） */
-  mcp?: ClaudeMcpChannel | null
+  mcp?: CliMcpChannel | null
 }
 
 interface CliParserContext {
@@ -133,8 +132,16 @@ export interface CliDialect {
     jsonSchemaPath: string | null
     lastMessagePath: string | null
     mcpConfigPath: string | null
-    maxTurns: number
+    /** null = 不限制（不传 --max-turns，claude 按引擎缺省跑） */
+    maxTurns: number | null
+    /** MCP 工具通道（codex 方言消费：-c mcp_servers 逐键挂载；claude 走 mcpConfigPath 文件忽略此值） */
+    mcp?: CliMcpChannel | null
+    /** 外部工具描述落盘路径（codex 的 env 逐键注入需要指路；claude 忽略） */
+    externalToolsFile?: string | null
   }): string[]
+  /** 子进程 env 叠加（codex 方言消费：MCP server 的 env 走父进程继承，无 config env 表可挂；
+   *  claude 的 env 在 mcp-config JSON 里，不需要此钩子）。返回 null/undefined = 不叠加 */
+  buildEnv?(ctx: { mcp: CliMcpChannel | null; externalToolsFile: string | null }): Record<string, string> | null
   createParser(ctx: CliParserContext): CliParser
 }
 
@@ -246,7 +253,8 @@ async function* runCliComplete(
   cfg: CliRunOptions,
   req: CompletionRequest,
 ): AsyncIterable<CompletionEvent> {
-  const timeoutMs = cfg.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS
+  // null = 不限制（配置显式选了不看门狗）；undefined = 未配置走缺省水位
+  const timeoutMs = cfg.timeoutMs === null ? null : (cfg.timeoutMs ?? DEFAULT_CLI_TIMEOUT_MS)
   const command = cfg.cliCommand?.trim() || dialect.defaultCommand
   const jsonSchema = req.options?.jsonSchema ? JSON.stringify(req.options.jsonSchema) : null
   // MCP 通道（claude 专属；codex/opencode 的 cfg 没有该字段，?? null 收敛为纯补全形态）
@@ -259,10 +267,11 @@ async function* runCliComplete(
   // mcp-config 落盘进 scratch：路径进 argv 比内联 JSON 稳（Windows cmd.exe 引号地狱 + 8191 上限），
   // 生命周期跟 scratchDir 一起在 finally 清掉
   let mcpConfigPath: string | null = null
+  // 外部工具描述落盘路径提到函数级：dialect.buildEnv（codex 形态的 env 继承面）在 spawn 点也要它
+  let externalToolsFile: string | null = null
   if (mcp && !jsonSchema) {
     // 外部工具描述同落 scratch（子进程暴露面元数据；执行仍代行回主进程）。
     // 走文件不走 env 内联：工具 schema 可观，Windows 环境块 32KB 上限是硬悬崖
-    let externalToolsFile: string | null = null
     if (mcp.externalTools && mcp.externalTools.length > 0) {
       externalToolsFile = join(scratchDir, 'external-tools.json')
       writeFileSync(externalToolsFile, JSON.stringify(mcp.externalTools), 'utf8')
@@ -328,7 +337,7 @@ async function* runCliComplete(
 
   // jsonSchema 通道不挂 MCP（buildArgs 同口径）：约束块不能指向一批不存在的工具
   const prompt = serializeMessages(req.messages, { mcpChannel: mcp != null && !jsonSchema })
-  const args = dialect.buildArgs({ jsonSchema, jsonSchemaPath, lastMessagePath, mcpConfigPath, maxTurns: cfg.maxTurns ?? DEFAULT_CLI_MAX_TURNS })
+  const args = dialect.buildArgs({ jsonSchema, jsonSchemaPath, lastMessagePath, mcpConfigPath, maxTurns: cfg.maxTurns ?? null, mcp, externalToolsFile })
 
   try {
     // 缺省用本轮 scratchDir：继承父进程 cwd 是隐性的——dev 从某工程根启动 Electron，
@@ -337,7 +346,7 @@ async function* runCliComplete(
     let cwd = cfg.cwd ?? scratchDir
     if (cwd && !existsSync(cwd)) cwd = homedir() // cwd 失效会 spawn ENOENT
     try {
-      child = spawnCli(command, args, cwd)
+      child = spawnCli(command, args, cwd, dialect.buildEnv?.({ mcp, externalToolsFile: externalToolsFile ?? null }) ?? undefined)
     } catch (e) {
       rmSync(scratchDir, { recursive: true, force: true })
       yield { type: 'error', error: new Error(`CLI 启动失败：${errorMessage(e)}`) }
@@ -345,10 +354,13 @@ async function* runCliComplete(
     }
     // 登记进 onceProcs 取消链：超时/全局停止都能树杀（Windows cmd.exe /C 也要树杀子进程）
     unregister = registerOnceProc(token, child)
-    timer = setTimeout(() => {
-      interrupted = 'timeout'
-      stopChild()
-    }, timeoutMs)
+    // timeoutMs null = 不限制（长程任务）：不设看门狗，仅取消/异常路径收口
+    if (timeoutMs !== null) {
+      timer = setTimeout(() => {
+        interrupted = 'timeout'
+        stopChild()
+      }, timeoutMs)
+    }
 
     let stdoutTail = ''
     const stderrChunks: Buffer[] = []
@@ -413,7 +425,8 @@ async function* runCliComplete(
 
     const fin = parser.finish()
     if (interrupted) {
-      const why = interrupted === 'timeout' ? `CLI 补全超过 ${Math.round(timeoutMs / 60_000)} 分钟未返回，已树杀中止` : '已取消'
+      // timeout 分支只在看门狗存在（timeoutMs 非 null）时可达
+      const why = interrupted === 'timeout' ? `CLI 补全超过 ${Math.round((timeoutMs ?? 0) / 60_000)} 分钟未返回，已树杀中止` : '已取消'
       yield { type: 'error', error: new Error(why) }
       return
     }
@@ -473,10 +486,10 @@ async function* runCliComplete(
  *  /s 只剥最外层引号，带空格的自定义路径不会被逐 token 撕碎）；引号纪律在 cmd-quote.ts（全仓唯一口径）。
  *  Unix 直启 argv，detached 保证 killTree 能按进程组树杀。
  *  env 显式走 buildChildEnv：打包 GUI 启动的进程 PATH 极简（找不到 claude/git），
- *  且凭据/代行通道键出口即剥。 */
-function spawnCli(command: string, args: string[], cwd?: string): ChildProcess {
+ *  且凭据/代行通道键出口即剥；envExtra 由方言按需叠加（codex 的 MCP server env 继承面）。 */
+export function spawnCli(command: string, args: string[], cwd?: string, envExtra?: Record<string, string>): ChildProcess {
   const stdio: ('pipe')[] = ['pipe', 'pipe', 'pipe']
-  const env = buildChildEnv()
+  const env = { ...buildChildEnv(), ...envExtra }
   if (process.platform === 'win32') {
     const cmdLine = buildCmdLine(command, args)
     if (cmdLine.length > WIN_CMDLINE_LIMIT) {
@@ -528,7 +541,7 @@ function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
 }
 
-function estimateTokens(chars: number): number {
+export function estimateTokens(chars: number): number {
   return Math.ceil(chars / 4)
 }
 
@@ -539,9 +552,31 @@ function estimateTokens(chars: number): number {
  * electron.vite.config.ts）；打包态该文件经 asarUnpack 落在 app.asar.unpacked（claude 作为外部
  * 进程 spawn 不认 asar 虚拟路径），此处按 Electron 惯例把 app.asar 改写为 app.asar.unpacked。
  */
-function resolveMcpServerScript(): string {
+export function resolveMcpServerScript(): string {
   const p = join(__dirname, 'mcp-server.js')
   return p.replace(/app\.asar([\\/])/g, 'app.asar.unpacked$1')
+}
+
+/** MCP server 子进程的 env 表（凭据 / 代行通道 / 工具面开关 / 外部工具指路）。
+ *  claude 形态进 mcp-config JSON 的 env 字段；codex 形态进 CLI 子进程自身 env
+ *  （mcp server 由 codex spawn、按子进程默认继承父 env，配置表里无需 env 键）。 */
+export function buildMcpServerEnv(mcp: CliMcpChannel, externalToolsFile: string | null = null): Record<string, string> {
+  const credEnv = Object.fromEntries(
+    Object.entries(mcp.sshCredentials ?? {}).map(([id, secret]) => [`QYRIS_SSH_CRED_${id}`, secret]),
+  )
+  // 代行通道（编排工具回主进程执行）：与凭据同规，env 单向注入 + buildChildEnv 剥离
+  const proxyEnv: Record<string, string> = mcp.hostProxy
+    ? { [HOST_TOOL_ENV_PORT]: String(mcp.hostProxy.port), [HOST_TOOL_ENV_TOKEN]: mcp.hostProxy.token }
+    : {}
+  const excludeEnv: Record<string, string> = mcp.excludeTools?.length
+    ? { [HOST_TOOL_ENV_EXCLUDE]: mcp.excludeTools.join(',') }
+    : {}
+  const includeEnv: Record<string, string> = mcp.includeTools?.length
+    ? { [HOST_TOOL_ENV_INCLUDE]: mcp.includeTools.join(',') }
+    : {}
+  // 外部工具描述文件指路（同 QYRIS_HOST_TOOL_ 前缀，buildChildEnv 对孙子进程自动剥离）
+  const externalEnv: Record<string, string> = externalToolsFile ? { [HOST_TOOL_ENV_EXTERNAL_FILE]: externalToolsFile } : {}
+  return { ...buildChildEnv(), ELECTRON_RUN_AS_NODE: '1', ...credEnv, ...proxyEnv, ...excludeEnv, ...includeEnv, ...externalEnv }
 }
 
 /**
@@ -551,29 +586,14 @@ function resolveMcpServerScript(): string {
  * env 用 buildChildEnv 重建（打包 GUI 启动 PATH 极简，MCP server 里执行的工具要靠重建后的
  * PATH 找可执行；凭据/代行通道键先剥再注入，不把主进程残留漏给子进程）再注入会话开关。
  */
-function buildMcpServerConfig(mcp: ClaudeMcpChannel, externalToolsFile: string | null = null): object {
-  const credEnv = Object.fromEntries(
-    Object.entries(mcp.sshCredentials ?? {}).map(([id, secret]) => [`QYRIS_SSH_CRED_${id}`, secret]),
-  )
-  // 代行通道（编排工具回主进程执行）：与凭据同规，env 单向注入 + buildChildEnv 剥离
-  const proxyEnv = mcp.hostProxy
-    ? { [HOST_TOOL_ENV_PORT]: String(mcp.hostProxy.port), [HOST_TOOL_ENV_TOKEN]: mcp.hostProxy.token }
-    : {}
-  const excludeEnv = mcp.excludeTools?.length
-    ? { [HOST_TOOL_ENV_EXCLUDE]: mcp.excludeTools.join(',') }
-    : {}
-  const includeEnv = mcp.includeTools?.length
-    ? { [HOST_TOOL_ENV_INCLUDE]: mcp.includeTools.join(',') }
-    : {}
-  // 外部工具描述文件指路（同 QYRIS_HOST_TOOL_ 前缀，buildChildEnv 对孙子进程自动剥离）
-  const externalEnv = externalToolsFile ? { [HOST_TOOL_ENV_EXTERNAL_FILE]: externalToolsFile } : {}
+function buildMcpServerConfig(mcp: CliMcpChannel, externalToolsFile: string | null = null): object {
   return {
     mcpServers: {
       [MCP_SERVER_NAME]: {
         type: 'stdio',
         command: process.execPath,
         args: [resolveMcpServerScript(), '--permission', mcp.permission, '--project-root', mcp.projectRoot ?? '', ...(mcp.origin ? ['--origin', mcp.origin] : [])],
-        env: { ...buildChildEnv(), ELECTRON_RUN_AS_NODE: '1', ...credEnv, ...proxyEnv, ...excludeEnv, ...includeEnv, ...externalEnv },
+        env: buildMcpServerEnv(mcp, externalToolsFile),
       },
     },
   }
@@ -632,7 +652,9 @@ const claudeDialect: CliDialect = {
       args.push('--output-format', 'json', '--json-schema', ctx.jsonSchema, '--max-turns', '6')
     } else if (ctx.mcpConfigPath) {
       // CLI 自持工具循环：调用 → MCP 执行 → 结果回喂 → 续答都要轮次；轮数上限由 ctx.maxTurns 给定
-      args.push('--output-format', 'stream-json', '--include-partial-messages', '--verbose', '--max-turns', String(ctx.maxTurns))
+      // maxTurns null = 不限制：不传 --max-turns（claude 按引擎缺省跑，不再人为设界）
+      args.push('--output-format', 'stream-json', '--include-partial-messages', '--verbose')
+      if (ctx.maxTurns != null) args.push('--max-turns', String(ctx.maxTurns))
     } else {
       args.push('--output-format', 'stream-json', '--include-partial-messages', '--verbose', '--max-turns', '1')
     }

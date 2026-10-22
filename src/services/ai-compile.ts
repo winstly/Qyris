@@ -8,6 +8,7 @@ import { useStartupStore } from '@/store/useStartupStore'
 import { useChatStore } from '@/store/useChatStore'
 import { basename } from '@/utils/path'
 import { toast } from '@/components/common/Toast'
+import { isCliAgentMode } from '../../shared/ai-mode'
 
 export type AiCompileResult = 'ok' | 'busy' | 'declined' | 'fail'
 
@@ -16,7 +17,7 @@ export type AiCompileResult = 'ok' | 'busy' | 'declined' | 'fail'
  *  send 会 await 整个 agent 轮次，resolve 即该工程编译结束。 */
 export async function aiCompileProject(targetPath: string, interactive = true): Promise<AiCompileResult> {
   const app = useAppStore.getState()
-  const cliMode = app.settings.dispatchMode === 'claude-cli'
+  const cliMode = isCliAgentMode(app.settings.dispatchMode)
   if (!app.hasApiKey && !cliMode) {
     if (interactive) toast.info('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 编译。')
     return 'declined'

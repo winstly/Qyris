@@ -57,14 +57,18 @@ export interface AppConfig {
   aiProvider: 'openai' | 'anthropic' | null
   /** 任务档位模型（thinking/fast/middle/heavy，空缺回退主模型） */
   aiTiers?: ModelTiers
-  /** 调度模型方式：api=HTTP 直连；claude-cli=本机 Claude Code CLI（垃圾值归一为 api） */
-  aiDispatchMode: 'api' | 'claude-cli'
+  /** 调度模型方式：api=HTTP 直连；claude-cli/codex-cli=本机 CLI 自主 agent（垃圾值归一为 api） */
+  aiDispatchMode: 'api' | 'claude-cli' | 'codex-cli'
   /** CLI 可执行文件名/路径：缺省 'claude'（Windows 经 cmd.exe 查 PATH），可改为自定义路径 */
   aiCliCommand?: string | null
-  /** 主对话工具循环轮数上限（API/CLI 通用，CLI 落为 --max-turns）：null=缺省 60；合法域 [4,500] */
+  /** Codex CLI 可执行文件名/路径：缺省 'codex'（codex-cli 档专用，与 aiCliCommand 独立） */
+  aiCodexCommand?: string | null
+  /** 主对话工具循环轮数上限（API/CLI 通用，CLI 落为 --max-turns）：null=不限制；合法域 [4,500] */
   aiMaxTurns?: number | null
-  /** 子 agent 单任务工具循环轮数上限：null=缺省 20；合法域 [2,200] */
+  /** 子 agent 单任务工具循环轮数上限：null=不限制；合法域 [2,200] */
   aiSubagentMaxTurns?: number | null
+  /** 单轮补全超时（分钟，CLI 档 spawn 看门狗）：null=不限制；合法域 [1,720] */
+  aiRequestTimeoutMin?: number | null
   /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
   aiCliPermission: 'auto' | 'readonly'
   recentProjects?: RecentProject[]

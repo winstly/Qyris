@@ -9,8 +9,10 @@ import { spawnSync } from 'node:child_process'
 
 const ENV_CACHE_TTL = 10_000
 const UNIX_PROBE_RETRY_MS = 60_000
-let envCache: NodeJS.ProcessEnv | null = null
-let envCacheAt = 0
+/** Windows PATH 探测缓存：只缓存注册表查询结果（探测成本），不缓存整份 env 快照——
+ *  调用方在两次 spawn 之间改的 process.env 动态项必须生效（缓存整 env 会把改动冻住 10s） */
+let winPathCache: string | null = null
+let winPathCacheAt = 0
 /** undefined=未探测过；null=探测失败（60s 后允许重试）；string=探测到的 PATH（永久缓存） */
 let unixProbeResult: string | null | undefined
 let unixProbeFailedAt = 0
@@ -116,16 +118,19 @@ function buildChildEnvRaw(): NodeJS.ProcessEnv {
   try {
     if (process.platform === 'win32') {
       const now = Date.now()
-      if (envCache && now - envCacheAt < ENV_CACHE_TTL) return { ...envCache }
-      const regPath = [
-        ...readRegistryPath('HKLM', 'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'),
-        ...readRegistryPath('HKCU', 'Environment'),
-      ].map(expandEnvVars)
-      if (regPath.length > 0) {
-        env.PATH = mergePaths([regPath, (process.env.PATH ?? '').split(';')])
+      if (winPathCache && now - winPathCacheAt < ENV_CACHE_TTL) {
+        env.PATH = winPathCache
+      } else {
+        const regPath = [
+          ...readRegistryPath('HKLM', 'SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment'),
+          ...readRegistryPath('HKCU', 'Environment'),
+        ].map(expandEnvVars)
+        if (regPath.length > 0) {
+          env.PATH = mergePaths([regPath, (process.env.PATH ?? '').split(';')])
+        }
+        winPathCache = env.PATH ?? null
+        winPathCacheAt = now
       }
-      envCache = env
-      envCacheAt = now
     } else {
       const probed = probeUnixPath()
       const fallback = [

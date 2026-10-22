@@ -46,9 +46,6 @@ const RESULT_CAP = 1500
 const EVENT_TEXT_CAP = 4000
 /** 单条工具参数展示上限（write_file 的 arguments 可能含整文件） */
 const TOOL_ARG_CAP = 300
-/** 子 agent 单任务工具循环轮数缺省：设置 aiSubagentMaxTurns 可调（子任务聚焦语义，缺省保守） */
-const SUBAGENT_MAX_TURNS = 20
-
 function clip(s: string, cap: number): string {
   return s.length > cap ? s.slice(0, cap) + '…' : s
 }
@@ -89,8 +86,9 @@ async function resolveSubProvider(tier: string, ctx: ToolCtx): Promise<{ provide
     // CLI 档 MCP 面剔除：嵌套派发与子任务内提问都禁止（askUserQuestion 的交互回填
     // 只属于发起对话的主 run；子任务要澄清就在结果里写明假设）
     excludeTools: ['dispatch_subtasks', 'askUserQuestion'],
-    // 子 agent 轮界独立于主对话：CLI 落为 --max-turns，API 落为 runner 轮界
-    maxTurns: cfg.aiSubagentMaxTurns ?? SUBAGENT_MAX_TURNS,
+    // 子 agent 轮界独立于主对话：CLI 落为 --max-turns，API 落为 runner 轮界；
+    // null = 不限制（显式透传，provider-resolve 只把 undefined 当未传）
+    maxTurns: cfg.aiSubagentMaxTurns ?? null,
   })
   return { provider, cfg }
 }
@@ -200,7 +198,7 @@ async function runOne(task: SubTask, cardId: string, ctx: ToolCtx): Promise<SubT
       tools,
       store,
       permission: ctx.permission,
-      maxTurns: cfg.aiSubagentMaxTurns ?? SUBAGENT_MAX_TURNS,
+      maxTurns: cfg.aiSubagentMaxTurns ?? null,
       signal: ctx.signal,
       projectRoot: ctx.projectRoot,
       onEvent: (e: RunnerEvent) => {

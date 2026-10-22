@@ -31,6 +31,7 @@ import { buildHistory, HISTORY_WINDOW, userTextOf } from '@/utils/chatHistory'
 import { mergeSkills } from '@/utils/skillInstruction'
 import { CONTEXT_SUMMARY_HEADING, MEMORY_BLOCK_HEADING, SESSION_SUMMARY_HEADING } from '../../shared/prompt-contract'
 import { CancellationTokenSource } from '@base/cancellation'
+import { isCliAgentMode } from '../../shared/ai-mode'
 import { sleepInterruptible as tokenSleep } from '@base/async'
 import type {
   AiCompletion, ChatMessage, CliAgentEventPayload, MemoryHit, OAIMessage, ToolCall,
@@ -1354,7 +1355,7 @@ async function runAgentLoop(project: string) {
     pushFinalized(project, assistantId)
     history.push(toHistoryEntry(completion))
 
-    if (appState.settings.dispatchMode === 'claude-cli') {
+    if (isCliAgentMode(appState.settings.dispatchMode)) {
       const cmds = (completion.startCommands ?? [])
         .map((s) => ({
           name: String(s?.name ?? '').trim(),

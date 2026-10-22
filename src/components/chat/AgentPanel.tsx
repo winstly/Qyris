@@ -8,7 +8,8 @@ import type { ToolCall } from '@/types'
 import { useAgentStore, selectCurrentAgent, type AgentThread, type AgentEntryTool } from '@/store/useAgentStore'
 import { fmtTok } from '@/utils/tokens'
 import { IconAlert, IconBranch, IconCheck, IconTerminal } from '@/components/common/icons'
-import { TOOL_META, stripMcpPrefix } from './ToolCallCard'
+import { Markdown } from './Markdown'
+import { TOOL_META, classifyKernel, stripMcpPrefix } from './ToolCallCard'
 
 const AGENT_STATUS_LABEL: Record<string, string> = {
   pending: '待执行', running: '运行中', done: '完成', error: '异常', cancelled: '已取消',
@@ -28,7 +29,8 @@ function AgentToolEntry({ entry }: { entry: AgentEntryTool }) {
 
   return (
     <button
-      className={`toolcard toolcard--k-cmd toolcard--${entry.status}`}
+      // kind 与主对话 ToolCallCard 同源归色（mcp 紫 / skill / tool / cmd）：同一工具两边同色
+      className={`toolcard toolcard--k-${classifyKernel(entry.name)} toolcard--${entry.status}`}
       onClick={() => entry.result && setOpen((v) => !v)}
       aria-expanded={open}
     >
@@ -69,7 +71,12 @@ function AgentTranscript({ thread, embedded = false }: { thread: AgentThread; em
       {entryCount === 0 && thread.status === 'running' && <div className="agentview__empty">启动中…</div>}
       {thread.entries.map((e, i) =>
         e.kind === 'text' ? (
-          <div key={`t${i}`} className="agentview__text">{e.content}</div>
+          // 转录正文复用主对话 AI 气泡（msg--ai + Markdown）：字号/配色/代码渲染与主页同源
+          <div key={`t${i}`} className="msg msg--ai agentview__msg">
+            <div className="msg__bubble">
+              <Markdown source={e.content} />
+            </div>
+          </div>
         ) : (
           <AgentToolEntry key={e.id ?? `e${i}`} entry={e} />
         ),

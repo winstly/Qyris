@@ -128,7 +128,7 @@ export interface DesktopAPI {
 
   // AI
   aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string }) => Promise<AiCompletion>
-  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) => Promise<string>
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string, codexCommand?: string) => Promise<string>
   aiCancel: (requestId: string) => Promise<void>
   /** CLI 通道交互提问回填：answer 空串 = 用户取消挂起（主进程按 isError 收口） */
   answerCliAsk: (askId: string, answer: string) => Promise<boolean>

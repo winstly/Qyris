@@ -3,16 +3,20 @@ import { IconCheck, IconAlert } from '@/components/common/icons'
 import { Select } from '@/components/common/Select'
 
 interface Props {
-  dispatchMode: 'api' | 'claude-cli'
-  setDispatchMode: (v: 'api' | 'claude-cli') => void
+  dispatchMode: 'api' | 'claude-cli' | 'codex-cli'
+  setDispatchMode: (v: 'api' | 'claude-cli' | 'codex-cli') => void
   cliPermission: 'auto' | 'readonly'
   setCliPermission: (v: 'auto' | 'readonly') => void
   cliCommand: string
   setCliCommand: (v: string) => void
+  codexCommand: string
+  setCodexCommand: (v: string) => void
   maxTurns: string
   setMaxTurns: (v: string) => void
   subagentMaxTurns: string
   setSubagentMaxTurns: (v: string) => void
+  requestTimeoutMin: string
+  setRequestTimeoutMin: (v: string) => void
   provider: 'openai' | 'anthropic'
   setProvider: (v: 'openai' | 'anthropic') => void
   baseUrl: string
@@ -37,25 +41,33 @@ export function ModelSettingsTab(p: Props) {
           <span className="field__label">调度模型方式</span>
           <Select
             value={p.dispatchMode}
-            onChange={(v) => p.setDispatchMode(v as 'api' | 'claude-cli')}
+            onChange={(v) => p.setDispatchMode(v as 'api' | 'claude-cli' | 'codex-cli')}
             options={[
               { value: 'api', label: 'API 直连（OpenAI 兼容 / Anthropic）' },
               { value: 'claude-cli', label: 'Claude CLI（本机 agent）' },
+              { value: 'codex-cli', label: 'Codex CLI（本机 agent）' },
             ]}
           />
           <span className="field__hint">
             {p.dispatchMode === 'claude-cli'
               ? '经由本机 claude 命令自主执行，自带文件/命令工具与模型配置，无需 API Key；需已安装并登录 Claude Code'
-              : '主进程直连模型服务；需要调度本机工具时切换到 Claude CLI'}
+              : p.dispatchMode === 'codex-cli'
+                ? '经由本机 codex 命令自主执行（codex exec），工具经 qyris-tools MCP 挂载；需已安装并登录 Codex CLI'
+                : '主进程直连模型服务；需要调度本机工具时切换到 Claude CLI / Codex CLI'}
           </span>
         </label>
 
-        {p.dispatchMode === 'claude-cli' && (
+        {(p.dispatchMode === 'claude-cli' || p.dispatchMode === 'codex-cli') && (
           <>
             <label className="field">
               <span className="field__label">CLI 命令</span>
-              <input className="field__input mono" value={p.cliCommand} onChange={(e) => p.setCliCommand(e.target.value)} placeholder="claude" />
-              <span className="field__hint">Claude CLI 执行指令，留空默认 "claude"</span>
+              <input
+                className="field__input mono"
+                value={p.dispatchMode === 'codex-cli' ? p.codexCommand : p.cliCommand}
+                onChange={(e) => (p.dispatchMode === 'codex-cli' ? p.setCodexCommand(e.target.value) : p.setCliCommand(e.target.value))}
+                placeholder={p.dispatchMode === 'codex-cli' ? 'codex' : 'claude'}
+              />
+              <span className="field__hint">CLI 执行指令，留空默认 {p.dispatchMode === 'codex-cli' ? '"codex"' : '"claude"'}</span>
             </label>
             <label className="field">
               <span className="field__label">CLI 权限模式</span>
@@ -67,7 +79,11 @@ export function ModelSettingsTab(p: Props) {
                   { value: 'readonly', label: '受限只读（仅检索类工具）' },
                 ]}
               />
-              <span className="field__hint">全自动下 CLI 可直接改文件、执行命令；受限只读仅允许检索/浏览类工具，更安全但能力受限</span>
+              <span className="field__hint">
+                {p.dispatchMode === 'codex-cli'
+                  ? '全自动 = workspace-write 沙箱（可改工作区文件、执行命令）；受限只读 = read-only 沙箱（只能读）'
+                  : '全自动下 CLI 可直接改文件、执行命令；受限只读仅允许检索/浏览类工具，更安全但能力受限'}
+              </span>
             </label>
           </>
         )}
@@ -75,15 +91,22 @@ export function ModelSettingsTab(p: Props) {
           <span className="field__label">主对话工具循环轮数上限</span>
           <input className="field__input" type="number" min={4} max={500} step={1}
             value={p.maxTurns} onChange={(e) => p.setMaxTurns(e.target.value)}
-            placeholder="默认 60" aria-label="主对话工具循环轮数上限" />
-          <span className="field__hint">AI 自主持续执行的单次轮数上限（API/CLI 通用），到顶即收口防失控；长程任务可调大，清空恢复默认 60</span>
+            placeholder="留空不限制" aria-label="主对话工具循环轮数上限" />
+          <span className="field__hint">AI 自主持续执行的单次轮数上限（API/CLI 通用）；留空 = 不限制，长程任务不设轮界</span>
         </label>
         <label className="field">
           <span className="field__label">子 agent 工具循环轮数上限</span>
           <input className="field__input" type="number" min={2} max={200} step={1}
             value={p.subagentMaxTurns} onChange={(e) => p.setSubagentMaxTurns(e.target.value)}
-            placeholder="默认 20" aria-label="子 agent 工具循环轮数上限" />
-          <span className="field__hint">每个派发子任务的独立执行轮数（子任务聚焦语义，缺省保守）；清空恢复默认 20</span>
+            placeholder="留空不限制" aria-label="子 agent 工具循环轮数上限" />
+          <span className="field__hint">每个派发子任务的独立执行轮数；留空 = 不限制</span>
+        </label>
+        <label className="field">
+          <span className="field__label">单轮补全超时（分钟，仅 CLI 档）</span>
+          <input className="field__input" type="number" min={1} max={720} step={1}
+            value={p.requestTimeoutMin} onChange={(e) => p.setRequestTimeoutMin(e.target.value)}
+            placeholder="留空不限制" aria-label="单轮补全超时分钟数" />
+          <span className="field__hint">单次模型调用超过该时长将被中止；留空 = 不限制，30 分钟长程任务也能跑完</span>
         </label>
 
         {p.dispatchMode === 'api' && (

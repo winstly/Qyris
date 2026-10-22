@@ -118,7 +118,8 @@ const TOOL_KERNEL: Record<string, ToolKernel> = {
   run_once: 'shell',
 }
 
-function classifyKernel(rawName: string): ToolKernel {
+/** 工具名 → 卡片色系 kind（mcp/skill/tool/cmd/shell）：主对话与子 agent 转录共用一套配色口径 */
+export function classifyKernel(rawName: string): ToolKernel {
   const name = stripMcpPrefix(rawName)
   if (TOOL_KERNEL[name]) return TOOL_KERNEL[name]
   if (rawName.startsWith('mcp__') || /mcp/i.test(rawName)) return 'mcp'

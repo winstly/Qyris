@@ -30,16 +30,20 @@ export interface AiSettings {
   /** 主模型：规划 + 复杂任务 + 兜底；CLI 模式下透传为 claude --model */
   model: string
   provider: 'openai' | 'anthropic'
-  /** 调度模型方式：api=HTTP 直连；claude-cli=本机 Claude Code CLI 自主 agent */
-  dispatchMode: 'api' | 'claude-cli'
+  /** 调度模型方式：api=HTTP 直连；claude-cli/codex-cli=本机 CLI 自主 agent */
+  dispatchMode: 'api' | 'claude-cli' | 'codex-cli'
   /** CLI 权限模式：auto=跳过权限确认；readonly=只读工具白名单 */
   cliPermission: 'auto' | 'readonly'
   /** CLI 可执行文件名/路径（缺省 'claude'） */
   cliCommand?: string | null
-  /** 主对话工具循环轮数上限（API/CLI 通用）；null=缺省 60 */
+  /** Codex CLI 可执行文件名/路径（缺省 'codex'，codex-cli 档专用） */
+  codexCommand?: string | null
+  /** 主对话工具循环轮数上限（API/CLI 通用）；null=不限制（长程任务不设轮界） */
   maxTurns?: number | null
-  /** 子 agent 单任务工具循环轮数上限；null=缺省 20 */
+  /** 子 agent 单任务工具循环轮数上限；null=不限制 */
   subagentMaxTurns?: number | null
+  /** 单轮补全超时（分钟，CLI 档生效）；null=不限制（API 档无此限制） */
+  requestTimeoutMin?: number | null
   /** 可选档位模型 */
   tiers?: ModelTiers
 }

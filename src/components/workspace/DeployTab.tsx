@@ -17,6 +17,7 @@ import { EmptyState } from '@/components/common/EmptyState'
 import { Notice } from '@/components/common/Notice'
 import { Pager, usePaged, PAGE_SIZE } from '@/components/common/Pager'
 import { Select } from '@/components/common/Select'
+import { isCliAgentMode } from '../../../shared/ai-mode'
 import { DetailDialog, DetailChips } from '@/components/common/DetailDialog'
 import {
   IconClose, IconPencil, IconPlay, IconPlus, IconTrash,
@@ -67,7 +68,7 @@ export function DeployTab() {
    *  AI 在对话里判定部署方式（单机/微服务/集群）并给出各服务器的部署命令步骤。 */
   const deployViaChat = async (mode: 'all' | 'single', target?: DeployServer) => {
     if (!projectPath) return
-    const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
+    const cliMode = isCliAgentMode(useAppStore.getState().settings.dispatchMode)
     if (!hasApiKey && !cliMode) {
       toast.info('尚未配置 API Key', '点击左侧栏底部的设置图标，配置 Base URL 与 API Key 后即可使用 AI 部署。')
       return

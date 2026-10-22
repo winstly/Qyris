@@ -1,4 +1,5 @@
 import { useAppStore } from '@/store/useAppStore'
+import { isCliAgentMode } from '../../../shared/ai-mode'
 import { useChatStore, selectCurrentChat } from '@/store/useChatStore'
 
 interface Props {
@@ -15,7 +16,7 @@ export function ErrorDetail(p: Props) {
   const onFix = () => {
     const chat = selectCurrentChat(useChatStore.getState())
     if (chat.status !== 'idle' && chat.status !== 'error') return
-    const cliMode = useAppStore.getState().settings.dispatchMode === 'claude-cli'
+    const cliMode = isCliAgentMode(useAppStore.getState().settings.dispatchMode)
     const fixHint = cliMode
       ? ' 诊断后如果需要修改启动命令，在回复最后一行用 [[START_COMMANDS: [{"name":"portal","run":"npm run dev"}]]] 格式提交修正后的完整启动命令清单。'
       : ' 诊断后如果需要修改启动命令，必须调用 update_start_command 更新该服务的启动命令。'

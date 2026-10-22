@@ -507,7 +507,7 @@ function registerIpc(): void {
         throw err
       },
     ))
-  handle('ai_test_connection', (_e, p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode, p.cliCommand))
+  handle('ai_test_connection', (_e, p) => ai.aiTestConnection(p.provider, p.baseUrl, p.model, p.dispatchMode, p.cliCommand, p.codexCommand))
   handle('ai_cancel', (_e, p) => ai.aiCancel(p.requestId))
 
   // 跨窗口项目同步：发起窗口 send → 主进程广播给其余窗口
@@ -821,6 +821,20 @@ function createWindow(): void {
   } else {
     void win.loadFile(fileUrl)
   }
+}
+
+// 单实例锁：CLI 壳 env 断裂等场景误启动第二个应用实例时（GUI 弹新窗、消息死等），
+// 后启动的直接退出，不走 whenReady
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => {
+    const [win] = BrowserWindow.getAllWindows()
+    if (win) {
+      if (win.isMinimized()) win.restore()
+      win.focus()
+    }
+  })
 }
 
 app.whenReady().then(async () => {

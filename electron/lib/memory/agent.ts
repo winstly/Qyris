@@ -32,6 +32,7 @@ import type { MemoryLastTidy } from '../../../shared/ipc-types'
 import { openHostToolProxy, type HostToolProxyEndpoint } from '../mcp/proxy'
 import { executeTool, toolsForPermission } from '../tools'
 import { emitToAllWindows } from '../emitter'
+import { isCliAgentMode } from '../../../shared/ai-mode'
 import * as service from './service'
 
 // ---------- 纪律条款（memU 移植） ----------
@@ -651,7 +652,7 @@ async function resolveModelProvider(projectRoot: string): Promise<DistillProvide
   const dispatchMode = cfg.aiDispatchMode ?? 'api'
   let hostProxy: HostToolProxyEndpoint | null = null
   try {
-    if (dispatchMode === 'claude-cli') {
+    if (isCliAgentMode(dispatchMode)) {
       hostProxy = await openHostToolProxy((name, input) => {
         if (!DISTILL_TOOLS.includes(name)) {
           return Promise.resolve({ content: `蒸馏工具面不含 ${name}`, isError: true })

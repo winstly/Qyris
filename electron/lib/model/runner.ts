@@ -100,8 +100,8 @@ interface RunnerOptions {
   store: ConversationStore
   /** 会话权限档：只放行「工具所需档位 ≤ 会话档位」的调用 */
   permission: ToolPermission
-  /** 防跑飞上限（turn 数）；缺省 DEFAULT_MAX_TURNS */
-  maxTurns?: number
+  /** 防跑飞上限（turn 数）；null = 不限制 */
+  maxTurns?: number | null
   signal?: AbortSignal
   onEvent?: (e: RunnerEvent) => void
   /**
@@ -129,9 +129,6 @@ const summarizeCache = new WeakMap<ConversationStore, { messageCount: number }>(
 
 /** 与 useChatStore.compressCache 同口径：新增消息 <5 条视为窗口自然滚动，不重蒸摘要 */
 const RESUMMARIZE_SLACK = 5
-
-/** 一次完整 run 的 turn 上限缺省（一个 turn = 一次 complete + 其工具批）；防跑飞，调用方可覆盖 */
-const DEFAULT_MAX_TURNS = 20
 
 /** 降级路径解析失败的带反馈重试次数（首答 + 2 重试 = 3 次调用，同 memory/agent.ts 口径） */
 const MAX_PARSE_RETRIES = 2
@@ -756,7 +753,7 @@ export async function runAgent(input: string, opts: RunnerOptions): Promise<Mess
   const maxTurns =
     opts.maxTurns != null && Number.isFinite(opts.maxTurns) && opts.maxTurns > 0
       ? Math.floor(opts.maxTurns)
-      : DEFAULT_MAX_TURNS
+      : Number.MAX_SAFE_INTEGER // null = 不限制（长程任务不设轮界；上限语义由配置显式给值时才生效）
   const signal = opts.signal
   const projectRoot = opts.projectRoot ?? null
   const maxContextTokens =
@@ -1211,7 +1208,7 @@ export async function runAgent(input: string, opts: RunnerOptions): Promise<Mess
             raw += ev.text
             break
           case 'reasoning-delta':
-            // 降级通道（codex/opencode）capabilities.thinking=false，正常不会来；来了就透传，不进正文
+            // codex（app-server）thinking=true 会正常来；opencode 等 thinking=false 通道不会来。透传，不进正文
             emit({ type: 'reasoning-delta', text: ev.text })
             break
           case 'tool-executed':

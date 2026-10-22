@@ -5,6 +5,7 @@ import { errorMessage } from './util'
 import { storageDir } from './storage'
 import type { McpServerEntry } from './mcp/client'
 import { Emitter } from '../../shared/base/event'
+import { isCliAgentMode } from '../../shared/ai-mode'
 import type { IDisposable } from '../../shared/base/lifecycle'
 
 /** 配置类型簇（AppConfig / RecentProject / StartCommand / DeployServer）：
@@ -52,6 +53,13 @@ function clampSubagentMaxTurns(v: unknown): number | null {
   if (typeof v !== 'number' || !Number.isFinite(v)) return null
   const n = Math.floor(v)
   return n >= 2 ? Math.min(200, n) : null
+}
+
+/** 单轮补全超时归一（分钟）：合法区间 1..720，非法回 null（=不限制） */
+function clampRequestTimeoutMin(v: unknown): number | null {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  const n = Math.floor(v)
+  return n >= 1 ? Math.min(720, n) : null
 }
 
 /** 内存缓存：getConfig 被热路径频繁调用（memorySearch / embed / memAgent），避免每次读磁盘+JSON.parse */
@@ -185,11 +193,13 @@ export async function getConfig(): Promise<AppConfig> {
         parsed.aiTiers && typeof parsed.aiTiers === 'object' && !Array.isArray(parsed.aiTiers)
           ? parsed.aiTiers
           : undefined,
-      aiDispatchMode: parsed.aiDispatchMode === 'claude-cli' ? 'claude-cli' : 'api',
+      aiDispatchMode: isCliAgentMode(parsed.aiDispatchMode) ? parsed.aiDispatchMode : 'api',
       aiCliPermission: parsed.aiCliPermission === 'readonly' ? 'readonly' : 'auto',
       aiCliCommand: typeof parsed.aiCliCommand === 'string' && parsed.aiCliCommand.trim() ? parsed.aiCliCommand.trim() : null,
+      aiCodexCommand: typeof parsed.aiCodexCommand === 'string' && parsed.aiCodexCommand.trim() ? parsed.aiCodexCommand.trim() : null,
       aiMaxTurns: clampMaxTurns(parsed.aiMaxTurns),
       aiSubagentMaxTurns: clampSubagentMaxTurns(parsed.aiSubagentMaxTurns),
+      aiRequestTimeoutMin: clampRequestTimeoutMin(parsed.aiRequestTimeoutMin),
       recentProjects: Array.isArray(parsed.recentProjects) ? parsed.recentProjects : [],
       skillsDirs: mergeSkillDirs(parsed.skillsDirs, parsed.skillsDir),
       // 旧字段原样透传：渲染层启动迁移（并入 skillsDirs 后写 null 清空）依赖读到它
@@ -244,7 +254,7 @@ export async function getConfig(): Promise<AppConfig> {
     const fallback: AppConfig = {
       lastProjectPath: null, aiBaseUrl: null, aiModel: null, aiProvider: null,
       aiTiers: undefined,
-      aiDispatchMode: 'api', aiCliPermission: 'auto', aiCliCommand: null, aiMaxTurns: null, aiSubagentMaxTurns: null,
+      aiDispatchMode: 'api', aiCliPermission: 'auto', aiCliCommand: null, aiCodexCommand: null, aiMaxTurns: null, aiSubagentMaxTurns: null, aiRequestTimeoutMin: null,
       recentProjects: [], skillsDirs: [], skillsDir: null,
       startupCommands: undefined, projectSkillsDirsMap: undefined,
       dataDir: null, embedModel: null, embedRemoteHost: null,

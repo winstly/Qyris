@@ -241,7 +241,7 @@ const GREP_MAX_FILE_BYTES = 512 * 1024 // 单文件读入上限（超过跳过�
  *  excludeGlobs 排除指定后缀的文件（如 '*.log'）；有界遍历（命中/访问双重上限），主进程一次 IPC 完成查询。 */
 export async function grepFiles(
   projectRoot: string, pattern: string,
-  opts?: { glob?: string; excludeGlobs?: string[]; maxResults?: number; caseSensitive?: boolean; literal?: boolean },
+  opts?: { glob?: string; globs?: string[]; excludeGlobs?: string[]; maxResults?: number; caseSensitive?: boolean; literal?: boolean },
 ): Promise<GrepResult> {
   const root = await ensureInside(projectRoot, projectRoot)
   const maxResults = Math.min(Math.max(opts?.maxResults ?? GREP_MAX_MATCHES, 1), 500)
@@ -259,6 +259,11 @@ export async function grepFiles(
     }
   }
   const globLower = opts?.glob?.toLowerCase() ?? null
+  // 仅搜后缀：与排除同口径归一化（剥通配符前缀、补点、小写）；非空时只搜命中尾缀的文件
+  const includes = (opts?.globs ?? [])
+    .map((g) => g.trim().toLowerCase().replace(/^\*\./, '').replace(/^\*/, ''))
+    .filter(Boolean)
+    .map((g) => (g.startsWith('.') ? g : `.${g}`))
   // 排除后缀归一化：剥通配符前缀、补点、小写（'*.log'/'log' 都归一为 '.log'），按全路径后缀匹配
   const excludes = (opts?.excludeGlobs ?? [])
     .map((g) => g.trim().toLowerCase().replace(/^\*\./, '').replace(/^\*/, ''))
@@ -274,6 +279,7 @@ export async function grepFiles(
     if (truncated) return
     if (globLower && !abs.toLowerCase().endsWith(globLower.replace(/^\*/, ''))) return
     const absLower = abs.toLowerCase()
+    if (includes.length > 0 && !includes.some((ext) => absLower.endsWith(ext))) return
     if (excludes.some((ext) => absLower.endsWith(ext))) return
     let stat: Stats
     try {

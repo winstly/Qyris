@@ -52,10 +52,10 @@
 import { activeMcpServers, getConfig, isMcpEnabled, type AppConfig } from './config'
 import { CONTEXT_SUMMARY_HEADING, CONTEXT_SUMMARY_PREFIX, MEMORY_BLOCK_PREFIX, SESSION_SUMMARY_HEADING } from '../../shared/prompt-contract'
 import type { MemoryOrigin } from '../../shared/ipc-types'
+import { isCliAgentMode } from '../../shared/ai-mode'
 import { mainLog } from './log-file'
 import { testApiConnection } from './ai-api'
 import {
-  buildSkillIndex,
   cliCancel,
   extractSkillIds,
   extractStartCommands,
@@ -87,9 +87,6 @@ import type { AiCompletion, AiToolCall } from '../../shared/ipc-types'
 export type { AiCompletion}
 // ---------- 执行参数 ----------
 
-/** 主对话工具循环轮数缺省：API/CLI 通用（CLI 落为 --max-turns、API 为 runner 轮界）；设置 aiMaxTurns 可调 */
-const MAX_TURNS = 60
-
 /** CLI 通道上下文预算（token，4 字符/token 折算）：超预算走 runner 的「窗口 + 摘要（失败降级纯切片）」，
  *  不静默掐头留尾。API 通道不设预算（全量透传，模型上下文由所选模型自己兜，超限报错可见）。 */
 const CLI_CONTEXT_TOKENS = 40_000
@@ -109,9 +106,10 @@ export function aiCancel(requestId: string): void {
 
 export async function aiTestConnection(
   provider: string, baseUrl: string, model: string, dispatchMode: string = 'api',
-  cliCommand?: string,
+  cliCommand?: string, codexCommand?: string,
 ): Promise<string> {
   if (dispatchMode === 'claude-cli') return testCliConnection(cliCommand)
+  if (dispatchMode === 'codex-cli') return testCliConnection(codexCommand, 'codex')
   return testApiConnection(provider, baseUrl, model)
 }
 
@@ -163,7 +161,7 @@ export async function aiChatStream(
   let providerHandle: ModelProvider | null = null
   try {
     // 代行通道在 try 内建：executor 闭包要引用下方 try 块内的 emit（cli-ask 事件出口）
-    if (dispatchMode === 'claude-cli' && wantTools) {
+    if (isCliAgentMode(dispatchMode) && wantTools) {
       hostProxy = await openHostToolProxy((name, input) => {
         // 交互提问：主进程挂起等渲染层回填（tools/ask-bridge.ts），MCP 往返原地等答案；
         // 不走 executeTool——ask.ts 的 execute 是延迟语义的响亮报错哨兵
@@ -308,8 +306,8 @@ export async function aiChatStream(
       tools: wantTools ? toolsForPermission(permission, projectRoot) : [],
       store,
       permission,
-      maxTurns: cfg?.aiMaxTurns ?? MAX_TURNS,
-      ...(dispatchMode === 'claude-cli' ? { maxContextTokens: CLI_CONTEXT_TOKENS } : {}),
+      maxTurns: cfg?.aiMaxTurns ?? null,
+      ...(isCliAgentMode(dispatchMode) ? { maxContextTokens: CLI_CONTEXT_TOKENS } : {}),
       signal: controller.signal,
       projectRoot,
       toolOrigin,
@@ -518,12 +516,10 @@ async function seedConversation(
     // 只扫 history 会漏掉「本轮刚触发的 Skill」——那正是最需要内联的一次
     const skillDirs = collectSkillDirs(projectRoot, cfg)
     const referenced = extractSkillIds(wire)
-    const [skillBlock, skillIndex] = await Promise.all([
-      resolveSkillBlock(skillDirs, referenced),
-      buildSkillIndex(skillDirs, referenced),
-    ])
+    // 只内联历史引用的 skill 全文；可用索引不再在此注入——渲染层 system 清单已带
+    // （含触发词，信息更全），双份索引曾把 system 撑到 11 万字
+    const skillBlock = await resolveSkillBlock(skillDirs, referenced)
     if (skillBlock) parts.push(skillBlock)
-    if (skillIndex) parts.push(skillIndex)
     // 外部 MCP 现状兜底：本域配了启用 server 但工具面暂无 mcp__ 工具时，按连接池真实状态
     // 分两态说明——「知晓」不冒充「可用」，不编造工具（可达面原则不破）
     {

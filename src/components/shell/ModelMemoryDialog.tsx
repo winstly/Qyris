@@ -9,7 +9,7 @@ import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { useAppStore } from '@/store/useAppStore'
 import { api } from '@/services/desktop'
 import { SECRET_KEY } from '@/services/ai'
-import type { ModelTiers } from '@/types'
+import type { AiSettings, ModelTiers } from '@/types'
 import { IconClose } from '@/components/common/icons'
 import { TabStrip } from '@/components/common/TabStrip'
 import { ModelSettingsTab } from './ModelSettingsTab'
@@ -29,11 +29,13 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
   const [baseUrl, setBaseUrl] = useState(settings.baseUrl)
   const [model, setModel] = useState(settings.model)
   const [provider, setProvider] = useState<'openai' | 'anthropic'>(settings.provider)
-  const [dispatchMode, setDispatchMode] = useState<'api' | 'claude-cli'>(settings.dispatchMode)
+  const [dispatchMode, setDispatchMode] = useState<AiSettings['dispatchMode']>(settings.dispatchMode)
   const [cliPermission, setCliPermission] = useState<'auto' | 'readonly'>(settings.cliPermission)
   const [cliCommand, setCliCommand] = useState(settings.cliCommand ?? '')
+  const [codexCommand, setCodexCommand] = useState(settings.codexCommand ?? '')
   const [maxTurns, setMaxTurns] = useState(settings.maxTurns != null ? String(settings.maxTurns) : '')
   const [subagentMaxTurns, setSubagentMaxTurns] = useState(settings.subagentMaxTurns != null ? String(settings.subagentMaxTurns) : '')
+  const [requestTimeoutMin, setRequestTimeoutMin] = useState(settings.requestTimeoutMin != null ? String(settings.requestTimeoutMin) : '')
   const [tiers, setTiers] = useState<ModelTiers>(settings.tiers ?? {})
   const [apiKeyInput, setApiKeyInput] = useState('')
   const [testing, setTesting] = useState(false)
@@ -58,8 +60,10 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
     setDispatchMode(settings.dispatchMode)
     setCliPermission(settings.cliPermission)
     setCliCommand(settings.cliCommand ?? '')
+    setCodexCommand(settings.codexCommand ?? '')
     setMaxTurns(settings.maxTurns != null ? String(settings.maxTurns) : '')
     setSubagentMaxTurns(settings.subagentMaxTurns != null ? String(settings.subagentMaxTurns) : '')
+    setRequestTimeoutMin(settings.requestTimeoutMin != null ? String(settings.requestTimeoutMin) : '')
     setTiers(settings.tiers ?? {})
     setApiKeyInput('')
     setTestResult(null)
@@ -103,8 +107,10 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
     await saveSettings({
       baseUrl: baseUrl.trim(), model: model.trim(), provider, dispatchMode, cliPermission,
       cliCommand: cliCommand.trim() || null,
+      codexCommand: codexCommand.trim() || null,
       maxTurns: clampIntInput(maxTurns, 4, 500),
       subagentMaxTurns: clampIntInput(subagentMaxTurns, 2, 200),
+      requestTimeoutMin: clampIntInput(requestTimeoutMin, 1, 720),
       tiers: Object.keys(cleanTiers).length ? cleanTiers : undefined,
     })
     // 记忆字段未加载时不写回：空串是「还没读到」不是「清空」
@@ -133,8 +139,8 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
     setTestResult(null)
     try {
       if (apiKeyInput.trim()) await api.setSecret(SECRET_KEY, apiKeyInput.trim())
-      // 透传未保存的临时 cliCommand：未保存就测连接时测的是面板现值，不是已存旧值
-      const msg = await api.aiTestConnection(provider, baseUrl.trim(), model.trim(), dispatchMode, cliCommand.trim() || undefined)
+      // 透传未保存的临时 cliCommand/codexCommand：未保存就测连接时测的是面板现值，不是已存旧值
+      const msg = await api.aiTestConnection(provider, baseUrl.trim(), model.trim(), dispatchMode, cliCommand.trim() || undefined, codexCommand.trim() || undefined)
       setTestResult({ ok: true, text: msg })
     } catch (e) {
       setTestResult({ ok: false, text: String(e) })
@@ -168,8 +174,10 @@ export function ModelMemoryDialog({ open, onClose }: Props) {
             dispatchMode={dispatchMode} setDispatchMode={setDispatchMode}
             cliPermission={cliPermission} setCliPermission={setCliPermission}
             cliCommand={cliCommand} setCliCommand={setCliCommand}
+            codexCommand={codexCommand} setCodexCommand={setCodexCommand}
             maxTurns={maxTurns} setMaxTurns={setMaxTurns}
             subagentMaxTurns={subagentMaxTurns} setSubagentMaxTurns={setSubagentMaxTurns}
+            requestTimeoutMin={requestTimeoutMin} setRequestTimeoutMin={setRequestTimeoutMin}
             provider={provider} setProvider={setProvider}
             baseUrl={baseUrl} setBaseUrl={setBaseUrl}
             apiKeyInput={apiKeyInput} setApiKeyInput={setApiKeyInput}

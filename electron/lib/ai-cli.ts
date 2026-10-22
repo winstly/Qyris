@@ -271,7 +271,11 @@ export async function buildSkillIndex(dirs: string[], excludeIds: string[]): Pro
 /** 异步执行 CLI 探测命令。
  *  自定义命令前置 detectCommand 预检——路径写错时给出可读提示，不让裸的 spawn ENOENT 落到用户面前。 */
 async function runCli(args: string[], timeoutMs = 10_000): Promise<{ status: number | null; stdout: string; stderr: string; error: string | null }> {
-  const cliCmd = cachedCliCommand
+  return runCliFor(cachedCliCommand, args, timeoutMs)
+}
+
+/** 显式命令版 runCli：codex 等方言探测用（不走 claude 的缓存命令） */
+async function runCliFor(cliCmd: string, args: string[], timeoutMs = 10_000): Promise<{ status: number | null; stdout: string; stderr: string; error: string | null }> {
   const avail = await detectCommand(cliCmd)
   if (avail === false) {
     const msg = cliCmd === DEFAULT_CLI_COMMAND
@@ -321,27 +325,30 @@ async function runCli(args: string[], timeoutMs = 10_000): Promise<{ status: num
   })
 }
 
-export async function testCliConnection(cliCommand?: string): Promise<string> {
+export async function testCliConnection(cliCommand?: string, dialect: 'claude' | 'codex' = 'claude'): Promise<string> {
+  const isCodex = dialect === 'codex'
+  const brand = isCodex ? 'Codex CLI' : 'Claude CLI'
   // 优先透传值：设置面板「未保存就测连接」时必须测面板里的临时值——
   // 读已存旧值会把旧命令（如 claude）当「通」误报，用户保存后被坑
-  const cmd = cliCommand?.trim() || (await resolveCliCommand())
-  cachedCliCommand = cmd
+  const cmd = cliCommand?.trim() || (isCodex ? 'codex' : await resolveCliCommand())
+  if (!isCodex) cachedCliCommand = cmd // codex 探测不污染 claude 运行时缓存
   // 可用性预检对默认/自定义命令一视同仁：自定义路径写错此前直接落进 spawn，
   // 报出来的是裸的 spawn ENOENT / cmd 引号错误，用户没法读
   // detectCommand 返回 null（超时/探测异常）视为不可用，不让裸的 spawn ENOENT 落到用户面前
   if ((await detectCommand(cmd)) !== true) {
-    if (cmd === DEFAULT_CLI_COMMAND) throw new Error(NOT_INSTALLED_MSG)
+    if (!isCodex && cmd === DEFAULT_CLI_COMMAND) throw new Error(NOT_INSTALLED_MSG)
+    if (isCodex) throw new Error(`未找到 codex 命令：请先安装 Codex CLI（npm install -g @openai/codex）并完成登录后重试`)
     throw new Error(`未找到 CLI 命令「${cmd}」：请检查设置中的 Claude CLI 自定义命令（支持含空格的引号路径与附带参数）`)
   }
-  const version = await runCli(['--version'])
-  if (version.error) throw new Error(`claude 命令执行失败：${version.error}`)
+  const version = isCodex ? await runCliFor(cmd, ['--version']) : await runCli(['--version'])
+  if (version.error) throw new Error(`${brand} 命令执行失败：${version.error}`)
   const versionText = version.stdout.trim().split('\n')[0] || '版本未知'
 
-  const auth = await runCli(['auth', 'status'])
-  if (auth.status === 0) return `Claude CLI 就绪 · ${versionText} · 已登录`
+  const auth = isCodex ? await runCliFor(cmd, ['login', 'status']) : await runCli(['auth', 'status'])
+  if (auth.status === 0) return `${brand} 就绪 · ${versionText} · 已登录`
   const combined = `${auth.stderr}\n${auth.stdout}`
   if (/unknown|unrecognized|invalid/i.test(combined)) {
-    return `Claude CLI 已安装 · ${versionText}（登录状态未知，直接对话验证）`
+    return `${brand} 已安装 · ${versionText}（登录状态未知，直接对话验证）`
   }
-  return `Claude CLI 已安装 · ${versionText}，但未检测到登录：请在终端运行 claude 完成登录`
+  return `${brand} 已安装 · ${versionText}，但未检测到登录：请在终端运行 ${isCodex ? 'codex login' : 'claude'} 完成登录`
 }

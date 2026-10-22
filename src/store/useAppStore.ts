@@ -103,6 +103,10 @@ interface AppState {
   searchPanelRatio: number
   /** 全局搜索排除的文件后缀（归一化带点，如 '.log'；chips 编辑，持久化） */
   searchExclude: string[]
+  /** 全局搜索仅搜的文件后缀（归一化带点，如 '.ts'；空 = 搜全部；chips 编辑，持久化） */
+  searchInclude: string[]
+  /** 对话输入框拖拽后的最大高度 px（96–480，双击 grip 重置；持久化） */
+  chatInputMaxH: number
 
   projectPath: string | null
   projectName: string
@@ -153,6 +157,8 @@ interface AppState {
   setGitPanelRatio: (r: number) => void
   setSearchPanelRatio: (r: number) => void
   setSearchExclude: (list: string[]) => void
+  setSearchInclude: (list: string[]) => void
+  setChatInputMaxH: (h: number) => void
   setGitPanelOpen: (open: boolean) => void
   setSettingsOpen: (open: boolean) => void
   setModelCfgOpen: (open: boolean) => void
@@ -217,6 +223,8 @@ export const useAppStore = create<AppState>()(
       gitPanelOpen: false,
       searchPanelRatio: 0.35,
       searchExclude: [],
+      searchInclude: [],
+      chatInputMaxH: 160,
       projectPath: null,
       projectName: '',
       settingsOpen: false,
@@ -255,6 +263,8 @@ export const useAppStore = create<AppState>()(
         searchPanelRatio: Math.min(0.75, Math.max(0.15, Math.min(r, 1 - (s.gitPanelOpen ? s.gitPanelRatio : 0)))),
       })),
       setSearchExclude: (list) => set({ searchExclude: list }),
+      setSearchInclude: (list) => set({ searchInclude: list }),
+      setChatInputMaxH: (h) => set({ chatInputMaxH: Math.min(480, Math.max(96, Math.round(h))) }),
       setGitPanelOpen: (open) => set({ gitPanelOpen: open, ...(open ? { searchOpen: false } : {}) }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
       setModelCfgOpen: (open) => set({ modelCfgOpen: open }),
@@ -274,8 +284,9 @@ export const useAppStore = create<AppState>()(
         try {
           await api.mergeConfig({
             aiBaseUrl: s.baseUrl, aiModel: s.model, aiProvider: s.provider, aiTiers: s.tiers,
-            aiDispatchMode: s.dispatchMode, aiCliPermission: s.cliPermission, aiCliCommand: s.cliCommand ?? null,
+            aiDispatchMode: s.dispatchMode, aiCliPermission: s.cliPermission, aiCliCommand: s.cliCommand ?? null, aiCodexCommand: s.codexCommand ?? null,
             aiMaxTurns: s.maxTurns ?? null, aiSubagentMaxTurns: s.subagentMaxTurns ?? null,
+            aiRequestTimeoutMin: s.requestTimeoutMin ?? null,
           })
         } catch { /* 配置盘写失败不阻塞界面 */ }
       },
@@ -299,8 +310,10 @@ export const useAppStore = create<AppState>()(
             dispatchMode: cfg.aiDispatchMode ?? DEFAULT_SETTINGS.dispatchMode,
             cliPermission: cfg.aiCliPermission ?? DEFAULT_SETTINGS.cliPermission,
             cliCommand: cfg.aiCliCommand ?? null,
+            codexCommand: cfg.aiCodexCommand ?? null,
             maxTurns: cfg.aiMaxTurns ?? null,
             subagentMaxTurns: cfg.aiSubagentMaxTurns ?? null,
+            requestTimeoutMin: cfg.aiRequestTimeoutMin ?? null,
             tiers: cfg.aiTiers,
           }
           const scm = cfg.startupCommands ?? {}
@@ -705,6 +718,8 @@ export const useAppStore = create<AppState>()(
         gitPanelRatio: s.gitPanelRatio,
         searchPanelRatio: s.searchPanelRatio,
         searchExclude: s.searchExclude,
+        searchInclude: s.searchInclude,
+        chatInputMaxH: s.chatInputMaxH,
         theme: s.theme,
         chatPanelCollapsed: s.chatPanelCollapsed,
         fileTreeCollapsed: s.fileTreeCollapsed,

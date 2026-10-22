@@ -58,12 +58,16 @@ export function SearchPanel() {
   const searchPanelRatio = useAppStore((s) => s.searchPanelRatio)
   const searchExclude = useAppStore((s) => s.searchExclude)
   const setSearchExclude = useAppStore((s) => s.setSearchExclude)
+  const searchInclude = useAppStore((s) => s.searchInclude)
+  const setSearchInclude = useAppStore((s) => s.setSearchInclude)
 
   const [query, setQuery] = useState('')
   const [caseSensitive, setCaseSensitive] = useState(false)
   const [useRegex, setUseRegex] = useState(false)
   const [showExclude, setShowExclude] = useState(false)
   const [exclDraft, setExclDraft] = useState('')
+  const [showInclude, setShowInclude] = useState(false)
+  const [incDraft, setIncDraft] = useState('')
   const [searching, setSearching] = useState(false)
   const [fileMatches, setFileMatches] = useState<FileMatch[]>([])
   const [totalMatches, setTotalMatches] = useState(0)
@@ -90,8 +94,8 @@ export function SearchPanel() {
     if (searchOpen) requestAnimationFrame(() => inputRef.current?.focus())
   }, [searchOpen])
 
-  // 执行搜索
-  const doSearch = useCallback(async () => {
+  // 执行搜索：excludeOverride 供排除列表刚变更时透传新值（setState 异步，闭包 state 滞后一拍）
+  const doSearch = useCallback(async (excludeOverride?: string[], includeOverride?: string[]) => {
     const q = query.trim()
     if (!q || !rootPath) {
       setFileMatches([])
@@ -106,7 +110,8 @@ export function SearchPanel() {
     try {
       const result = await api.grepFiles(rootPath, q, {
         caseSensitive,
-        excludeGlobs: searchExclude,
+        globs: includeOverride ?? searchInclude,
+        excludeGlobs: excludeOverride ?? searchExclude,
         literal: !useRegex,
         maxResults: 500,
       })
@@ -129,19 +134,35 @@ export function SearchPanel() {
     } finally {
       if (seq === seqRef.current) setSearching(false)
     }
-  }, [query, caseSensitive, useRegex, searchExclude, rootPath])
+  }, [query, caseSensitive, useRegex, searchExclude, searchInclude, rootPath])
 
-  /** 排除后缀提交：与后端同口径归一化（剥 *. 前缀、补点、小写）+ 去重；逗号分隔可批量 */
-  const commitExclude = () => {
+  /** 排除后缀提交：与后端同口径归一化（剥 *. 前缀、补点、小写）+ 去重；逗号分隔可批量。
+   *  返回新列表供调用方立刻触发搜索（setState 异步，doSearch 闭包拿不到最新值） */
+  const commitExclude = (): string[] => {
     const parts = exclDraft.split(/[,，]/).map((g) => g.trim().toLowerCase().replace(/^\*\./, '').replace(/^\*/, '')).filter(Boolean)
     setExclDraft('')
-    if (parts.length === 0) return
+    if (parts.length === 0) return searchExclude // 原引用透传：调用方据引用相等跳过无谓重搜
     const next = [...searchExclude]
     for (const g of parts) {
       const ext = g.startsWith('.') ? g : `.${g}`
       if (!next.includes(ext)) next.push(ext)
     }
     setSearchExclude(next)
+    return next
+  }
+
+  /** 仅搜后缀提交：与排除同口径归一化 + 去重；返回新列表供调用方立刻触发搜索 */
+  const commitInclude = (): string[] => {
+    const parts = incDraft.split(/[,，]/).map((g) => g.trim().toLowerCase().replace(/^\*\./, '').replace(/^\*/, '')).filter(Boolean)
+    setIncDraft('')
+    if (parts.length === 0) return searchInclude
+    const next = [...searchInclude]
+    for (const g of parts) {
+      const ext = g.startsWith('.') ? g : `.${g}`
+      if (!next.includes(ext)) next.push(ext)
+    }
+    setSearchInclude(next)
+    return next
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -242,7 +263,61 @@ export function SearchPanel() {
               aria-expanded={showExclude}
               title={searchExclude.length > 0 ? `已生效排除：${searchExclude.join(' ')}` : '排除指定后缀的文件（如 log、tmp）'}
             >{searchExclude.length > 0 ? `排除·${searchExclude.length}` : '排除'}</button>
+            <button
+              className={`search-panel__opt-btn search-panel__opt-btn--wide ${showInclude ? 'search-panel__opt-btn--active' : ''}`}
+              onClick={() => setShowInclude((v) => !v)}
+              aria-pressed={showInclude}
+              aria-expanded={showInclude}
+              title={searchInclude.length > 0 ? `仅搜：${searchInclude.join(' ')}` : '仅搜指定后缀的文件（如 ts、md），空 = 搜全部'}
+            >{searchInclude.length > 0 ? `仅搜·${searchInclude.length}` : '仅搜'}</button>
           </div>
+
+          {/* 仅搜后缀标签：与排除同款交互（chips + 行尾内联输入）。仅搜非空时只搜命中尾缀的文件 */}
+          {showInclude && (
+            <div className="search-panel__excl-row">
+              {searchInclude.map((ext) => (
+                <span key={ext} className="search-panel__chip">
+                  {ext}
+                  <button
+                    className="search-panel__chip-x"
+                    onClick={() => {
+                      const next = searchInclude.filter((e) => e !== ext)
+                      setSearchInclude(next)
+                      if (query.trim()) void doSearch(undefined, next)
+                    }}
+                    aria-label={`移除仅搜后缀 ${ext}`}
+                    title="移除"
+                  >
+                    <IconClose size={9} />
+                  </button>
+                </span>
+              ))}
+              <input
+                className="search-panel__excl-input"
+                type="text"
+                placeholder={searchInclude.length > 0 ? '添加…' : '如 ts, md'}
+                value={incDraft}
+                onChange={(e) => setIncDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    const next = commitInclude()
+                    if (query.trim() && next !== searchInclude) void doSearch(undefined, next)
+                  }
+                  if (e.key === 'Backspace' && incDraft === '' && searchInclude.length > 0) {
+                    const next = searchInclude.slice(0, -1)
+                    setSearchInclude(next)
+                    if (query.trim()) void doSearch(undefined, next)
+                  }
+                  if (e.key === 'Escape') setShowInclude(false)
+                }}
+                onBlur={commitInclude}
+                spellCheck={false}
+                autoComplete="off"
+                aria-label="添加仅搜的文件后缀"
+              />
+            </div>
+          )}
 
           {/* 排除后缀标签：pill 展示已生效后缀（× 移除），行尾内联输入回车成标签；
               Backspace 空值删尾标签（标签编辑器惯例）。store 持久化 */}
@@ -268,9 +343,15 @@ export function SearchPanel() {
                 value={exclDraft}
                 onChange={(e) => setExclDraft(e.target.value)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') { e.preventDefault(); commitExclude() }
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    const next = commitExclude()
+                    if (query.trim() && next !== searchExclude) void doSearch(next)
+                  }
                   if (e.key === 'Backspace' && exclDraft === '' && searchExclude.length > 0) {
-                    setSearchExclude(searchExclude.slice(0, -1))
+                    const next = searchExclude.slice(0, -1)
+                    setSearchExclude(next)
+                    if (query.trim()) void doSearch(next)
                   }
                   if (e.key === 'Escape') setShowExclude(false)
                 }}

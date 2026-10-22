@@ -7,6 +7,7 @@ import { mergeSkills, skillLoadInstruction } from '@/utils/skillInstruction'
 import { IconSend, IconStop, IconClose } from '@/components/common/icons'
 import { useSlashCommand, SlashMenu } from './SlashMenu'
 import type { SkillMeta } from '@/types'
+import { isCliAgentMode } from '../../../shared/ai-mode'
 
 /** 多行输入：Enter 发送 / Shift+Enter 换行，自动增高；生成中可点「停止」。
  *  输入 "/" 触发 Skills 选择菜单；选中后作为上下文，用户继续写描述再发送。 */
@@ -30,7 +31,7 @@ export function ChatInput() {
   const busy = status === 'streaming' || status === 'tools' || status === 'awaiting-user' || status === 'retrying'
   const disabledHint = !isDesktop
     ? '需在桌面应用内运行（npm run dev）'
-    : dispatchMode !== 'claude-cli' && !hasApiKey
+    : !isCliAgentMode(dispatchMode) && !hasApiKey
       ? '请先在设置中配置 API Key'
       : undefined
 
@@ -38,11 +39,39 @@ export function ChatInput() {
   const allSkills = useMemo(() => mergeSkills(projectSkillMetas, skillMetas), [projectSkillMetas, skillMetas])
   const { slashOpen, setSlashOpen, setSlashFilter, slashIndex, setSlashIndex, hoverSlashIndex, filteredSkills, closeSlash } = useSlashCommand(allSkills)
 
+  /** 用户拖过 grip 后高度钉死（不随内容缩回）；双击 grip 重置回自适应 */
+  const draggedRef = useRef(false)
+
   const resize = () => {
     const ta = taRef.current
     if (!ta) return
+    const maxH = useAppStore.getState().chatInputMaxH
     ta.style.height = 'auto'
-    ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`
+    ta.style.height = `${draggedRef.current ? maxH : Math.min(ta.scrollHeight, maxH)}px`
+  }
+
+  /** 输入框顶部 grip 拖高：向上拖增高（96–480px，store 持久化），拖动中高度钉死，双击重置 */
+  const onGripDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = useAppStore.getState().chatInputMaxH
+    const target = e.currentTarget
+    target.setPointerCapture(e.pointerId)
+    const onMove = (ev: PointerEvent) => {
+      useAppStore.getState().setChatInputMaxH(startH - (ev.clientY - startY))
+      draggedRef.current = true
+      const ta = taRef.current
+      if (ta) ta.style.height = `${useAppStore.getState().chatInputMaxH}px`
+    }
+    const onUp = (ev: PointerEvent) => {
+      target.releasePointerCapture(ev.pointerId)
+      target.removeEventListener('pointermove', onMove)
+      target.removeEventListener('pointerup', onUp)
+      target.removeEventListener('pointercancel', onUp)
+    }
+    target.addEventListener('pointermove', onMove)
+    target.addEventListener('pointerup', onUp)
+    target.addEventListener('pointercancel', onUp)
   }
 
   /** 选中一个 skill：删除 / 和关键字，恢复暂存文本，光标移到末尾 */
@@ -120,8 +149,11 @@ export function ChatInput() {
     prevTextRef.current = val
     setText(val)
     resize()
-    // 触发 slash 菜单
-    if (val.startsWith('/') && !prev.startsWith('/') && allSkills.length > 0) {
+    // slash 触发：/ 出现在文本末尾且是词首（行首或空白后）——消息中段补 / 也能唤起，
+    // 不要求整条以 / 开头（编辑重发场景原文非空，startsWith 恒 false 曾让菜单永远弹不出）
+    const hitOf = (s: string): RegExpExecArray | null => /(^|\s)\/[^\s，]*$/.exec(s)
+    const now = hitOf(val)
+    if (now && !hitOf(prev) && allSkills.length > 0) {
       savedTextRef.current = prev
       setSlashOpen(true)
       setSlashFilter('')
@@ -129,9 +161,9 @@ export function ChatInput() {
     }
     if (!slashOpen) return
     // 关闭 slash 菜单
-    if (!val.startsWith('/')) { savedTextRef.current = ''; closeSlash(); return }
-    // 更新 slash 过滤关键字
-    const afterSlash = val.slice(1)
+    if (!now) { savedTextRef.current = ''; closeSlash(); return }
+    // 更新 slash 过滤关键字（/ 词去掉前导斜杠）
+    const afterSlash = now[0].replace(/^\s*\//, '')
     const saved = savedTextRef.current
     setSlashFilter(saved && afterSlash.endsWith(saved) ? afterSlash.slice(0, -saved.length) : afterSlash)
   }
@@ -170,6 +202,19 @@ export function ChatInput() {
 
   return (
     <div className="chat__inputwrap">
+      <div
+        className="chat__grip"
+        onPointerDown={onGripDown}
+        onDoubleClick={() => {
+          draggedRef.current = false
+          useAppStore.getState().setChatInputMaxH(160)
+          resize()
+        }}
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="拖拽调整输入框高度，双击重置"
+        title="拖拽调整输入框高度 · 双击重置"
+      />
       {/* Slash 命令菜单（向上浮出：不挤占消息列表布局，也不被短窗口裁剪） */}
       {slashOpen && (
         <SlashMenu

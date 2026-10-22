@@ -237,8 +237,8 @@ const desktopAPI: DesktopAPI = {
   // AI
   aiChatStream: (requestId: string, provider: string, baseUrl: string, model: string, messages: unknown, tools: unknown, dispatchMode?: string, projectRoot?: string | null, opts?: { sessionSummary?: string | null; memoryBlock?: string | null; contextSummary?: string | null; systemPrompt?: string }) =>
     ipcRenderer.invoke('ai_chat_stream', { requestId, provider, baseUrl, model, messages, tools, dispatchMode: dispatchMode ?? 'api', projectRoot: projectRoot ?? null, opts: opts ?? null }),
-  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string) =>
-    ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api', cliCommand }),
+  aiTestConnection: (provider: string, baseUrl: string, model: string, dispatchMode?: string, cliCommand?: string, codexCommand?: string) =>
+    ipcRenderer.invoke('ai_test_connection', { provider, baseUrl, model, dispatchMode: dispatchMode ?? 'api', cliCommand, codexCommand }),
   aiCancel: (requestId: string) => ipcRenderer.invoke('ai_cancel', { requestId }),
   answerCliAsk: (askId: string, answer: string) =>
     ipcRenderer.invoke('cli_ask_answer', { askId, answer }) as Promise<boolean>,
